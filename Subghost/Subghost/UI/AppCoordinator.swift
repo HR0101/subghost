@@ -123,7 +123,11 @@ final class AppCoordinator {
 
     func sendPrompt() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let session = watcher.activeSession else { return }
+        guard !text.isEmpty else { return }
+        guard let session = watcher.activeSession else {
+            lastSendError = "送信先の ai-* セッションがありません。Ghosttyで tmux new-session -A -s ai-claude claude を実行してください。"
+            return
+        }
         lastSendError = nil
         Task {
             do {

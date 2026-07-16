@@ -32,7 +32,12 @@ final class MonitoredSession: Identifiable {
 final class GhosttySessionWatcher {
 
     private(set) var sessions: [MonitoredSession] = []
-    var activeSessionName: String?
+    var activeSessionName: String? {
+        didSet {
+            guard oldValue != activeSessionName else { return }
+            UserDefaults.standard.set(activeSessionName, forKey: "activeSessionName")
+        }
+    }
     private(set) var tmuxAvailable = true
 
     /// 状態遷移イベントの通知先（AppCoordinatorが設定）
@@ -100,8 +105,26 @@ final class GhosttySessionWatcher {
         sessions.sort { $0.info.tmuxName < $1.info.tmuxName }
 
         if activeSessionName == nil || !incoming.contains(activeSessionName ?? "") {
-            activeSessionName = sessions.first?.info.tmuxName
+            // 前回選択していたセッションが生きていればそれを優先する
+            let saved = UserDefaults.standard.string(forKey: "activeSessionName")
+            activeSessionName = (saved.flatMap { incoming.contains($0) ? $0 : nil })
+                ?? sessions.first?.info.tmuxName
         }
+    }
+
+    // MARK: - 送信先の切替 (設計書 4.3: 複数セッションの選択)
+
+    /// 送信先セッションを次へ循環切替する（入力モードのTabキー用）
+    func cycleActiveSession() {
+        let names = sessions.map { $0.info.tmuxName }
+        activeSessionName = Self.nextSessionName(in: names, after: activeSession?.info.tmuxName)
+    }
+
+    /// 現在の次にあたるセッション名を返す（末尾なら先頭へ循環）
+    nonisolated static func nextSessionName(in names: [String], after current: String?) -> String? {
+        guard let first = names.first else { return nil }
+        guard let current, let index = names.firstIndex(of: current) else { return first }
+        return names[(index + 1) % names.count]
     }
 
     private func apply(event: DetectorEvent, to session: MonitoredSession) {
