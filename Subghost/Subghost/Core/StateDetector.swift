@@ -25,6 +25,8 @@ nonisolated struct StateDetector: Sendable {
     var stableInterval: TimeInterval = 1.5
     /// completed から idle へ自動遷移するまでの秒数 (設計書 5.2)
     var completedHoldInterval: TimeInterval = 8.0
+    /// thinking固着の保険: プロンプト記号が検出できないCLIでも、この秒数静止したら idle へ戻す
+    var idleFallbackInterval: TimeInterval = 30.0
 
     private(set) var state: AIState = .idle
     private var lastCleanedText: String = ""
@@ -89,6 +91,14 @@ nonisolated struct StateDetector: Sendable {
                 state = .completed
                 completedAt = now
                 return .becameCompleted(preview: Self.extractPreview(from: rawText, profile: profile))
+            }
+            // プロンプト記号が検出できないCLI向けの保険: 長時間静止で idle へ戻す
+            if !changed,
+               let lastChange = lastChangeAt,
+               now.timeIntervalSince(lastChange) >= idleFallbackInterval {
+                state = .idle
+                completedAt = nil
+                return .becameIdle
             }
             return .none
         }

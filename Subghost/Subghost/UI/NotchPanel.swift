@@ -56,6 +56,12 @@ struct NotchMetrics {
 final class NotchPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    /// macOSはウインドウをメニューバー下に押し下げようとするため、
+    /// ノッチ位置（画面最上端）に重ねるには制約を無効化する必要がある
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
 }
 
 // MARK: - コントローラ

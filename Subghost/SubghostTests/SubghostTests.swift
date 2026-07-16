@@ -100,6 +100,24 @@ struct StateDetectorTests {
         #expect(detector.state == .thinking)
     }
 
+    @Test func プロンプト記号が検出できなくても長時間静止でidleへ戻る() {
+        var detector = makeDetector()
+        detector.idleFallbackInterval = 30.0
+        let t0 = Date(timeIntervalSince1970: 0)
+        _ = detector.ingest(rawText: "画面A", at: t0)
+        let stuck = "画面A\nプロンプト記号のない出力"
+        _ = detector.ingest(rawText: stuck, at: t0.addingTimeInterval(0.8))
+        #expect(detector.state == .thinking)
+        // 30秒未満はthinkingのまま
+        let early = detector.ingest(rawText: stuck, at: t0.addingTimeInterval(20.0))
+        #expect(early == .none)
+        #expect(detector.state == .thinking)
+        // 30秒静止でidleへ
+        let event = detector.ingest(rawText: stuck, at: t0.addingTimeInterval(31.0))
+        #expect(event == .becameIdle)
+        #expect(detector.state == .idle)
+    }
+
     @Test func スピナーの変化だけではthinkingにならない() {
         var detector = makeDetector()
         let t0 = Date(timeIntervalSince1970: 0)
