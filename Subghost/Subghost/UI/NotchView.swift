@@ -173,21 +173,31 @@ struct NotchView: View {
                     .foregroundStyle(.white.opacity(0.7))
 
                 // 送信先セッション選択 (設計書 4.3: 複数ある場合はドロップダウン)
+                if let active = coordinator.watcher.activeSession {
+                    StateDot(state: active.state, pulsing: active.state == .thinking, size: 7)
+                }
                 if coordinator.watcher.sessions.count > 1 {
                     Picker("送信先", selection: activeSessionBinding) {
                         ForEach(coordinator.watcher.sessions) { session in
-                            Text(session.info.tmuxName).tag(Optional(session.info.tmuxName))
+                            Text("\(session.info.tmuxName)(\(session.state.displayName))")
+                                .tag(Optional(session.info.tmuxName))
                         }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
-                    .frame(maxWidth: 180)
+                    .environment(\.colorScheme, .dark)
+                    .frame(maxWidth: 220)
                 } else {
                     Text(coordinator.watcher.activeSession?.info.tmuxName ?? "セッションなし")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 Spacer()
+                if coordinator.watcher.sessions.count > 1 {
+                    Text("⇥ 送信先切替")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
                 Text("Esc で閉じる")
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.4))
@@ -207,6 +217,11 @@ struct NotchView: View {
                 .onExitCommand { coordinator.collapse() }
                 .onKeyPress(.upArrow) { historyUp(); return .handled }
                 .onKeyPress(.downArrow) { historyDown(); return .handled }
+                .onKeyPress(.tab) {
+                    guard coordinator.watcher.sessions.count > 1 else { return .ignored }
+                    coordinator.watcher.cycleActiveSession()
+                    return .handled
+                }
 
             // スニペットチップ (設計書 4.4)
             if !coordinator.snippets.snippets.isEmpty {

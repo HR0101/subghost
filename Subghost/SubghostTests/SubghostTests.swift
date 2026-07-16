@@ -163,3 +163,23 @@ struct TextProcessingTests {
         #expect(CLIProfile.match(sessionName: "ai-antigravity").id == "antigravity")
     }
 }
+
+struct SessionSelectionTests {
+
+    @Test func 次のセッション名へ循環する() {
+        let names = ["ai-claude", "ai-claude2", "ai-codex"]
+        #expect(GhosttySessionWatcher.nextSessionName(in: names, after: "ai-claude") == "ai-claude2")
+        #expect(GhosttySessionWatcher.nextSessionName(in: names, after: "ai-claude2") == "ai-codex")
+        #expect(GhosttySessionWatcher.nextSessionName(in: names, after: "ai-codex") == "ai-claude")
+    }
+
+    @Test func 現在が未設定または消滅していたら先頭を返す() {
+        let names = ["ai-claude", "ai-codex"]
+        #expect(GhosttySessionWatcher.nextSessionName(in: names, after: nil) == "ai-claude")
+        #expect(GhosttySessionWatcher.nextSessionName(in: names, after: "ai-gone") == "ai-claude")
+    }
+
+    @Test func セッションが空ならnilを返す() {
+        #expect(GhosttySessionWatcher.nextSessionName(in: [], after: nil) == nil)
+    }
+}
