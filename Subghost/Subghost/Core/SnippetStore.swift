@@ -14,9 +14,9 @@ final class SnippetStore {
     private(set) var snippets: [Snippet] = []
     private(set) var history: [String] = []   // 新しい順
 
-    @ObservationIgnored private let maxHistory = 50
+    private let maxHistory = 50
 
-    @ObservationIgnored private var storeURL: URL {
+    private var storeURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Subghost", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)

@@ -2,31 +2,35 @@
 //  SubghostApp.swift
 //  Subghost
 //
-//  Created by hara ryuto   on 2026/07/16.
+//  Ghostty補助ノッチAIアシスタント
 //
 
 import SwiftUI
-import SwiftData
 
 @main
 struct SubghostApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            MenuBarContent(coordinator: .shared)
+        } label: {
+            MenuBarLabel(coordinator: .shared)
         }
-        .modelContainer(sharedModelContainer)
+
+        Settings {
+            SettingsView()
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AppCoordinator.shared.start()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AppCoordinator.shared.hotkey.unregister()
+        AppCoordinator.shared.watcher.stop()
     }
 }
