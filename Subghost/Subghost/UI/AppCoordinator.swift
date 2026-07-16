@@ -22,11 +22,13 @@ final class AppCoordinator {
 
     let watcher = GhosttySessionWatcher()
     let snippets = SnippetStore()
-    @ObservationIgnored let hotkey = HotkeyManager()
+    let hotkey = HotkeyManager()
     @ObservationIgnored private var panelController: NotchPanelController?
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
 
     private(set) var mode: NotchMode = .compact
+    /// パネルコントローラが算出したノッチ寸法（ビューが形状描画に使う）
+    var notchMetrics: NotchMetrics?
     var isHovering = false {
         didSet { hoverChanged() }
     }

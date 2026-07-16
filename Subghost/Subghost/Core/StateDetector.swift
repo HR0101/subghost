@@ -117,7 +117,7 @@ nonisolated struct StateDetector: Sendable {
         var result = text
         // 残存ANSIエスケープの除去（capture-pane -p でも念のため）
         result = result.replacingOccurrences(
-            of: #"\u{1B}\[[0-9;?]*[a-zA-Z]"#, with: "", options: .regularExpression)
+            of: #"\x{1B}\[[0-9;?]*[a-zA-Z]"#, with: "", options: .regularExpression)
         // プロファイル定義のスピナー除去
         if !profile.spinnerPattern.isEmpty {
             result = result.replacingOccurrences(
