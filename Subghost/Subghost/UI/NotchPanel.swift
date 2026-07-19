@@ -159,6 +159,18 @@ final class NotchPanelController {
             size = NSSize(width: max(metrics.notchWidth + 220, 560), height: 230)
         case .input:
             size = NSSize(width: max(metrics.notchWidth + 280, 640), height: 260)
+        case .choice:
+            // 選択肢の数と文脈行数で高さが変わるため実データから見積もる
+            let choice = coordinator.pendingChoice
+            let optionCount = choice?.options.count ?? 2
+            let detailCount = choice?.detail.count ?? 0
+            let estimated = metrics.topInset + 120
+                + CGFloat(detailCount) * 16
+                + CGFloat(optionCount) * 38
+            size = NSSize(
+                width: max(metrics.notchWidth + 320, 680),
+                height: min(estimated, 480)
+            )
         }
         return NSRect(
             x: metrics.screenFrame.midX - size.width / 2,

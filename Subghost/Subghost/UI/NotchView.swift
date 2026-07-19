@@ -10,6 +10,7 @@ import SwiftUI
 struct NotchView: View {
     @Bindable var coordinator: AppCoordinator
     @FocusState private var inputFocused: Bool
+    @FocusState private var choiceFocused: Bool
     @State private var historyIndex: Int?
 
     private var metrics: NotchMetrics? { coordinator.notchMetrics }
@@ -25,6 +26,7 @@ struct NotchView: View {
                 case .compact: compactContent
                 case .notification: notificationContent
                 case .input: inputContent
+                case .choice: choiceContent
                 }
             }
             .frame(width: contentWidth(for: mode))
@@ -46,13 +48,17 @@ struct NotchView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: mode)
         .onChange(of: mode) { _, newMode in
-            if newMode == .input {
-                historyIndex = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            historyIndex = newMode == .input ? nil : historyIndex
+            inputFocused = false
+            choiceFocused = false
+            // パネルがキーウインドウになるのを待ってからフォーカスを与える
+            guard newMode == .input || newMode == .choice else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                if newMode == .input {
                     inputFocused = true
+                } else {
+                    choiceFocused = true
                 }
-            } else {
-                inputFocused = false
             }
         }
     }
@@ -62,6 +68,7 @@ struct NotchView: View {
         case .compact: return notchWidth + NotchLayout.sideWidth * 2
         case .notification: return max(notchWidth + 220, 560)
         case .input: return max(notchWidth + 280, 640)
+        case .choice: return max(notchWidth + 320, 680)
         }
     }
 
@@ -73,7 +80,7 @@ struct NotchView: View {
             HStack {
                 StateDot(
                     state: coordinator.watcher.activeSession?.state ?? .idle,
-                    pulsing: coordinator.watcher.activeSession?.state == .thinking
+                    pulsing: coordinator.watcher.activeSession?.state.shouldPulse ?? false
                 )
             }
             .frame(width: NotchLayout.sideWidth)
@@ -88,7 +95,7 @@ struct NotchView: View {
                         .foregroundStyle(.gray)
                 } else {
                     ForEach(coordinator.watcher.sessions.prefix(4)) { session in
-                        StateDot(state: session.state, pulsing: session.state == .thinking, size: 6)
+                        StateDot(state: session.state, pulsing: session.state.shouldPulse, size: 6)
                     }
                 }
             }
@@ -96,7 +103,7 @@ struct NotchView: View {
         }
         .frame(height: topInset)
         .contentShape(Rectangle())
-        .onTapGesture { coordinator.openGhostty() }
+        .onTapGesture { coordinator.jumpToTerminal() }
     }
 
     // MARK: - 展開（通知）：応答チラ見せ (設計書 4.2 / 6.2)
@@ -108,11 +115,11 @@ struct NotchView: View {
             Color.clear.frame(height: topInset)   // ノッチ本体を避ける
 
             HStack(spacing: 8) {
-                StateDot(state: session?.state ?? .idle, pulsing: session?.state == .thinking)
+                StateDot(state: session?.state ?? .idle, pulsing: session?.state.shouldPulse ?? false)
                 Text(session?.info.profile.displayName ?? "セッションなし")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
-                if let name = session?.info.tmuxName {
+                if let name = session?.info.displayName {
                     Text(name)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.5))
@@ -135,9 +142,15 @@ struct NotchView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
+            } else if let session, !session.info.isMonitorable {
+                Text("tmuxの外で動いているため状態を読めません。クリックでタブへ移動します")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.orange.opacity(0.9))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
             } else {
                 Text(session == nil
-                     ? "tmuxの ai-* セッションが見つかりません"
+                     ? "AI CLI が見つかりません"
                      : "応答待ち…")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.5))
@@ -146,7 +159,7 @@ struct NotchView: View {
             }
 
             HStack {
-                Text("クリックでGhosttyを開く")
+                Text("クリックで該当タブへ移動")
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.4))
                 Spacer()
@@ -158,7 +171,116 @@ struct NotchView: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 12)
         .contentShape(Rectangle())
-        .onTapGesture { coordinator.openGhostty() }
+        .onTapGesture { coordinator.jumpToTerminal() }
+    }
+
+    // MARK: - 展開（承認/質問）：Approve / Ask
+
+    private var choiceContent: some View {
+        let session = coordinator.choiceSession
+        let choice = coordinator.pendingChoice
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Color.clear.frame(height: topInset)   // ノッチ本体を避ける
+
+            HStack(spacing: 8) {
+                Image(systemName: choice?.kind == .question
+                      ? "questionmark.circle.fill" : "hand.raised.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(choice?.kind == .question ? Color.yellow : Color.orange)
+                Text(session?.info.profile.displayName ?? "")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                if let name = session?.info.displayName {
+                    Text(name)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                Spacer()
+                Text(choice?.kind.displayName ?? "")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+
+            if let choice {
+                // 問いかけの文脈（差分の要約など）
+                if !choice.detail.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(choice.detail.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.55))
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Text(choice.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: 5) {
+                    ForEach(choice.options) { option in
+                        ChoiceOptionRow(option: option, isDefault: option == choice.options.first) {
+                            coordinator.respond(with: option)
+                        }
+                    }
+                }
+            } else {
+                Text("回答待ちの問い合わせはありません")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            if let error = coordinator.lastChoiceError {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            } else {
+                HStack {
+                    Text("数字キーで回答 / ⏎ で先頭を選択")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.4))
+                    Spacer()
+                    Button("ターミナルで開く") { coordinator.jumpToTerminal() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.55))
+                    Text("Esc で閉じる")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+        .focusable()
+        .focused($choiceFocused)
+        .focusEffectDisabled()
+        .onKeyPress { press in handleChoiceKey(press) }
+        .onExitCommand { coordinator.dismissChoice() }
+    }
+
+    /// 数字キー・y/n・Enterで選択肢へ回答する
+    private func handleChoiceKey(_ press: KeyPress) -> KeyPress.Result {
+        guard let choice = coordinator.pendingChoice else { return .ignored }
+
+        if press.key == .return {
+            guard let first = choice.options.first else { return .ignored }
+            coordinator.respond(with: first)
+            return .handled
+        }
+
+        let typed = String(press.characters).lowercased()
+        guard let option = choice.options.first(where: { $0.keystroke.lowercased() == typed }) else {
+            return .ignored
+        }
+        coordinator.respond(with: option)
+        return .handled
     }
 
     // MARK: - 展開（入力）：クイックプロンプト (設計書 4.3 / 4.4)
@@ -174,13 +296,14 @@ struct NotchView: View {
 
                 // 送信先セッション選択 (設計書 4.3: 複数ある場合はドロップダウン)
                 if let active = coordinator.watcher.activeSession {
-                    StateDot(state: active.state, pulsing: active.state == .thinking, size: 7)
+                    StateDot(state: active.state, pulsing: active.state.shouldPulse, size: 7)
                 }
                 if coordinator.watcher.sessions.count > 1 {
                     Picker("送信先", selection: activeSessionBinding) {
-                        ForEach(coordinator.watcher.sessions) { session in
-                            Text("\(session.info.tmuxName)(\(session.state.displayName))")
-                                .tag(Optional(session.info.tmuxName))
+                        // 送信できないセッションは選択肢に出さない
+                        ForEach(coordinator.watcher.sessions.filter(\.info.isMonitorable)) { session in
+                            Text("\(session.info.displayName)（\(session.state.displayName)）")
+                                .tag(Optional(session.info.tty))
                         }
                     }
                     .pickerStyle(.menu)
@@ -188,7 +311,7 @@ struct NotchView: View {
                     .environment(\.colorScheme, .dark)
                     .frame(maxWidth: 220)
                 } else {
-                    Text(coordinator.watcher.activeSession?.info.tmuxName ?? "セッションなし")
+                    Text(coordinator.watcher.activeSession?.info.displayName ?? "セッションなし")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.7))
                 }
@@ -249,8 +372,12 @@ struct NotchView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
             } else if coordinator.watcher.sessions.isEmpty {
+                Text("AI CLI が見つかりません。ターミナルで claude / codex / antigravity を起動してください")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+            } else if coordinator.watcher.activeSession?.info.isMonitorable == false {
                 Text(coordinator.watcher.tmuxAvailable
-                     ? "セッション未検出：Ghosttyで aiclaude 等（tmux new-session -A -s ai-claude claude）を実行してください"
+                     ? "このセッションはtmuxの外で動いているため送信できません。tmux内で起動し直してください"
                      : "tmuxが見つかりません。設定でパスを指定するかインストールしてください")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
@@ -290,7 +417,62 @@ struct NotchView: View {
     }
 }
 
-// MARK: - 状態ドット (設計書 4.1: グレー/青パルス/緑/赤)
+// MARK: - 選択肢の1行 (Approve / Ask)
+
+struct ChoiceOptionRow: View {
+    let option: ChoiceOption
+    /// Enterで選ばれる既定の選択肢か
+    let isDefault: Bool
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    /// 「はい」系は緑、「いいえ」系は赤、それ以外は無彩色で示す
+    private var tint: Color {
+        if option.isAffirmative { return .green }
+        if option.isNegative { return .red }
+        return .white
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Text(option.keystroke.uppercased())
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.black.opacity(0.8))
+                    .frame(width: 18, height: 18)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(tint.opacity(0.85)))
+
+                Text(option.label)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+
+                Spacer()
+
+                if isDefault {
+                    Text("⏎")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.white.opacity(isHovering ? 0.18 : 0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(tint.opacity(isDefault ? 0.5 : 0), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - 状態ドット (設計書 4.1: グレー/青パルス/緑/赤 ＋ 回答待ちの橙/黄)
 
 struct StateDot: View {
     let state: AIState
@@ -301,6 +483,8 @@ struct StateDot: View {
         switch state {
         case .idle: return .gray
         case .thinking: return .blue
+        case .awaitingApproval: return .orange
+        case .awaitingAnswer: return .yellow
         case .completed: return .green
         case .error: return .red
         }

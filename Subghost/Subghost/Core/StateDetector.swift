@@ -15,6 +15,8 @@ nonisolated enum DetectorEvent: Equatable, Sendable {
     case becameCompleted(preview: [String])   // 完了＋チラ見せ用テキスト
     case becameError(preview: [String])
     case becameIdle
+    case becameAwaitingChoice(PendingChoice)  // 承認/質問の選択待ち
+    case choiceResolved                       // 選択待ちが解消（回答済み）
 }
 
 /// セッション1つ分の状態機械。ポーリングごとに `ingest` を呼ぶ。
@@ -27,12 +29,19 @@ nonisolated struct StateDetector: Sendable {
     var completedHoldInterval: TimeInterval = 8.0
     /// thinking固着の保険: プロンプト記号が検出できないCLIでも、この秒数静止したら idle へ戻す
     var idleFallbackInterval: TimeInterval = 30.0
+    /// 回答直後に同じ選択肢が画面に残っている間、再通知を抑制する秒数
+    var answeredSuppressionInterval: TimeInterval = 4.0
 
     private(set) var state: AIState = .idle
+    /// 現在表示中の選択待ちブロック（承認/質問）
+    private(set) var pendingChoice: PendingChoice?
     private var lastCleanedText: String = ""
     private var lastChangeAt: Date?
     private var completedAt: Date?
     private var hasBaseline = false
+    /// ノッチから回答済みの選択肢（残像による再通知を抑制するために保持）
+    private var answeredChoice: PendingChoice?
+    private var answeredAt: Date?
 
     init(profile: CLIProfile) {
         self.profile = profile
@@ -56,8 +65,33 @@ nonisolated struct StateDetector: Sendable {
             lastChangeAt = now
         }
 
+        // 選択待ち（承認/質問）は他のどの判定よりも優先する。
+        // ユーザーが答えるまでCLIは進まないため、completedと誤判定してはならない。
+        if let choice = ChoicePrompt.detect(in: rawText, profile: profile) {
+            // 回答直後は同じ選択肢が画面に残ることがあるため、一定時間は再通知しない
+            if let answered = answeredChoice, answered == choice,
+               let answeredAt, now.timeIntervalSince(answeredAt) < answeredSuppressionInterval {
+                return .none
+            }
+            guard pendingChoice != choice else { return .none }   // 同じ問いを表示し続けている
+            pendingChoice = choice
+            answeredChoice = nil
+            completedAt = nil
+            state = choice.kind == .approval ? .awaitingApproval : .awaitingAnswer
+            return .becameAwaitingChoice(choice)
+        }
+
+        answeredChoice = nil
+        if pendingChoice != nil {
+            // 選択肢が消えた＝ターミナル側で回答済み。処理再開とみなす。
+            pendingChoice = nil
+            state = .thinking
+            lastChangeAt = now
+            return .choiceResolved
+        }
+
         switch state {
-        case .idle, .error, .completed:
+        case .idle, .error, .completed, .awaitingApproval, .awaitingAnswer:
             // 出力が伸長 → thinking (設計書 5.2)
             if changed {
                 state = .thinking
@@ -109,6 +143,19 @@ nonisolated struct StateDetector: Sendable {
         completedAt = nil
         lastChangeAt = now
         guard state != .thinking else { return .none }
+        state = .thinking
+        return .becameThinking
+    }
+
+    /// ノッチから選択肢へ回答した直後に呼ぶ。
+    /// 画面が更新されるまでの間、同じ問いを再通知しないよう記録する。
+    mutating func noteUserAnsweredChoice(at now: Date) -> DetectorEvent {
+        guard let answered = pendingChoice else { return .none }
+        answeredChoice = answered
+        answeredAt = now
+        pendingChoice = nil
+        completedAt = nil
+        lastChangeAt = now
         state = .thinking
         return .becameThinking
     }

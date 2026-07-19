@@ -1,59 +1,100 @@
 # Subghost
 
-Ghosttyで動かすAI CLI(Claude Code / Codex / Antigravity)をMacのノッチから監視・操作する常駐アプリ。
+Ghosttyまたはターミナル.appで動かすAI CLI(Claude Code / Codex / Antigravity)をMacのノッチから監視・操作する常駐アプリ。
 
-- ノッチに各セッションの状態(待機/生成中/完了/エラー)を表示
+- ノッチに各セッションの状態(待機/生成中/**承認待ち**/**質問中**/完了/エラー)を表示
 - 応答完了時にノッチが展開して内容をチラ見せ
+- **権限リクエストや質問をノッチから直接承認・回答**(数字キー / `⏎` / 通知バナーのボタン)
 - `⌥Space` でノッチからプロンプトを直接送信(複数セッションの送信先切替対応)
+- クリックで**該当セッションが動いているタブへ移動**(ターミナル.appはタブ単位)
+- 状態変化を8bit風のアラート音で通知(設定でオン/オフ・音量調整)
 
 ## 前提
 
-- tmux(`brew install tmux`)
 - 各AI CLI(`claude` / `codex` / `antigravity`)
+- tmux（`brew install tmux`）… tmux方式で監視する場合のみ必要。フック方式なら不要
 
-SubghostはtmuxセッションをAI CLIとの橋渡しに使うため、**CLIは `ai-` で始まる名前のtmuxセッション内で起動する必要がある**。tmuxの外で起動したCLIは検出も送信もできない。
+**シェルの設定は不要**。Subghostは実行中プロセスからAI CLIを直接見つけるため、エイリアスもセッションの命名規則もいらない。
 
-## セットアップ:エイリアス登録
+検出には `ps` の実行ファイル名を使う。Claude Codeのようにプロセス名を書き換えるCLIでも、カーネルが持つ実体名は変わらないため確実に判定できる。制御端末を持たないプロセス(GUIアプリが同梱するバイナリなど)は自動的に除外される。
 
-`~/.zshrc` に以下を追加する(各CLI最大4つまで同時追跡):
+## 監視の経路は2つある
 
-```zsh
-# Subghost用: AI CLIをtmuxの ai-* セッション内で起動する(各CLI最大4つ)
-alias aiclaude='tmux new-session -A -s ai-claude claude'
-alias aiclaude2='tmux new-session -A -s ai-claude2 claude'
-alias aiclaude3='tmux new-session -A -s ai-claude3 claude'
-alias aiclaude4='tmux new-session -A -s ai-claude4 claude'
-alias aicodex='tmux new-session -A -s ai-codex codex'
-alias aicodex2='tmux new-session -A -s ai-codex2 codex'
-alias aicodex3='tmux new-session -A -s ai-codex3 codex'
-alias aicodex4='tmux new-session -A -s ai-codex4 codex'
-alias aianti='tmux new-session -A -s ai-antigravity antigravity'
-alias aianti2='tmux new-session -A -s ai-antigravity2 antigravity'
-alias aianti3='tmux new-session -A -s ai-antigravity3 antigravity'
-alias aianti4='tmux new-session -A -s ai-antigravity4 antigravity'
+| 経路 | tmux | 対応CLI | 精度 |
+|---|---|---|---|
+| **フック方式**(推奨) | 不要 | Claude Code / Codex | イベントを直接受信。誤判定なし |
+| tmux方式 | 必要 | 3種すべて | 画面の文字を解析するため推定 |
+
+### フック方式(Claude Code / Codex)
+
+設定の「フック連携」からCLIごとに有効にする。Claude Codeは `~/.claude/settings.json`、Codexは `~/.codex/hooks.json` にSubghost用のフックを追記し、完了・承認要求・質問を**イベントとして直接通知**するようになる。
+
+- **tmuxが不要**。Ghosttyでもそのまま `claude` / `codex` を起動するだけでよい
+- 承認はフックの戻り値で返すため、**キー送出が発生しない**
+- 画面解析をしないので、CLIのUI変更で壊れない
+- 書き換え前に自動でバックアップを取り、既存の設定は残す。いつでも解除できる
+- **Subghostが起動していなければフックは何もせず終了する**ので、アプリを消してもCLIは壊れない
+- **Codexはフックに信頼の承認を求める**。登録後、Codex起動時に出る確認で許可すること
+- Antigravityはフック機構を確認できていないため、tmux方式を使う
+
+### tmux方式(Antigravity、またはフックを使わない場合)
+
+ターミナルで `tmux` を実行してからCLIを起動する。セッション名は何でもよい。
+
+```sh
+tmux          # セッション名は任意。既存に戻るなら tmux attach
+antigravity   # あとは普通に起動するだけ
 ```
 
-追加後、開いているタブでは `source ~/.zshrc` を実行(新しいタブでは不要)。
-
-- `-s ai-〇〇` … セッション名。`ai-` プレフィックスがSubghostの検出条件で、続く名前の前方一致でCLIプロファイル(プロンプト記号・スピナー等の判定パターン)が選ばれる
-- `-A` … 同名セッションが既にあれば新規作成せずそこに再接続する
+どちらの経路も無い場合、セッションは検出され一覧には出るが「監視不可」と表示され、タブへの移動のみ可能。
 
 ## 使い方
 
-1. Ghosttyのタブで `aiclaude` などを実行してCLIを起動
+1. ターミナルのタブで `tmux` を実行し、その中でCLIを起動
 2. Subghostが自動検出し、ノッチに状態が表示される
 3. `⌥Space` でプロンプト入力欄が開く
    - 送信先はドロップダウンまたは `Tab` キーで切替
    - `↑` で履歴呼び出し、`Esc` で閉じる
-4. 応答完了はノッチ展開と通知で知らせる。クリックでGhosttyへ移動
+4. 応答完了はノッチ展開と通知で知らせる。クリックで該当タブへ移動
+
+## ターミナルへの移動(Jump)
+
+ノッチや通知をクリックすると、そのセッションが動いているターミナルへ移動する。
+
+| ターミナル | 移動の精度 |
+|---|---|
+| ターミナル.app | **タブ単位**。該当タブを選択してウインドウを前面化する |
+| Ghostty | アプリの前面化のみ(GhosttyがAppleScript非対応のため) |
+
+- どのターミナルで動いているかは、CLIのtty（tmux内ならアタッチ中クライアントのtty）からプロセスの親をたどって自動判定する
+- 特定できない場合のみ、設定の「移動先のターミナル」が使われる
+- ターミナル.appのタブ選択には**自動化の許可**が必要。初回に許可ダイアログが出るので「OK」を選ぶ
+  - 誤って拒否した場合は システム設定 > プライバシーとセキュリティ > 自動化 > Subghost から有効化する
+
+## 承認リクエスト・質問への回答
+
+CLIが「Do you want to make this edit?」のような選択肢を出して停止すると、Subghostがそれを検出してノッチを展開する。ノッチが自動で閉じることはなく、回答するまで表示され続ける。
+
+| 操作 | 動作 |
+|---|---|
+| 数字キー(`1`〜`9`) | その番号の選択肢を送信 |
+| `⏎` | 先頭の選択肢を送信 |
+| 選択肢のクリック | その選択肢を送信 |
+| `Esc` | 回答せずノッチだけ閉じる(CLIには何も送らない) |
+| 通知バナーの「承認」「拒否」 | はい/いいえに相当する選択肢を送信 |
+
+- 「はい」系は緑、「いいえ」系は赤のバッジで区別する
+- 承認リクエストの通知は時間依存(time-sensitive)扱いのため、集中モード中でも届く
+- `(y/n)` 形式のプロンプトにも対応する
+- ターミナル側で直接答えた場合もノッチは自動的に閉じる
 
 ## tmux基本操作
 
 | したいこと | 操作 |
 |---|---|
 | セッションを残したままタブを離れる(デタッチ) | `Ctrl+b` → `d` |
-| セッションに戻る | 同じエイリアスを再実行(例: `aiclaude`) |
-| セッションを終了 | 中のCLIを終了する、または `tmux kill-session -t ai-claude` |
+| セッションに戻る | `tmux attach` |
+| セッションを終了 | 中のCLIを終了する、または `tmux kill-session -t <名前>` |
 | セッション一覧 | `tmux ls` |
 
 ## ビルド

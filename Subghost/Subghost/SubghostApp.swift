@@ -32,5 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         AppCoordinator.shared.hotkey.unregister()
         AppCoordinator.shared.watcher.stop()
+        // 待たせているフック接続を解放してから終了する（CLIを止めたままにしない）
+        AppCoordinator.shared.watcher.stopHookServer()
     }
 }
