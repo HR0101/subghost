@@ -61,19 +61,22 @@ final class AppCoordinator {
     func start() {
         NotificationManager.shared.setup()
 
-        watcher.onEvent = { [weak self] session, event in
-            self?.handle(event: event, session: session)
-        }
-        watcher.startHookServer()
-        watcher.start()
+        // 監視より先にパネルを用意する。
+        // 起動直後の1回目のポーリングで承認待ちを見つけた場合、
+        // パネルが未生成だとノッチを開けないため。
+        panelController = NotchPanelController(coordinator: self)
+        panelController?.show()
 
         hotkey.onHotkey = { [weak self] in
             self?.toggleInput()
         }
         hotkey.register()
 
-        panelController = NotchPanelController(coordinator: self)
-        panelController?.show()
+        watcher.onEvent = { [weak self] session, event in
+            self?.handle(event: event, session: session)
+        }
+        watcher.startHookServer()
+        watcher.start()
     }
 
     // MARK: - 状態遷移イベント (設計書 4.1 / 4.2)
@@ -251,6 +254,13 @@ final class AppCoordinator {
                 TerminalActivator.activate()
             }
         }
+    }
+
+    // MARK: - 表示先ディスプレイ (追補)
+
+    /// 表示先の設定が変わったときにノッチを配置し直す
+    func reloadDisplayPlacement() {
+        panelController?.relayout()
     }
 
     // MARK: - 内部

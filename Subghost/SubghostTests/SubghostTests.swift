@@ -5,6 +5,8 @@
 //  状態判定ロジック（設計書 5）のユニットテスト
 //
 
+import AppKit
+import CoreGraphics
 import Foundation
 import Testing
 @testable import Subghost
@@ -252,6 +254,301 @@ struct SessionSelectionTests {
     }
 }
 
+// MARK: - ノッチパネルの重なり順・入力設定
+
+@MainActor
+struct NotchPanelConfigTests {
+
+    private func makePanel() -> NSPanel {
+        NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 30),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false)
+    }
+
+    @Test func パネルはメニューバーより上のレベルに置かれる() {
+        let panel = makePanel()
+        NotchPanelController.configure(panel)
+
+        // メニューバー(24)・ステータスバー(25)より上でないと、
+        // 全画面アプリの上に出せずクリックも通らない
+        #expect(panel.level.rawValue > NSWindow.Level.mainMenu.rawValue)
+        #expect(panel.level.rawValue > NSWindow.Level.statusBar.rawValue)
+        #expect(panel.level == NotchPanelController.panelLevel)
+    }
+
+    @Test func isFloatingPanelにレベルを上書きされていない() {
+        // 不具合の再発防止:
+        // isFloatingPanel = true は level を .floating(3) に上書きするため、
+        // 設定順序を誤ると 26 が 3 に潰れる。実際にこれで表示もクリックも壊れた。
+        let panel = makePanel()
+        NotchPanelController.configure(panel)
+
+        #expect(panel.isFloatingPanel)
+        #expect(panel.level.rawValue != NSWindow.Level.floating.rawValue)
+        #expect(panel.level.rawValue == 26)
+    }
+
+    @Test func 全画面スペースにも参加する設定になっている() {
+        let panel = makePanel()
+        NotchPanelController.configure(panel)
+
+        #expect(panel.collectionBehavior.contains(.canJoinAllSpaces))
+        #expect(panel.collectionBehavior.contains(.fullScreenAuxiliary))
+    }
+
+    @Test func マウス入力を受け取る設定になっている() {
+        let panel = makePanel()
+        NotchPanelController.configure(panel)
+
+        #expect(!panel.ignoresMouseEvents)
+    }
+}
+
+// MARK: - メニューバーの表示状態
+
+struct MenuBarVisibilityTests {
+
+    /// 実測のCG座標（原点はメインディスプレイ左上、y軸は下向き）
+    private let dell = CGRect(x: 0, y: 0, width: 2560, height: 1440)
+    private let builtin = CGRect(x: 207, y: 1440, width: 1512, height: 982)
+
+    private func window(layer: Int, _ rect: CGRect) -> MenuBarVisibility.WindowSummary {
+        MenuBarVisibility.WindowSummary(layer: layer, bounds: rect)
+    }
+
+    @Test func 全画面アプリのある画面ではメニューバー無しと判定する() {
+        // 実測: 全画面時、メニューバーのウインドウは内蔵側にしか存在しなかった
+        let windows = [
+            window(layer: 24, CGRect(x: 207, y: 1440, width: 1512, height: 33)),   // 内蔵のメニューバー
+            window(layer: 0, CGRect(x: 0, y: 38, width: 2560, height: 1402)),      // DELLの全画面アプリ
+        ]
+        #expect(!MenuBarVisibility.isMenuBarVisible(windows: windows, onScreen: dell))
+        #expect(MenuBarVisibility.isMenuBarVisible(windows: windows, onScreen: builtin))
+    }
+
+    @Test func メニューバーが出ている画面では表示と判定する() {
+        let windows = [window(layer: 24, CGRect(x: 0, y: 0, width: 2560, height: 30))]
+        #expect(MenuBarVisibility.isMenuBarVisible(windows: windows, onScreen: dell))
+    }
+
+    @Test func 画面全体を覆うレイヤー24のオーバーレイは誤検出しない() {
+        // 実測でスクリーンショットUIがレイヤー24・画面全体で存在していた
+        let windows = [window(layer: 24, CGRect(x: 0, y: 0, width: 2560, height: 1440))]
+        #expect(!MenuBarVisibility.isMenuBarVisible(windows: windows, onScreen: dell))
+    }
+
+    @Test func 別画面のメニューバーを拾わない() {
+        // 内蔵のメニューバーだけがある状態でDELLを問い合わせる
+        let windows = [window(layer: 24, CGRect(x: 207, y: 1440, width: 1512, height: 33))]
+        #expect(!MenuBarVisibility.isMenuBarVisible(windows: windows, onScreen: dell))
+    }
+
+    @Test func 上端から離れた細長いウインドウは誤検出しない() {
+        let windows = [window(layer: 24, CGRect(x: 0, y: 700, width: 2560, height: 30))]
+        #expect(!MenuBarVisibility.isMenuBarVisible(windows: windows, onScreen: dell))
+    }
+
+    @Test func レイヤーが違えばメニューバーとみなさない() {
+        let windows = [window(layer: 0, CGRect(x: 0, y: 0, width: 2560, height: 30))]
+        #expect(!MenuBarVisibility.isMenuBarVisible(windows: windows, onScreen: dell))
+    }
+
+    @Test func 横方向の重なりが半分以下なら別画面とみなす() {
+        // DELLの左端にわずかにかかるだけのウインドウ
+        let windows = [window(layer: 24, CGRect(x: -2000, y: 0, width: 2100, height: 30))]
+        #expect(!MenuBarVisibility.isMenuBarVisible(windows: windows, onScreen: dell))
+    }
+
+    // MARK: - ノッチを出すかどうかの総合判定
+
+    /// 実測: DELLで全画面、メニューバーは内蔵側にのみ存在
+    private var fullScreenOnDell: [MenuBarVisibility.WindowSummary] {
+        [
+            window(layer: 24, CGRect(x: 207, y: 1440, width: 1512, height: 33)),
+            window(layer: 0, CGRect(x: 0, y: 0, width: 2560, height: 38)),
+            window(layer: 0, CGRect(x: 0, y: 38, width: 2560, height: 1402)),
+        ]
+    }
+
+    @Test func 全画面に覆われた画面では隠す() {
+        #expect(!MenuBarVisibility.shouldShowNotch(windows: fullScreenOnDell, onScreen: dell))
+    }
+
+    @Test func 別の画面が全画面でも対象画面のノッチは消さない() {
+        // 不具合の再発防止:
+        // メニューバーはフォーカスされた画面にしか描画されないため、
+        // 「メニューバーが無い」だけを条件にすると対象画面のノッチまで消えていた。
+        let windows = [
+            // DELLが全画面。メニューバーはどこにも描画されていない状況
+            window(layer: 0, CGRect(x: 0, y: 0, width: 2560, height: 1440)),
+        ]
+        // 内蔵は覆われていないので表示し続ける
+        #expect(MenuBarVisibility.shouldShowNotch(windows: windows, onScreen: builtin))
+    }
+
+    @Test func 全画面中でもメニューバーが現れたら表示する() {
+        // 全画面でマウスを上端に運びメニューバーが出た状態
+        let windows = fullScreenOnDell + [
+            window(layer: 24, CGRect(x: 0, y: 0, width: 2560, height: 30)),
+        ]
+        #expect(MenuBarVisibility.shouldShowNotch(windows: windows, onScreen: dell))
+    }
+
+    @Test func 通常のウインドウでは隠さない() {
+        // メニューバーの下に配置された最大化ウインドウ
+        let windows = [
+            window(layer: 0, CGRect(x: 0, y: 30, width: 2560, height: 1410)),
+        ]
+        #expect(!MenuBarVisibility.isCoveredByFullScreenWindow(windows: windows, onScreen: dell))
+        #expect(MenuBarVisibility.shouldShowNotch(windows: windows, onScreen: dell))
+    }
+
+    @Test func 幅の狭いウインドウが上端にあっても全画面とみなさない() {
+        let windows = [
+            window(layer: 0, CGRect(x: 0, y: 0, width: 800, height: 1440)),
+        ]
+        #expect(!MenuBarVisibility.isCoveredByFullScreenWindow(windows: windows, onScreen: dell))
+    }
+
+    @Test func ウインドウが1つも取れない場合は表示する() {
+        // 権限や異常系で一覧が空でも、消えてしまうより出しておく
+        #expect(MenuBarVisibility.shouldShowNotch(windows: [], onScreen: dell))
+    }
+}
+
+// MARK: - ノッチの寸法・配置
+
+struct NotchMetricsTests {
+
+    /// 実測値: DELL S2725DC（外部モニタ、ノッチなし）
+    @Test func 外部モニタでは画面の絶対上端に配置する() {
+        let metrics = NotchMetrics.make(
+            frame: NSRect(x: 0, y: 0, width: 2560, height: 1440),
+            visibleFrame: NSRect(x: 0, y: 0, width: 2560, height: 1410),
+            safeAreaTop: 0,
+            auxiliaryWidths: nil
+        )
+        #expect(!metrics.hasNotch)
+        // visibleFrame.maxY(1410)ではなくframe.maxY(1440)に置く。
+        // 1410だとメニューバーのぶん下にずれてしまう。
+        #expect(metrics.topY == 1440)
+        // 高さは決め打ちではなく実測（1440 - 1410 = 30）
+        #expect(metrics.topInset == 30)
+    }
+
+    /// 実測値: Built-in Retina Display（ノッチあり）
+    @Test func ノッチ搭載画面ではノッチ幅と高さを使う() {
+        let metrics = NotchMetrics.make(
+            frame: NSRect(x: 0, y: -982, width: 1512, height: 982),
+            visibleFrame: NSRect(x: 0, y: -982, width: 1512, height: 950),
+            safeAreaTop: 32,
+            auxiliaryWidths: (left: 663.5, right: 663.5)
+        )
+        #expect(metrics.hasNotch)
+        #expect(metrics.topY == 0)          // frame.maxY
+        #expect(metrics.topInset == 32)     // safeAreaInsets.top
+        #expect(metrics.notchWidth == 185)  // 1512 - 663.5 * 2
+    }
+
+    @Test func ノッチの有無によらず上端は同じ基準で決まる() {
+        let frame = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let withNotch = NotchMetrics.make(
+            frame: frame, visibleFrame: NSRect(x: 0, y: 0, width: 1920, height: 1048),
+            safeAreaTop: 32, auxiliaryWidths: (left: 800, right: 800))
+        let withoutNotch = NotchMetrics.make(
+            frame: frame, visibleFrame: NSRect(x: 0, y: 0, width: 1920, height: 1050),
+            safeAreaTop: 0, auxiliaryWidths: nil)
+
+        #expect(withNotch.topY == withoutNotch.topY)
+        #expect(withNotch.topY == frame.maxY)
+    }
+
+    @Test func メニューバーを測れない場合は既定値を使う() {
+        // メニューバー自動非表示や、副画面にメニューバーが無い構成
+        let metrics = NotchMetrics.make(
+            frame: NSRect(x: 0, y: 0, width: 1920, height: 1080),
+            visibleFrame: NSRect(x: 0, y: 0, width: 1920, height: 1080),
+            safeAreaTop: 0,
+            auxiliaryWidths: nil
+        )
+        #expect(metrics.topInset == NotchMetrics.fallbackMenuBarHeight)
+        #expect(metrics.topY == 1080)
+    }
+
+    @Test func safeAreaがあってもaux情報が無ければ擬似ノッチに倒す() {
+        let metrics = NotchMetrics.make(
+            frame: NSRect(x: 0, y: 0, width: 1512, height: 982),
+            visibleFrame: NSRect(x: 0, y: 0, width: 1512, height: 950),
+            safeAreaTop: 32,
+            auxiliaryWidths: nil
+        )
+        #expect(!metrics.hasNotch)
+        #expect(metrics.notchWidth == NotchMetrics.pseudoNotchWidth)
+        #expect(metrics.topY == 982)
+    }
+}
+
+// MARK: - 表示先ディスプレイの選択
+
+struct DisplaySelectorTests {
+
+    private let builtin = ScreenDescriptor(
+        id: "uuid-builtin", name: "内蔵ディスプレイ", hasNotch: true, isMain: false)
+    private let external = ScreenDescriptor(
+        id: "uuid-studio", name: "Studio Display", hasNotch: false, isMain: true)
+    private let third = ScreenDescriptor(
+        id: "uuid-third", name: "サブモニタ", hasNotch: false, isMain: false)
+
+    private var all: [ScreenDescriptor] { [builtin, external, third] }
+
+    @Test func 自動ではノッチ搭載画面を優先する() {
+        #expect(DisplaySelector.select(from: all, preference: .automatic) == builtin)
+    }
+
+    @Test func 自動でノッチ搭載画面が無ければメインを使う() {
+        let noNotch = [external, third]
+        #expect(DisplaySelector.select(from: noNotch, preference: .automatic) == external)
+    }
+
+    @Test func メイン指定はノッチ搭載画面より優先される() {
+        #expect(DisplaySelector.select(from: all, preference: .main) == external)
+    }
+
+    @Test func 特定のディスプレイを指定できる() {
+        #expect(DisplaySelector.select(from: all, preference: .specific(id: "uuid-third")) == third)
+    }
+
+    @Test func 指定した画面を外すと自動にフォールバックする() {
+        // 外部モニタを取り外した状況
+        let remaining = [builtin]
+        let selected = DisplaySelector.select(from: remaining, preference: .specific(id: "uuid-studio"))
+        #expect(selected == builtin)
+    }
+
+    @Test func 画面が1枚も無ければnilを返す() {
+        #expect(DisplaySelector.select(from: [], preference: .automatic) == nil)
+        #expect(DisplaySelector.select(from: [], preference: .main) == nil)
+    }
+
+    @Test func 設定値の保存と復元が往復する() {
+        #expect(DisplayPreference(storedValue: "") == .automatic)
+        #expect(DisplayPreference(storedValue: "main") == .main)
+        #expect(DisplayPreference(storedValue: "uuid-x") == .specific(id: "uuid-x"))
+
+        #expect(DisplayPreference.automatic.storedValue == "")
+        #expect(DisplayPreference.main.storedValue == "main")
+        #expect(DisplayPreference.specific(id: "uuid-x").storedValue == "uuid-x")
+    }
+
+    @Test func メイン指定でメインが見つからなければ自動に倒す() {
+        // 異常系: どの画面もメインでない
+        let none = [builtin, third]
+        #expect(DisplaySelector.select(from: none, preference: .main) == builtin)
+    }
+}
+
 // MARK: - フック方式
 
 struct HookEventTests {
@@ -448,6 +745,32 @@ struct HookInstallerTests {
     }
 }
 
+struct HookRequestTests {
+
+    @Test func ttyの表記ゆれを吸収する() {
+        // ブリッジは "ttys003" 形式、セッション側は "/dev/ttys003" 形式で保持している。
+        // 正規化しないと永久に一致せず、イベントが捨てられ続ける。
+        #expect(HookRequest.normalizeTTY("ttys003") == "/dev/ttys003")
+        #expect(HookRequest.normalizeTTY("/dev/ttys003") == "/dev/ttys003")
+    }
+
+    @Test func ttyが取れなかった場合はnilにする() {
+        #expect(HookRequest.normalizeTTY("??") == nil)
+        #expect(HookRequest.normalizeTTY("unknown") == nil)
+        #expect(HookRequest.normalizeTTY("") == nil)
+        #expect(HookRequest.normalizeTTY(nil) == nil)
+    }
+
+    @Test func ブリッジは祖先をたどってCLI本体を探す() {
+        let script = HookInstaller.bridgeScript(socketPath: "/tmp/x.sock")
+        // フックの親シェルは制御端末を持たないため、$PPIDだけでは特定できない
+        #expect(script.contains("while"))
+        #expect(script.contains("X-Subghost-Pid"))
+        // ttyは/dev/付きで送る
+        #expect(script.contains("/dev/$term"))
+    }
+}
+
 struct HTTPParserTests {
 
     @Test func リクエストを解析する() {
@@ -620,6 +943,77 @@ struct ChoicePromptTests {
         3. 三番目の項目
         """
         #expect(ChoicePrompt.detect(in: screen, profile: .claude) == nil)
+    }
+}
+
+// MARK: - 起動時に既存セッションの状態を引き継ぐ
+
+struct InitialAdoptionTests {
+
+    @Test func 起動前から承認待ちで止まっているセッションを拾う() {
+        var detector = StateDetector(profile: .claude)
+        let screen = """
+        Do you want to run this command?
+        ❯ 1. Yes
+          2. No
+        """
+        // 初回の取り込みでいきなり承認待ちを検出できること
+        let event = detector.adoptCurrentState(rawText: screen, at: Date(timeIntervalSince1970: 0))
+        guard case .becameAwaitingChoice(let choice) = event else {
+            Issue.record("承認待ちを拾えなかった: \(event)")
+            return
+        }
+        #expect(detector.state == .awaitingApproval)
+        #expect(choice.options.count == 2)
+    }
+
+    @Test func 起動時に生成中なら生成中として引き継ぐ() {
+        var detector = StateDetector(profile: .claude)
+        let screen = "✻ Thinking… (esc to interrupt)"
+        let event = detector.adoptCurrentState(rawText: screen, at: Date(timeIntervalSince1970: 0))
+        #expect(event == .becameThinking)
+        #expect(detector.state == .thinking)
+    }
+
+    @Test func 起動前に完了していた応答で完了通知を出さない() {
+        var detector = StateDetector(profile: .claude)
+        let screen = """
+        処理が完了しました。
+        ╭────────────╮
+        │ >          │
+        ╰────────────╯
+        """
+        // 起動前に終わっていた作業を「今完了した」と誤報してはいけない
+        let event = detector.adoptCurrentState(rawText: screen, at: Date(timeIntervalSince1970: 0))
+        #expect(event == .none)
+        #expect(detector.state == .idle)
+    }
+
+    @Test func 引き継ぎ後は通常の差分判定に戻る() {
+        var detector = StateDetector(profile: .claude)
+        let t0 = Date(timeIntervalSince1970: 0)
+        #expect(detector.needsInitialAdoption)
+
+        _ = detector.adoptCurrentState(rawText: "待機中の画面", at: t0)
+        #expect(!detector.needsInitialAdoption)
+
+        // 以降は出力の伸長で生成中になる
+        let event = detector.ingest(rawText: "待機中の画面\n新しい出力", at: t0.addingTimeInterval(1))
+        #expect(event == .becameThinking)
+    }
+
+    @Test func 引き継ぎ直後に同じ承認画面でも二重通知しない() {
+        var detector = StateDetector(profile: .claude)
+        let t0 = Date(timeIntervalSince1970: 0)
+        let screen = """
+        Do you want to run this command?
+        ❯ 1. Yes
+          2. No
+        """
+        _ = detector.adoptCurrentState(rawText: screen, at: t0)
+        let repeated = detector.ingest(rawText: screen, at: t0.addingTimeInterval(1))
+        #expect(repeated == .none)
+        #expect(detector.state == .awaitingApproval)
     }
 }
 

@@ -151,8 +151,51 @@ final class SessionWatcher {
             guard let target = session.info.tmuxTarget,
                   let text = await TmuxClient.capturePane(target: target) else { continue }
             session.detector.stableInterval = stable
-            let event = session.detector.ingest(rawText: text, at: now)
+
+            // 初めて見るセッションは、差分ではなく現在の画面から状態を推定する。
+            // Subghost起動前から承認待ちで止まっているものを取りこぼさないため。
+            let event = session.detector.needsInitialAdoption
+                ? session.detector.adoptCurrentState(rawText: text, at: now)
+                : session.detector.ingest(rawText: text, at: now)
             apply(event: event, to: session)
+        }
+
+        writeStateDumpIfEnabled()
+    }
+
+    /// 内部状態をJSONで書き出す（診断用）。
+    /// `defaults write com.HR.Subghost writeStateDump -bool true` で有効になる。
+    /// 常駐アプリはUIしか手掛かりが無く原因調査が難しいため、外から観測できる口を用意する。
+    private func writeStateDumpIfEnabled(trigger: String = "poll") {
+        guard UserDefaults.standard.bool(forKey: "writeStateDump") else { return }
+
+        let payload: [String: Any] = [
+            "trigger": trigger,
+            "updatedAt": ISO8601DateFormatter().string(from: Date()),
+            "activeSessionName": activeSessionName ?? "(なし)",
+            "hookServerRunning": hookServerRunning,
+            "tmuxAvailable": tmuxAvailable,
+            "sessions": sessions.map { session in
+                [
+                    "tty": session.info.tty,
+                    "pid": Int(session.info.pid),
+                    "profile": session.info.profile.id,
+                    "state": session.state.rawValue,
+                    "isMonitorable": session.info.isMonitorable,
+                    "monitoringSource": session.info.monitoringSource,
+                    "hookSessionID": session.info.hookSessionID ?? "(なし)",
+                    "tmuxTarget": session.info.tmuxTarget ?? "(なし)",
+                ]
+            },
+        ]
+        let url = HookInstaller.supportDirectory.appendingPathComponent("run/state.json")
+        do {
+            let data = try JSONSerialization.data(
+                withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // 握り潰すと「出力されない理由」が分からなくなるため必ず記録する
+            NSLog("Subghost: 状態ダンプの書き出しに失敗しました: \(error.localizedDescription)")
         }
     }
 
@@ -188,6 +231,18 @@ final class SessionWatcher {
                 ?? sessions.first { $0.info.isMonitorable }?.info.tty
                 ?? sessions.first?.info.tty
         }
+        preferMonitorableSession()
+    }
+
+    /// 送信先が監視できないセッションのままなら、監視できるものへ移す。
+    ///
+    /// フックは「CLIが動いたとき」にしか発火しないため、放置されたセッションは
+    /// いつまでも監視不可のままになる。そちらが選ばれていると、実際には動作している
+    /// セッションがあるのに「監視できません」と表示され続けてしまう。
+    private func preferMonitorableSession() {
+        guard let active = activeSession, !active.info.isMonitorable else { return }
+        guard let better = sessions.first(where: { $0.info.isMonitorable }) else { return }
+        activeSessionName = better.info.tty
     }
 
     // MARK: - 送信先の切替 (設計書 4.3: 複数セッションの選択)
@@ -273,6 +328,16 @@ final class SessionWatcher {
     /// フック受信サーバを起動する。失敗しても監視自体は続ける（tmux方式が残る）。
     func startHookServer() {
         guard hookServer == nil else { return }
+
+        // 既に登録済みなら、ブリッジスクリプトを最新の内容に更新しておく。
+        // スクリプト側の不具合修正を、ユーザーが再登録しなくても反映させるため。
+        if HookTarget.allCases.contains(where: { HookInstaller.isInstalled($0) }) {
+            do {
+                try HookInstaller.installBridgeScript()
+            } catch {
+                NSLog("Subghost: ブリッジスクリプトの更新に失敗しました: \(error.localizedDescription)")
+            }
+        }
         let server = HookServer(socketPath: HookInstaller.socketPath)
         server.onRequest = { [weak self] request, connection in
             // サーバは専用スレッドで動くため、状態更新はメインアクターへ移す
@@ -307,13 +372,18 @@ final class SessionWatcher {
             return
         }
 
-        var session = matchSession(tty: request.tty, hookSessionID: event.sessionID)
-        if session == nil, request.tty != nil {
+        var session = matchSession(request: request, event: event)
+        if session == nil {
             // psの巡回がまだ追いついていない場合があるので一度だけ取り直す
             await pollOnce()
-            session = matchSession(tty: request.tty, hookSessionID: event.sessionID)
+            session = matchSession(request: request, event: event)
         }
         guard let session else {
+            // どのセッションにも紐づかなかったことを記録する（原因調査のため）
+            NSLog("Subghost: フック \(event.kind.rawValue) の宛先セッションが見つかりません "
+                + "(pid=\(request.pid.map(String.init) ?? "なし") tty=\(request.tty ?? "なし") "
+                + "sessions=\(sessions.count))")
+            writeStateDumpIfEnabled(trigger: "hook:unmatched:\(event.kind.rawValue)")
             connection.respondPassthrough()
             return
         }
@@ -323,15 +393,32 @@ final class SessionWatcher {
         info.hookSessionID = event.sessionID
         info.projectName = event.projectName
         session.replaceInfoPreservingState(info)
+        // 実際に動いているセッションを送信先にする
+        preferMonitorableSession()
 
         applyHook(event: event, to: session, connection: connection)
+        writeStateDumpIfEnabled(trigger: "hook:\(event.kind.rawValue)")
     }
 
-    /// ttyを優先し、無ければCLI側セッションIDで突き合わせる
-    private func matchSession(tty: String?, hookSessionID: String) -> MonitoredSession? {
-        if let tty, let match = sessions.first(where: { $0.info.tty == tty }) { return match }
-        guard !hookSessionID.isEmpty else { return nil }
-        return sessions.first { $0.info.hookSessionID == hookSessionID }
+    /// フックのイベントを既知のセッションに突き合わせる。
+    /// 確実な順に pid → tty → セッションID → 作業ディレクトリ の順で試す。
+    private func matchSession(request: HookRequest, event: HookEvent) -> MonitoredSession? {
+        if let pid = request.pid, let match = sessions.first(where: { $0.info.pid == pid }) {
+            return match
+        }
+        if let tty = request.tty, let match = sessions.first(where: { $0.info.tty == tty }) {
+            return match
+        }
+        if !event.sessionID.isEmpty,
+           let match = sessions.first(where: { $0.info.hookSessionID == event.sessionID }) {
+            return match
+        }
+        // 最後の手段: 同じ作業ディレクトリのセッションが1つだけならそれとみなす
+        if let project = event.projectName {
+            let candidates = sessions.filter { $0.info.projectName == project }
+            if candidates.count == 1 { return candidates.first }
+        }
+        return nil
     }
 
     private func applyHook(

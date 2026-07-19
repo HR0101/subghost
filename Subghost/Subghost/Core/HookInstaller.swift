@@ -119,12 +119,33 @@ nonisolated enum HookInstaller {
         SOCK="\(socketPath)"
         [ -S "$SOCK" ] || exit 0
 
-        # 親プロセス(CLI)の制御端末。どのタブで動いているかの手がかりになる。
-        TTY=$(ps -o tty= -p $PPID 2>/dev/null | tr -d ' ')
+        # どのセッションのイベントかを特定するため、CLI本体のpidとttyを探す。
+        #
+        # フックはCLIから "/bin/sh -c ..." 経由で起動され、この中間シェルは
+        # 制御端末を持たない（tty が "??" になる）。そのため親を1段見るだけでは
+        # 特定できず、祖先をたどって最初に制御端末を持つプロセス＝CLI本体を探す。
+        AGENT_TTY=""
+        AGENT_PID=""
+        cur=$PPID
+        depth=0
+        while [ "$cur" -gt 1 ] && [ "$depth" -lt 10 ]; do
+            line=$(ps -o ppid=,tty= -p "$cur" 2>/dev/null) || break
+            [ -z "$line" ] && break
+            parent=$(echo $line | awk '{print $1}')
+            term=$(echo $line | awk '{print $2}')
+            if [ -n "$term" ] && [ "$term" != "??" ]; then
+                AGENT_TTY="/dev/$term"
+                AGENT_PID="$cur"
+                break
+            fi
+            cur=$parent
+            depth=$((depth + 1))
+        done
 
         curl -s -m \(permissionTimeoutSeconds) --unix-socket "$SOCK" \\
              -H 'Content-Type: application/json' \\
-             -H "X-Subghost-Tty: ${TTY:-??}" \\
+             -H "X-Subghost-Tty: ${AGENT_TTY:-unknown}" \\
+             -H "X-Subghost-Pid: ${AGENT_PID:-0}" \\
              --data-binary @- \\
              "http://localhost/hook?source=$1" 2>/dev/null || exit 0
         exit 0

@@ -20,7 +20,16 @@ import Foundation
 nonisolated struct HookRequest: Sendable {
     let source: String          // "claude" 等
     let tty: String?            // ブリッジが付けるヘッダ由来。取れないこともある。
+    let pid: Int32?             // CLI本体のpid。ttyより確実にセッションを特定できる。
     let body: Data
+
+    /// ttyの表記ゆれを吸収する（"ttys003" → "/dev/ttys003"）
+    static func normalizeTTY(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != "??", trimmed != "unknown" else { return nil }
+        return trimmed.hasPrefix("/dev/") ? trimmed : "/dev/" + trimmed
+    }
 }
 
 // MARK: - サーバ
@@ -163,7 +172,8 @@ final class HookServer: @unchecked Sendable {
         }
         let request = HookRequest(
             source: parsed.query["source"] ?? "unknown",
-            tty: parsed.headers["x-subghost-tty"].flatMap { $0.isEmpty || $0 == "??" ? nil : $0 },
+            tty: HookRequest.normalizeTTY(parsed.headers["x-subghost-tty"]),
+            pid: parsed.headers["x-subghost-pid"].flatMap { Int32($0) }.flatMap { $0 > 0 ? $0 : nil },
             body: parsed.body
         )
         guard let onRequest else {
