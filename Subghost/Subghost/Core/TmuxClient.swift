@@ -83,37 +83,81 @@ nonisolated enum TmuxClient {
 
     // MARK: - 高レベルAPI
 
-    /// `tmux list-sessions` で "ai-*" セッションを列挙する (設計書 10.2)
-    static func listAISessions() async -> [String] {
-        guard let result = try? await run(["list-sessions", "-F", "#{session_name}"]),
-              result.succeeded else { return [] }
+    /// 全ペインを列挙し、pty → ペイン宛先（"session:0.1"）の対応表を返す。
+    /// これによりセッション名の命名規則に依存せずtmux内のプロセスを紐づけられる。
+    static func paneTargetsByTTY() async -> [String: String] {
+        guard let result = try? await run([
+            "list-panes", "-a", "-F", "#{pane_tty}|#{session_name}:#{window_index}.#{pane_index}",
+        ]), result.succeeded else { return [:] }
+        return parsePaneTargets(result.stdout)
+    }
+
+    /// list-panesの出力を解析する（テスト対象の純粋ロジック）
+    static func parsePaneTargets(_ output: String) -> [String: String] {
+        var map: [String: String] = [:]
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let tty = parts[0].trimmingCharacters(in: .whitespaces)
+            let target = parts[1].trimmingCharacters(in: .whitespaces)
+            guard !tty.isEmpty, !target.isEmpty else { continue }
+            map[tty] = target
+        }
+        return map
+    }
+
+    /// セッションにアタッチしているクライアントのtty（例 "/dev/ttys004"）を返す。
+    /// どのターミナルのどのタブで動いているかを特定するために使う (Jump)。
+    /// デタッチ中のセッションでは nil。
+    static func clientTTY(session: String) async -> String? {
+        guard let result = try? await run(["list-clients", "-t", session, "-F", "#{client_tty}"]),
+              result.succeeded else { return nil }
         return result.stdout
             .split(separator: "\n")
-            .map(String.init)
-            .filter { $0.hasPrefix("ai-") }
-            .sorted()
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
     }
 
     /// `tmux capture-pane -p` でペインのプレーンテキストを取得する (設計書 5.1)
-    static func capturePane(session: String) async -> String? {
-        guard let result = try? await run(["capture-pane", "-p", "-J", "-t", session]),
+    static func capturePane(target: String) async -> String? {
+        guard let result = try? await run(["capture-pane", "-p", "-J", "-t", target]),
               result.succeeded else { return nil }
         return result.stdout
     }
 
     /// `tmux send-keys` でプロンプトを送信する (設計書 4.3)
     /// テキストは `-l`（リテラル）で送り、Enterは別コマンドで送る。
-    static func sendPrompt(_ text: String, to session: String) async throws {
+    static func sendPrompt(_ text: String, to target: String) async throws {
         let sanitized = sanitize(text)
         guard !sanitized.isEmpty else { return }
 
-        let sendText = try await run(["send-keys", "-t", session, "-l", "--", sanitized])
+        let sendText = try await run(["send-keys", "-t", target, "-l", "--", sanitized])
         guard sendText.succeeded else {
             throw TmuxError.launchFailed(sendText.stderr.isEmpty ? "send-keys failed" : sendText.stderr)
         }
         // TUIがペーストを処理してからEnterを送る
         try? await Task.sleep(for: .milliseconds(120))
-        let sendEnter = try await run(["send-keys", "-t", session, "Enter"])
+        let sendEnter = try await run(["send-keys", "-t", target, "Enter"])
+        guard sendEnter.succeeded else {
+            throw TmuxError.launchFailed(sendEnter.stderr.isEmpty ? "send-keys Enter failed" : sendEnter.stderr)
+        }
+    }
+
+    /// 選択肢への回答キーを送信する（Approve / Ask）
+    /// 番号選択メニューは番号キーだけで確定するため、Enterは needsEnter のときのみ送る。
+    static func sendChoice(_ option: ChoiceOption, to target: String) async throws {
+        let key = sanitize(option.keystroke)
+        guard !key.isEmpty else { return }
+
+        let sendKey = try await run(["send-keys", "-t", target, "-l", "--", key])
+        guard sendKey.succeeded else {
+            throw TmuxError.launchFailed(sendKey.stderr.isEmpty ? "send-keys failed" : sendKey.stderr)
+        }
+        guard option.needsEnter else { return }
+
+        // TUIがキー入力を処理してからEnterを送る
+        try? await Task.sleep(for: .milliseconds(120))
+        let sendEnter = try await run(["send-keys", "-t", target, "Enter"])
         guard sendEnter.succeeded else {
             throw TmuxError.launchFailed(sendEnter.stderr.isEmpty ? "send-keys Enter failed" : sendEnter.stderr)
         }

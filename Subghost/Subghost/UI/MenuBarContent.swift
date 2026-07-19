@@ -12,7 +12,10 @@ struct MenuBarLabel: View {
 
     private var symbol: String {
         let states = coordinator.watcher.sessions.map(\.state)
+        // 回答待ちは処理が止まっているため、エラーの次に優先して知らせる
         if states.contains(.error) { return "exclamationmark.triangle" }
+        if states.contains(.awaitingApproval) { return "hand.raised" }
+        if states.contains(.awaitingAnswer) { return "questionmark.circle" }
         if states.contains(.thinking) { return "ellipsis.circle" }
         if states.contains(.completed) { return "checkmark.circle" }
         return "circle.dotted"
@@ -28,16 +31,18 @@ struct MenuBarContent: View {
 
     var body: some View {
         if coordinator.watcher.sessions.isEmpty {
-            Text(coordinator.watcher.tmuxAvailable
-                 ? "ai-* セッション未検出"
-                 : "tmuxが見つかりません")
+            Text("AI CLI が見つかりません")
         } else {
             ForEach(coordinator.watcher.sessions) { session in
                 Button {
-                    coordinator.watcher.activeSessionName = session.info.tmuxName
+                    coordinator.watcher.activeSessionName = session.info.tty
                 } label: {
-                    let mark = session.info.tmuxName == coordinator.watcher.activeSessionName ? "✓ " : "　"
-                    Text("\(mark)\(session.info.tmuxName) — \(session.state.displayName)")
+                    let mark = session.info.tty == coordinator.watcher.activeSessionName ? "✓ " : "　"
+                    // tmux外のセッションは検出のみで、状態を読めないことを明示する
+                    let status = session.info.isMonitorable
+                        ? session.state.displayName
+                        : "監視不可（tmux外）"
+                    Text("\(mark)\(session.info.profile.displayName) \(session.info.displayName) — \(status)")
                 }
             }
         }
@@ -47,8 +52,8 @@ struct MenuBarContent: View {
         Button("クイックプロンプト（⌥Space）") {
             coordinator.expandInput()
         }
-        Button("Ghosttyを開く") {
-            GhosttyActivator.activate()
+        Button("該当タブへ移動") {
+            coordinator.jumpToTerminal()
         }
 
         Divider()
