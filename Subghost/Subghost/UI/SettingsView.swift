@@ -29,6 +29,7 @@ private struct GeneralSettingsView: View {
     @AppStorage("notificationsEnabled") private var notificationsEnabled = true
     @AppStorage("soundEnabled") private var soundEnabled = true
     @AppStorage("soundVolume") private var soundVolume = Double(SoundAlerts.defaultVolume)
+    @AppStorage(DisplayPreference.userDefaultsKey) private var notchDisplay = ""
     @AppStorage("preferredTerminal") private var preferredTerminal = ""
     @AppStorage("tmuxPath") private var tmuxPath = ""
 
@@ -74,6 +75,26 @@ private struct GeneralSettingsView: View {
                         .disabled(!soundEnabled)
                     }
                 }
+            }
+            Section("表示先ディスプレイ") {
+                Picker("ノッチを表示する画面", selection: $notchDisplay) {
+                    Text("自動（ノッチ搭載画面を優先）").tag("")
+                    Text("メインディスプレイ").tag("main")
+                    Divider()
+                    ForEach(NSScreen.screens.map(\.descriptor)) { screen in
+                        Text(screen.hasNotch ? "\(screen.name)（ノッチあり）" : screen.name)
+                            .tag(screen.id)
+                    }
+                }
+                .onChange(of: notchDisplay) { _, _ in
+                    AppCoordinator.shared.reloadDisplayPlacement()
+                }
+                Text("ノッチの無い画面を選んだ場合は、メニューバー直下に同じ形のバーを表示します。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("指定した画面を取り外すと、自動選択に戻ります。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("ターミナル") {
                 Picker("移動先のターミナル", selection: $preferredTerminal) {

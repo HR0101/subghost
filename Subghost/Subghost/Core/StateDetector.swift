@@ -47,6 +47,39 @@ nonisolated struct StateDetector: Sendable {
         self.profile = profile
     }
 
+    /// まだ一度も画面を取り込んでいない（起動時の状態推定が必要）か
+    var needsInitialAdoption: Bool { !hasBaseline }
+
+    /// Subghost起動時、すでに動いているCLIの「現在の状態」を画面から推定する。
+    ///
+    /// 通常の `ingest` は差分（画面が伸びた等）から状態を判断するため、
+    /// 初回は基準値を置くだけで待機のままになる。それだと起動前から
+    /// 承認待ちで止まっているセッションを取りこぼす。
+    ///
+    /// 完了は意図的に返さない。Subghost起動前に終わっていた応答について
+    /// 「完了しました」と通知や音を出すのは、ユーザーにとって誤報だからである。
+    mutating func adoptCurrentState(rawText: String, at now: Date) -> DetectorEvent {
+        hasBaseline = true
+        lastCleanedText = Self.clean(rawText, profile: profile)
+        lastChangeAt = now
+
+        // 応答待ちで止まっているものは、今も操作を必要としているので必ず拾う
+        if let choice = ChoicePrompt.detect(in: rawText, profile: profile) {
+            pendingChoice = choice
+            state = choice.kind == .approval ? .awaitingApproval : .awaitingAnswer
+            return .becameAwaitingChoice(choice)
+        }
+
+        // 実行中を示す表示が出ていれば生成中とみなす
+        if Self.matches(pattern: profile.busyPattern, in: lastCleanedText) {
+            state = .thinking
+            return .becameThinking
+        }
+
+        state = .idle
+        return .none
+    }
+
     /// capture-paneの生テキストを取り込み、状態遷移イベントを返す。
     mutating func ingest(rawText: String, at now: Date) -> DetectorEvent {
         let cleaned = Self.clean(rawText, profile: profile)

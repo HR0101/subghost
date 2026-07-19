@@ -143,7 +143,7 @@ struct NotchView: View {
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
             } else if let session, !session.info.isMonitorable {
-                Text("tmuxの外で動いているため状態を読めません。クリックでタブへ移動します")
+                Text("このセッションはまだ状態を読めません。フック連携を有効にしていれば、CLIが動き出した時点で監視が始まります")
                     .font(.system(size: 12))
                     .foregroundStyle(.orange.opacity(0.9))
                     .frame(maxWidth: .infinity, alignment: .leading)
