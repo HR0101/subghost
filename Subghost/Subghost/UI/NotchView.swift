@@ -27,6 +27,7 @@ struct NotchView: View {
                 case .notification: notificationContent
                 case .input: inputContent
                 case .choice: choiceContent
+                case .sessions: sessionsContent
                 }
             }
             .frame(width: contentWidth(for: mode))
@@ -66,9 +67,10 @@ struct NotchView: View {
     private func contentWidth(for mode: NotchMode) -> CGFloat {
         switch mode {
         case .compact: return notchWidth + NotchLayout.sideWidth * 2
-        case .notification: return max(notchWidth + 220, 560)
+        case .notification: return max(notchWidth + 280, 620)
         case .input: return max(notchWidth + 280, 640)
         case .choice: return max(notchWidth + 320, 680)
+        case .sessions: return max(notchWidth + 320, 660)
         }
     }
 
@@ -78,10 +80,7 @@ struct NotchView: View {
         HStack(spacing: 0) {
             // 左余白：アクティブセッションの状態
             HStack {
-                StateDot(
-                    state: coordinator.watcher.activeSession?.state ?? .idle,
-                    pulsing: coordinator.watcher.activeSession?.state.shouldPulse ?? false
-                )
+                PixelGhostView(state: coordinator.watcher.activeSession?.state ?? .idle)
             }
             .frame(width: NotchLayout.sideWidth)
 
@@ -115,7 +114,7 @@ struct NotchView: View {
             Color.clear.frame(height: topInset)   // ノッチ本体を避ける
 
             HStack(spacing: 8) {
-                StateDot(state: session?.state ?? .idle, pulsing: session?.state.shouldPulse ?? false)
+                PixelGhostView(state: session?.state ?? .idle, pixelSize: 2.5)
                 Text(session?.info.profile.displayName ?? "セッションなし")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
@@ -131,16 +130,21 @@ struct NotchView: View {
             }
 
             if let preview = session?.preview, !preview.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(preview.enumerated()), id: \.offset) { _, line in
-                        Text(line)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .lineLimit(1)
+                // 応答は長くなるため、折り返して読めるようにし、スクロールできるようにする
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(preview.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.white.opacity(0.88))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
                     }
+                    .padding(10)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
+                .frame(maxWidth: .infinity, maxHeight: 210, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
             } else if let session, !session.info.isMonitorable {
                 Text("このセッションはまだ状態を読めません。フック連携を有効にしていれば、CLIが動き出した時点で監視が始まります")
@@ -172,6 +176,41 @@ struct NotchView: View {
         .padding(.bottom, 12)
         .contentShape(Rectangle())
         .onTapGesture { coordinator.jumpToTerminal() }
+    }
+
+    // MARK: - 展開（一覧）：複数CLIをまとめて見る
+
+    private var sessionsContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Color.clear.frame(height: topInset)   // ノッチ本体を避ける
+
+            HStack(spacing: 8) {
+                PixelGhostView(state: coordinator.watcher.activeSession?.state ?? .idle, pixelSize: 2.5)
+                Text("実行中のAI CLI")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("\(coordinator.watcher.sessions.count)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+                Spacer()
+                Text("クリックで移動 / ✈ で送信")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+
+            VStack(spacing: 4) {
+                ForEach(coordinator.watcher.sessions) { session in
+                    SessionRow(
+                        session: session,
+                        isActive: session.info.tty == coordinator.watcher.activeSessionName,
+                        onJump: { coordinator.jump(to: session) },
+                        onPrompt: { coordinator.promptSession(session) }
+                    )
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
     }
 
     // MARK: - 展開（承認/質問）：Approve / Ask
@@ -228,6 +267,13 @@ struct NotchView: View {
                             coordinator.respond(with: option)
                         }
                     }
+                }
+
+                // 送れないのに押せるように見せると誤解を生むため、その旨を明示する
+                if session?.canRespondToChoice == false {
+                    Text("このセッションへは回答を送れません（表示のみ）。ターミナルで選んでください")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange.opacity(0.9))
                 }
             } else {
                 Text("回答待ちの問い合わせはありません")
@@ -300,8 +346,7 @@ struct NotchView: View {
                 }
                 if coordinator.watcher.sessions.count > 1 {
                     Picker("送信先", selection: activeSessionBinding) {
-                        // 送信できないセッションは選択肢に出さない
-                        ForEach(coordinator.watcher.sessions.filter(\.info.isMonitorable)) { session in
+                        ForEach(coordinator.watcher.sessions) { session in
                             Text("\(session.info.displayName)（\(session.state.displayName)）")
                                 .tag(Optional(session.info.tty))
                         }
@@ -391,7 +436,7 @@ struct NotchView: View {
     private var activeSessionBinding: Binding<String?> {
         Binding(
             get: { coordinator.watcher.activeSessionName },
-            set: { coordinator.watcher.activeSessionName = $0 }
+            set: { if let tty = $0 { coordinator.watcher.chooseActiveSession(tty) } }
         )
     }
 
@@ -414,6 +459,76 @@ struct NotchView: View {
             historyIndex = index - 1
             coordinator.inputText = coordinator.snippets.history[index - 1]
         }
+    }
+}
+
+// MARK: - セッション一覧の1行
+
+struct SessionRow: View {
+    let session: MonitoredSession
+    /// 現在の送信先か
+    let isActive: Bool
+    /// 行本体を押したとき（そのタブへ移動）
+    let onJump: () -> Void
+    /// 送信ボタンを押したとき（このセッションへプロンプトを送る）
+    let onPrompt: () -> Void
+
+    @State private var isHovering = false
+    @State private var isPromptHovering = false
+
+    var body: some View {
+        // 入れ子のButtonは正しく動作しないため、移動と送信を並べて配置する
+        HStack(spacing: 6) {
+            Button(action: onJump) {
+                HStack(spacing: 10) {
+                    StateDot(state: session.state, pulsing: session.state.shouldPulse, size: 8)
+
+                    Text(session.info.profile.displayName)
+                        .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                        .foregroundStyle(.white.opacity(0.95))
+
+                    Text(session.info.displayName)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 8)
+
+                    // 監視できていない場合は状態ではなくその旨を出す（嘘をつかない）
+                    Text(session.info.isMonitorable ? session.state.displayName : "監視不可")
+                        .font(.system(size: 11))
+                        .foregroundStyle(session.info.isMonitorable
+                                         ? .white.opacity(0.7) : .orange.opacity(0.8))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onPrompt) {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(isPromptHovering ? 0.95 : 0.55))
+                    .frame(width: 24, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(.white.opacity(isPromptHovering ? 0.2 : 0.08))
+                    )
+            }
+            .buttonStyle(.plain)
+            .onHover { isPromptHovering = $0 }
+            .help("このセッションへプロンプトを送る")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.white.opacity(isHovering ? 0.18 : (isActive ? 0.12 : 0.06)))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.white.opacity(isActive ? 0.25 : 0), lineWidth: 1)
+        )
+        .onHover { isHovering = $0 }
     }
 }
 

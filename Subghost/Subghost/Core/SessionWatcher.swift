@@ -58,6 +58,15 @@ final class MonitoredSession: Identifiable {
         lastCompletedAt = nil
     }
 
+    /// この選択肢に回答を返せるか。
+    /// 承認はフックの戻り値で答えられるが、質問への回答はCLIへ文字を送る必要があり、
+    /// tmuxを介していないセッションでは送る手段がない。
+    var canRespondToChoice: Bool {
+        // キー入力の合成が使えるかは送信直前にタブを検証して決まるため、
+        // ここでは可能性として真を返し、確定判断は KeystrokeSender 側に任せる。
+        pendingHookConnection != nil || info.tmuxTarget != nil || KeystrokeSender.isTrusted
+    }
+
     /// 識別情報だけを差し替える（状態や承認待ちは維持する）
     func replaceInfoPreservingState(_ newInfo: SessionInfo) {
         info = newInfo
@@ -83,6 +92,16 @@ final class SessionWatcher {
         }
     }
     private(set) var tmuxAvailable = true
+
+    /// 送信先をユーザーが明示的に選んだか。
+    /// 真のあいだは自動切り替えを行わない（意図しないCLIへの誤送信を防ぐ）。
+    private(set) var isActiveSessionUserChosen = false
+
+    /// ユーザー操作による送信先の指定
+    func chooseActiveSession(_ tty: String) {
+        activeSessionName = tty
+        isActiveSessionUserChosen = true
+    }
 
     /// 検出はできたが監視も操作もできないセッションがあるか
     var hasUnmonitorableSession: Bool {
@@ -223,6 +242,11 @@ final class SessionWatcher {
             ($0.info.profile.id, $0.info.tty) < ($1.info.profile.id, $1.info.tty)
         }
 
+        // 選んでいたセッションが終了したら、ユーザー指定は解除して自動選択に戻す
+        if let name = activeSessionName, incoming[name] == nil {
+            isActiveSessionUserChosen = false
+        }
+
         if activeSessionName == nil || incoming[activeSessionName ?? ""] == nil {
             // 前回選択していたセッションが生きていればそれを優先する
             let saved = UserDefaults.standard.string(forKey: "activeSessionName")
@@ -240,6 +264,10 @@ final class SessionWatcher {
     /// いつまでも監視不可のままになる。そちらが選ばれていると、実際には動作している
     /// セッションがあるのに「監視できません」と表示され続けてしまう。
     private func preferMonitorableSession() {
+        // ユーザーが明示的に選んだ送信先は勝手に変えない。
+        // 変えてしまうと、監視できないセッションを選んで入力している最中に
+        // 送信先がすり替わり、別のCLIへプロンプトが飛ぶ。
+        guard !isActiveSessionUserChosen else { return }
         guard let active = activeSession, !active.info.isMonitorable else { return }
         guard let better = sessions.first(where: { $0.info.isMonitorable }) else { return }
         activeSessionName = better.info.tty
@@ -250,8 +278,10 @@ final class SessionWatcher {
     /// 送信先セッションを次へ循環切替する（入力モードのTabキー用）
     /// 送信できないセッションは飛ばす。
     func cycleActiveSession() {
-        let names = sessions.filter { $0.info.isMonitorable }.map { $0.info.tty }
-        activeSessionName = Self.nextSessionName(in: names, after: activeSession?.info.tty)
+        let names = sessions.map { $0.info.tty }
+        if let next = Self.nextSessionName(in: names, after: activeSession?.info.tty) {
+            chooseActiveSession(next)
+        }
     }
 
     /// 現在の次にあたるセッション名を返す（末尾なら先頭へ循環）
@@ -290,7 +320,14 @@ final class SessionWatcher {
     // MARK: - プロンプト送信 (設計書 4.3 / PromptSender)
 
     func sendPrompt(_ text: String, to session: MonitoredSession) async throws {
-        guard let target = session.info.tmuxTarget else { throw SessionError.notMonitorable }
+        guard let target = session.info.tmuxTarget else {
+            // tmuxが無い場合はキー入力を合成して送る（要アクセシビリティ権限）
+            try await KeystrokeSender.send(text: text, to: session.info, submit: true)
+            let event = session.detector.noteUserSentPrompt(at: Date())
+            apply(event: event, to: session)
+            if event == .none { session.state = .thinking }
+            return
+        }
         try await TmuxClient.sendPrompt(text, to: target)
         // 送信後は thinking へ即時遷移 (設計書 5.2)
         let event = session.detector.noteUserSentPrompt(at: Date())
@@ -315,7 +352,14 @@ final class SessionWatcher {
             return
         }
 
-        guard let target = session.info.tmuxTarget else { throw SessionError.notMonitorable }
+        guard let target = session.info.tmuxTarget else {
+            // tmuxが無い場合はキー入力を合成して送る（要アクセシビリティ権限）
+            try await KeystrokeSender.send(
+                text: option.keystroke, to: session.info, submit: option.needsEnter)
+            session.pendingChoice = nil
+            session.state = .thinking
+            return
+        }
         try await TmuxClient.sendChoice(option, to: target)
         session.pendingChoice = nil
         let event = session.detector.noteUserAnsweredChoice(at: Date())
@@ -447,19 +491,39 @@ final class SessionWatcher {
             return   // 応答はユーザーの回答時に返す
 
         case .notification:
-            session.state = .awaitingAnswer
-            session.preview = [event.title]
-            onEvent?(session, .none)
+            // Notificationのペイロードには本文しか入っていないため、
+            // セッション記録から直近の質問と選択肢を復元して選べるようにする。
+            if let path = event.transcriptPath,
+               let choice = TranscriptReader.latestQuestion(transcriptPath: path) {
+                apply(event: .becameAwaitingChoice(choice), to: session)
+            } else {
+                session.state = .awaitingAnswer
+                session.preview = [event.title]
+                onEvent?(session, .none)
+            }
 
         case .stop:
-            apply(event: .becameCompleted(preview: [event.title]), to: session)
+            // フックは完了を知らせるだけで本文を持たないため、記録から応答を読み出す
+            let answer = event.transcriptPath
+                .map { TranscriptReader.latestAssistantText(transcriptPath: $0) } ?? []
+            apply(event: .becameCompleted(preview: answer.isEmpty ? ["応答が完了しました"] : answer),
+                  to: session)
 
         case .stopFailure:
             apply(event: .becameError(preview: [event.title]), to: session)
 
-        case .sessionStart, .sessionEnd:
+        case .sessionStart:
             session.state = .idle
             session.pendingChoice = nil
+            SoundAlerts.shared.play(.sessionStart)
+
+        case .sessionEnd:
+            session.state = .idle
+            session.pendingChoice = nil
+
+        case .preCompact:
+            // コンテキストが逼迫していることを音だけで知らせる（状態は変えない）
+            SoundAlerts.shared.play(.contextLimit)
 
         case .userPromptSubmit, .preToolUse, .postToolUse, .subagentStop:
             // サブエージェントの終了では親がまだ作業中なので完了扱いにしない

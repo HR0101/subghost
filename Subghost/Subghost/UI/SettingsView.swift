@@ -60,22 +60,28 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section("サウンド") {
-                Toggle("状態変化を8bit風のアラート音で知らせる", isOn: $soundEnabled)
+                Toggle("サウンドエフェクトを有効にする", isOn: $soundEnabled)
                 VStack(alignment: .leading) {
                     Slider(value: $soundVolume, in: 0.0...1.0, step: 0.05) {
                         Text("音量: \(Int(soundVolume * 100))%")
                     }
                     .disabled(!soundEnabled)
                 }
-                HStack {
-                    ForEach(AlertSound.allCases, id: \.self) { sound in
-                        Button(sound.displayName) {
-                            SoundAlerts.shared.play(sound)
-                        }
-                        .disabled(!soundEnabled)
+                Text("すべてコードで合成した8bit風の音です。音源ファイルは含んでいません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // 参考にしたアプリと同じ粒度で、イベントごとに鳴らし分ける
+            ForEach(SoundSettingsSection.all, id: \.name) { section in
+                Section(section.name) {
+                    ForEach(section.sounds, id: \.self) { sound in
+                        SoundRow(sound: sound)
+                            .disabled(!soundEnabled)
                     }
                 }
             }
+
             Section("表示先ディスプレイ") {
                 Picker("ノッチを表示する画面", selection: $notchDisplay) {
                     Text("自動（ノッチ搭載画面を優先）").tag("")
@@ -109,6 +115,19 @@ private struct GeneralSettingsView: View {
                 Text("ターミナル.appはタブ単位で移動できます（初回に自動化の許可が必要）。GhosttyはAppleScript非対応のため、アプリの前面化までとなります。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            Section("キー入力の送信") {
+                LabeledContent("アクセシビリティ") {
+                    Label(KeystrokeSender.isTrusted ? "許可済み" : "未許可",
+                          systemImage: KeystrokeSender.isTrusted ? "checkmark.circle.fill" : "exclamationmark.circle")
+                        .foregroundStyle(KeystrokeSender.isTrusted ? Color.green : Color.orange)
+                }
+                Text("tmuxを介さないセッションへプロンプトや回答を送るには、キー入力を合成する必要があります。対象タブを前面に出してから入力するため、許可が必要です。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !KeystrokeSender.isTrusted {
+                    Button("アクセシビリティを許可する") { KeystrokeSender.requestTrust() }
+                }
             }
             Section("tmux") {
                 TextField("tmuxのパス（空欄で自動検出）", text: $tmuxPath)
@@ -315,5 +334,63 @@ private struct SetupGuideView: View {
             Spacer()
         }
         .padding(20)
+    }
+}
+
+
+// MARK: - サウンド設定の行
+
+/// 設定画面での分類（参考にしたアプリの並びに合わせている）
+private struct SoundSettingsSection {
+    let name: String
+    let sounds: [AlertSound]
+
+    static let all: [SoundSettingsSection] = {
+        // カテゴリ順を保ったままグループ化する
+        var order: [String] = []
+        var grouped: [String: [AlertSound]] = [:]
+        for sound in AlertSound.allCases {
+            if grouped[sound.category] == nil { order.append(sound.category) }
+            grouped[sound.category, default: []].append(sound)
+        }
+        return order.map { SoundSettingsSection(name: $0, sounds: grouped[$0] ?? []) }
+    }()
+}
+
+/// イベント1件ぶんの設定行（オン/オフ と 試聴）
+private struct SoundRow: View {
+    let sound: AlertSound
+    @State private var isEnabled: Bool
+
+    init(sound: AlertSound) {
+        self.sound = sound
+        _isEnabled = State(initialValue: sound.isEnabled)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(sound.displayName)
+                Text(sound.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+
+            Toggle("", isOn: $isEnabled)
+                .labelsHidden()
+                .onChange(of: isEnabled) { _, newValue in
+                    UserDefaults.standard.set(newValue, forKey: sound.enabledKey)
+                }
+
+            Button {
+                SoundAlerts.shared.play(sound)
+            } label: {
+                Image(systemName: "play.circle")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!isEnabled)
+            .help("試聴する")
+        }
     }
 }

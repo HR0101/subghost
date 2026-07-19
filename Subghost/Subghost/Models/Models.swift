@@ -91,8 +91,10 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
     static let antigravity = CLIProfile(
         id: "antigravity",
         displayName: "Antigravity",
-        launchCommand: "antigravity",
-        executableNames: ["antigravity", "anti"],
+        launchCommand: "agy",
+        // 実体は "agy"（実測: /Users/*/.local/bin/agy）。
+        // "antigravity" という名前のコマンドは存在しない。
+        executableNames: ["agy", "antigravity"],
         promptPattern: #"(^|\n)\s*(❯|>|\$)\s*"#,
         spinnerPattern: #"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+"#,
         busyPattern: #"(?i)running|thinking|working|executing"#,

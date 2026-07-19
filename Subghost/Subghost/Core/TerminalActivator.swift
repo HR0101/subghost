@@ -176,6 +176,40 @@ enum TerminalActivator {
         return result.stringValue == "ok"
     }
 
+    // MARK: - 入力先の検証
+
+    /// 現在前面にあるタブのtty。特定できない場合は nil。
+    ///
+    /// キー入力を合成する前に「本当に狙ったタブが前面か」を確かめるために使う。
+    /// Ghosttyはタブを問い合わせる手段が無いため必ず nil を返す。
+    static func frontmostTTY() -> String? {
+        guard TerminalApp.terminal.isRunning else { return nil }
+
+        let source = """
+        tell application "Terminal"
+            if (count of windows) is 0 then return ""
+            return tty of selected tab of window 1
+        end tell
+        """
+        guard let script = NSAppleScript(source: source) else { return nil }
+        var errorInfo: NSDictionary?
+        let result = script.executeAndReturnError(&errorInfo)
+        if errorInfo != nil { return nil }
+
+        guard let tty = result.stringValue, isValidTTY(tty) else { return nil }
+        return tty
+    }
+
+    /// 指定セッションのタブが前面にあると確認できたか。
+    /// 確認できない場合（Ghostty等）は nil を返し、呼び出し側で送信を中止させる。
+    static func isFrontmostTab(session: SessionInfo) -> Bool? {
+        // tmux配下なら送信はtmux経由で行うため、この検証は不要
+        guard session.tmuxTarget == nil else { return true }
+
+        guard let focused = frontmostTTY() else { return nil }
+        return focused == session.tty
+    }
+
     /// AppleScriptへ埋め込む前にttyの形式を検証する（スクリプト注入の防止）
     nonisolated static func isValidTTY(_ tty: String) -> Bool {
         guard tty.hasPrefix("/dev/"), tty.count <= 32 else { return false }

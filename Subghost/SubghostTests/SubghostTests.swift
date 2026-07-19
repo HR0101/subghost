@@ -199,6 +199,23 @@ struct AgentDiscoveryTests {
         #expect(found.first?.tty == "/dev/ttys003")
     }
 
+    @Test func Antigravityは実体名agyで検出する() {
+        // "antigravity" というコマンドは存在せず、実体は "agy"（実測）
+        let found = AgentDiscovery.parseAgentProcesses(
+            "  84323 ttys005  /Users/me/.local/bin/agy", profiles: profiles)
+        #expect(found.count == 1)
+        #expect(found.first?.profile.id == "antigravity")
+        #expect(found.first?.tty == "/dev/ttys005")
+    }
+
+    @Test func Codexはnode配下の実体パスでも検出する() {
+        // 実測: node_modules配下の長いパスで動いている
+        let path = "/Users/me/.nodebrew/node/v22.9.0/lib/node_modules/@openai/codex/"
+            + "node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"
+        let found = AgentDiscovery.parseAgentProcesses("  39003 ttys010  \(path)", profiles: profiles)
+        #expect(found.first?.profile.id == "codex")
+    }
+
     @Test func 実行ファイル名は完全一致で判定する() {
         // "claude-helper" のような別物を拾わない
         #expect(AgentDiscovery.matchProfile(commandPath: "/usr/local/bin/claude", profiles: profiles)?.id == "claude")
@@ -303,6 +320,15 @@ struct NotchPanelConfigTests {
         NotchPanelController.configure(panel)
 
         #expect(!panel.ignoresMouseEvents)
+    }
+
+    @Test func キーウインドウになれる設定になっている() {
+        // becomesKeyOnlyIfNeeded が true だと makeKeyAndOrderFront しても
+        // 入力欄にフォーカスが渡らず、プロンプトを打てなくなる
+        let panel = makePanel()
+        NotchPanelController.configure(panel)
+
+        #expect(!panel.becomesKeyOnlyIfNeeded)
     }
 }
 
@@ -742,6 +768,101 @@ struct HookInstallerTests {
         let script = HookInstaller.bridgeScript(socketPath: "/tmp/x.sock")
         #expect(script.contains("[ -S \"$SOCK\" ] || exit 0"))
         #expect(script.contains("--unix-socket"))
+    }
+}
+
+struct KeystrokeSenderTests {
+
+    @Test func 長い文字列を送信可能な単位に分割する() {
+        let text = String(repeating: "a", count: 40)
+        let chunks = KeystrokeSender.chunked(text, size: 16)
+        #expect(chunks.count == 3)
+        #expect(chunks.joined() == text)
+        #expect(chunks.allSatisfy { $0.utf16.count <= 16 })
+    }
+
+    @Test func 空文字は分割しない() {
+        #expect(KeystrokeSender.chunked("").isEmpty)
+    }
+
+    @Test func 絵文字を含んでも文字を壊さずに分割する() {
+        // サロゲートペアの途中で切ると文字化けするため、文字単位で区切る
+        let text = "あ🎉い🎉う🎉え🎉お🎉か🎉"
+        let chunks = KeystrokeSender.chunked(text, size: 8)
+        #expect(chunks.joined() == text)
+    }
+
+    @Test func 改行は空白にし制御文字を落とす() {
+        let cleaned = KeystrokeSender.sanitize("一行目\n二行目\tタブ\u{1B}[31m")
+        #expect(!cleaned.contains("\n"))
+        #expect(!cleaned.contains("\u{1B}"))
+        #expect(cleaned.contains("一行目"))
+        #expect(cleaned.contains("二行目"))
+    }
+}
+
+struct TranscriptReaderTests {
+
+    /// 実際のセッション記録と同じ形
+    private let jsonl = """
+    {"type":"user","message":{"role":"user","content":[{"type":"text","text":"やって"}]}}
+    {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"question":"どれから手をつけますか?","header":"次の作業","options":[{"label":"コミットする","description":"未コミットの変更を区切る"},{"label":"不具合を直す","description":"表示先の問題"},{"label":"検証する","description":"Codexで確認"}]}]}}]}}
+    """
+
+    @Test func 記録から質問と選択肢を復元する() {
+        guard let choice = TranscriptReader.latestQuestion(inJSONLines: jsonl) else {
+            Issue.record("復元できなかった"); return
+        }
+        #expect(choice.kind == .question)
+        #expect(choice.title == "どれから手をつけますか?")
+        #expect(choice.options.map(\.label) == ["コミットする", "不具合を直す", "検証する"])
+        #expect(choice.options.map(\.keystroke) == ["1", "2", "3"])
+    }
+
+    @Test func 記録から応答本文を取り出す() {
+        let text = """
+        {"type":"user","message":{"role":"user","content":[{"type":"text","text":"やって"}]}}
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"修正しました。\\n\\n\\nテストも通っています。"}]}}
+        """
+        let answer = TranscriptReader.latestAssistantText(inJSONLines: text)
+        // ツール実行だけのレコードは飛ばし、本文を持つものを拾う
+        #expect(answer.first == "修正しました。")
+        #expect(answer.contains("テストも通っています。"))
+        // 空行の連続は1行にまとめる
+        #expect(answer.filter(\.isEmpty).count <= 1)
+    }
+
+    @Test func 本文が無ければ空を返す() {
+        let toolOnly = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}
+        """
+        #expect(TranscriptReader.latestAssistantText(inJSONLines: toolOnly).isEmpty)
+    }
+
+    @Test func 長すぎる応答は行数を制限する() {
+        let long = (1...200).map { "行\($0)" }.joined(separator: "\\n")
+        let record = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\","
+            + "\"content\":[{\"type\":\"text\",\"text\":\"\(long)\"}]}}"
+        let answer = TranscriptReader.latestAssistantText(inJSONLines: record)
+        #expect(answer.count <= TranscriptReader.maxAnswerLines)
+    }
+
+    @Test func 質問が無ければnilを返す() {
+        let plain = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"完了しました"}]}}
+        """
+        #expect(TranscriptReader.latestQuestion(inJSONLines: plain) == nil)
+    }
+
+    @Test func 選択肢が1つ以下なら質問とみなさない() {
+        let input: [String: Any] = ["questions": [["question": "？", "options": [["label": "はい"]]]]]
+        #expect(TranscriptReader.parseQuestion(input: input) == nil)
+    }
+
+    @Test func 壊れた行があっても他の行から復元する() {
+        let broken = "これはJSONではない\n" + jsonl
+        #expect(TranscriptReader.latestQuestion(inJSONLines: broken)?.options.count == 3)
     }
 }
 

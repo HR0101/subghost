@@ -178,7 +178,9 @@ final class NotchPanelController {
         // クリックを受け取れるようにする（非アクティブのままでも入力は届く）
         panel.ignoresMouseEvents = false
         panel.acceptsMouseMovedEvents = true
-        panel.becomesKeyOnlyIfNeeded = true
+        // makeKeyAndOrderFront でキーウインドウにできるようにする。
+        // true のままだと入力欄にフォーカスが渡らないことがある。
+        panel.becomesKeyOnlyIfNeeded = false
         // 全画面アプリのスペースにも参加させる
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
@@ -299,6 +301,9 @@ final class NotchPanelController {
     // MARK: - キーボードフォーカス (設計書 4.3)
 
     func focusInput() {
+        // 常駐アプリ(LSUIElement)かつ非アクティブ化パネルのため、
+        // アプリ自体をアクティブにしないとキーボード入力が前面のアプリへ行ってしまう。
+        NSApp.activate()
         panel.makeKeyAndOrderFront(nil)
     }
 
@@ -307,6 +312,8 @@ final class NotchPanelController {
         // 一旦orderOutして直前のアプリへキーボードフォーカスを返す
         panel.orderOut(nil)
         panel.orderFrontRegardless()
+        // 入力を終えたら元のアプリへ操作を戻す
+        NSApp.deactivate()
     }
 
     // MARK: - フレーム計算
@@ -320,9 +327,19 @@ final class NotchPanelController {
                 height: metrics.topInset
             )
         case .notification:
-            size = NSSize(width: max(metrics.notchWidth + 220, 560), height: 230)
+            // 応答の行数に応じて高さを変える（長文も読めるように）
+            let lines = coordinator.notificationSession?.preview.count ?? 0
+            let height = metrics.topInset + 110 + CGFloat(min(lines, 12)) * 17
+            size = NSSize(width: max(metrics.notchWidth + 280, 620),
+                          height: min(max(height, 200), 380))
         case .input:
             size = NSSize(width: max(metrics.notchWidth + 280, 640), height: 260)
+        case .sessions:
+            // 行数に応じて高さを変える
+            let count = max(coordinator.watcher.sessions.count, 1)
+            size = NSSize(
+                width: max(metrics.notchWidth + 320, 660),
+                height: min(metrics.topInset + 70 + CGFloat(count) * 38, 460))
         case .choice:
             // 選択肢の数と文脈行数で高さが変わるため実データから見積もる
             let choice = coordinator.pendingChoice

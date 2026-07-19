@@ -14,6 +14,7 @@ enum NotchMode: Equatable {
     case notification   // 応答チラ見せ
     case input          // プロンプト入力欄
     case choice         // 承認リクエスト／質問への回答
+    case sessions       // 複数CLIの一覧
 }
 
 @Observable
@@ -49,6 +50,8 @@ final class AppCoordinator {
         if mode == .input { return .input }
         if mode == .choice { return .choice }
         if mode == .notification { return .notification }
+        // 複数のCLIが動いているときは、ホバーで一覧を出す
+        if isHovering, watcher.sessions.count > 1 { return .sessions }
         if isHovering, watcher.activeSession != nil { return .notification }
         return .compact
     }
@@ -111,8 +114,10 @@ final class AppCoordinator {
         setMode(.notification)
 
         collapseTask?.cancel()
+        // 長い応答は読む時間が要るため、行数に応じて表示時間を延ばす
+        let readingSeconds = min(6.0 + Double(session.preview.count) * 0.6, 20.0)
         collapseTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(6))
+            try? await Task.sleep(for: .seconds(readingSeconds))
             // ホバー中は畳まない
             while let self, self.isHovering, !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
@@ -208,14 +213,16 @@ final class AppCoordinator {
             lastSendError = "AI CLI が見つかりません。ターミナルで claude / codex / antigravity を起動してください。"
             return
         }
-        guard session.info.isMonitorable else {
-            lastSendError = SessionError.notMonitorable.localizedDescription
+        // tmuxが無くてもキー入力の合成で送れるため、そちらの可否も見る
+        guard session.info.tmuxTarget != nil || KeystrokeSender.isTrusted else {
+            lastSendError = KeystrokeError.accessibilityNotTrusted.localizedDescription
             return
         }
         lastSendError = nil
         Task {
             do {
                 try await watcher.sendPrompt(text, to: session)
+                SoundAlerts.shared.play(.promptSent)
                 snippets.recordHistory(text)
                 inputText = ""
                 collapse()
@@ -234,6 +241,20 @@ final class AppCoordinator {
     }
 
     // MARK: - クリックでターミナルへ (設計書 4.2 / 6.4、追補: Jump)
+
+    /// 一覧から選んだセッションを送信先にして、プロンプト入力欄を開く
+    func promptSession(_ session: MonitoredSession) {
+        watcher.chooseActiveSession(session.info.tty)
+        expandInput()
+    }
+
+    /// 一覧から選んだセッションのタブへ移動する
+    func jump(to session: MonitoredSession) {
+        watcher.chooseActiveSession(session.info.tty)
+        watcher.acknowledge(session)
+        collapse()
+        Task { await TerminalActivator.jump(to: session.info) }
+    }
 
     /// 対象セッションが動いているターミナルのタブへ移動する
     func jumpToTerminal() {

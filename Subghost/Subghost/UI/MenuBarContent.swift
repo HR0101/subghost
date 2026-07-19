@@ -35,7 +35,7 @@ struct MenuBarContent: View {
         } else {
             ForEach(coordinator.watcher.sessions) { session in
                 Button {
-                    coordinator.watcher.activeSessionName = session.info.tty
+                    coordinator.watcher.chooseActiveSession(session.info.tty)
                 } label: {
                     let mark = session.info.tty == coordinator.watcher.activeSessionName ? "✓ " : "　"
                     // tmux外のセッションは検出のみで、状態を読めないことを明示する

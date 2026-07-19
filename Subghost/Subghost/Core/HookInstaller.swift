@@ -48,7 +48,7 @@ nonisolated enum HookTarget: String, CaseIterable, Identifiable, Sendable {
         case .claude:
             return ["SessionStart", "SessionEnd", "UserPromptSubmit",
                     "PreToolUse", "PostToolUse",
-                    "Notification", "PermissionRequest", "Stop", "StopFailure"]
+                    "Notification", "PermissionRequest", "Stop", "StopFailure", "PreCompact"]
         case .codex:
             // Codexが対応するのはこの6種のみ（Notification / PreToolUse は無い）
             return ["SessionStart", "UserPromptSubmit", "PostToolUse",
