@@ -111,6 +111,17 @@ struct PixelGhostView: View {
     let state: AIState
     /// ドット1つの大きさ
     var pixelSize: CGFloat = 3
+    /// 外部（ホバーなど）から「覗き込み」を促す合図。値が変わるたびに一度だけ再生する。
+    var peekTrigger: Int = 0
+
+    /// 完了・エラーへ遷移した瞬間だけ再生するワンショット演出のトリガー。
+    /// (値そのものに意味はなく、変化したことだけをPhaseAnimatorへの合図として使う)
+    @State private var completionPulse = 0
+    @State private var errorShake = 0
+    /// アイドル中の低頻度なまばたきと、ホバー時の覗き込みは、
+    /// どちらも「一瞬だけ別のスプライトを見せて戻す」という同じ仕組みを共有する。
+    @State private var microExpressionTrigger = 0
+    @State private var microExpressionSprite: PixelSprite = GhostSprite.blink
 
     private var bodyColor: Color {
         switch state {
@@ -124,17 +135,69 @@ struct PixelGhostView: View {
     }
 
     var body: some View {
+        // 震え(error)・弾み(completed)はキャラクター全体の変形なので、
+        // スプライト差し替え(id(state)でリセットされる部分)より外側で扱い、
+        // state遷移をまたいで正しく1回だけ再生されるようにする。
+        PhaseAnimator(Self.shakePhases, trigger: errorShake) { shakeOffset in
+            PhaseAnimator(Self.pulsePhases, trigger: completionPulse) { scale in
+                spriteContent
+                    .scaleEffect(scale)
+                    .offset(x: shakeOffset)
+            } animation: { _ in
+                .interpolatingSpring(stiffness: 380, damping: 9)
+            }
+        } animation: { _ in
+            .easeInOut(duration: 0.045)
+        }
+        .onChange(of: state) { _, newValue in
+            if newValue == .completed { completionPulse += 1 }
+            if newValue == .error { errorShake += 1 }
+        }
+        .onChange(of: peekTrigger) { _, _ in
+            // 生成中は既にwaveアニメが動いているため、覗き込みで割り込まない。
+            guard state != .thinking else { return }
+            microExpressionSprite = GhostSprite.alert
+            microExpressionTrigger += 1
+        }
+        // アイドルのあいだだけ、低頻度でまばたきを挟む。
+        // state が変わると .task(id:) が自動的にキャンセル・再起動する。
+        .task(id: state) {
+            guard state == .idle else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(.random(in: Self.idleBlinkIntervalRange)))
+                guard !Task.isCancelled else { return }
+                microExpressionSprite = GhostSprite.blink
+                microExpressionTrigger += 1
+            }
+        }
+    }
+
+    /// エラー時の震え: 素早く左右へ数回振れて中央へ戻る
+    private static let shakePhases: [CGFloat] = [0, -2.2, 2.2, -1.4, 1.4, 0]
+    /// 完了時の弾み: 一瞬膨らんで元の大きさへ戻る
+    private static let pulsePhases: [CGFloat] = [1.0, 1.22, 1.0]
+    /// アイドル中にまばたきするまでの間隔（毎回ランダムに選び直す）
+    private static let idleBlinkIntervalRange: ClosedRange<Double> = 4...9
+    /// まばたき・覗き込みが「別スプライトを見せている」時間
+    private static let microExpressionHold: Double = 0.1
+
+    /// state に応じた通常表示（生成中の裾揺れ、それ以外は静止＋低頻度の微表情）
+    private var spriteContent: some View {
         let (first, second) = GhostSprite.frames(for: state)
         let duration = GhostSprite.frameDuration(for: state)
 
-        Group {
+        return Group {
             if GhostSprite.shouldAnimate(for: state) {
                 // 生成中だけ裾を揺らす。動いているキャラクター＝生成中に統一する。
                 PhaseAnimatorFrames(first: first, second: second, duration: duration) { frame in
                     spriteView(frame)
                 }
             } else {
-                spriteView(first)
+                PhaseAnimator([false, true, false], trigger: microExpressionTrigger) { showAlt in
+                    spriteView(showAlt ? microExpressionSprite : first)
+                } animation: { _ in
+                    .linear(duration: 0.01).delay(Self.microExpressionHold)
+                }
             }
         }
         .id(state)

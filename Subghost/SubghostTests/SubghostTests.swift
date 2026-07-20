@@ -1788,6 +1788,29 @@ struct ChoicePromptTests {
         """
         #expect(ChoicePrompt.detect(in: screen, profile: .claude) != nil)
     }
+
+    // MARK: - 送信直前の再照合（フールプルーフ）
+
+    @Test func 選択肢のラベルが画面に残っていれば送信前照合を通す() {
+        let paneText = """
+        ❯ 1. [ ] 項目A
+          2. [✔] 項目B
+             Submit
+        """
+        #expect(ChoicePrompt.matchesCurrentScreen(optionLabels: ["項目A", "項目B"], in: paneText))
+    }
+
+    @Test func 画面が先へ進んでいれば送信前照合を弾く() {
+        // 表示から回答までの間に会話が進み、選択肢のラベルがもう画面に無い場合
+        let paneText = """
+        修正を実装しました. 次の作業に移ります.
+        """
+        #expect(!ChoicePrompt.matchesCurrentScreen(optionLabels: ["項目A", "項目B"], in: paneText))
+    }
+
+    @Test func 選択肢が空なら送信前照合を通さない() {
+        #expect(!ChoicePrompt.matchesCurrentScreen(optionLabels: [], in: "何かの画面"))
+    }
 }
 
 // MARK: - 起動時に既存セッションの状態を引き継ぐ
@@ -1796,19 +1819,44 @@ struct InitialAdoptionTests {
 
     @Test func 起動前から承認待ちで止まっているセッションを拾う() {
         var detector = StateDetector(profile: .claude)
+        let t0 = Date(timeIntervalSince1970: 0)
         let screen = """
         Do you want to run this command?
         ❯ 1. Yes
           2. No
         """
-        // 初回の取り込みでいきなり承認待ちを検出できること
-        let event = detector.adoptCurrentState(rawText: screen, at: Date(timeIntervalSince1970: 0))
+        // 初回の取り込みは候補として保持するだけで、まだ確定しない
+        // (フールプルーフ: 起動直後の一瞬は誤検出のリスクが最も高いため、
+        // 1回見ただけでは確定させず、次のポーリングでの再確認を待つ)
+        let first = detector.adoptCurrentState(rawText: screen, at: t0)
+        #expect(first == .none)
+
+        // 次のポーリングでも同じ内容が見えて初めて確定する
+        let event = detector.ingest(rawText: screen, at: t0.addingTimeInterval(1))
         guard case .becameAwaitingChoice(let choice) = event else {
             Issue.record("承認待ちを拾えなかった: \(event)")
             return
         }
         #expect(detector.state == .awaitingApproval)
         #expect(choice.options.count == 2)
+    }
+
+    @Test func 起動直後の候補が次のポーリングで消えていれば確定しない() {
+        var detector = StateDetector(profile: .claude)
+        let t0 = Date(timeIntervalSince1970: 0)
+        let screen = """
+        Do you want to run this command?
+        ❯ 1. Yes
+          2. No
+        """
+        _ = detector.adoptCurrentState(rawText: screen, at: t0)
+
+        // 次のポーリングで別の画面（選択メニューではない）に変わっていれば、
+        // 一過性の誤検出だったとみなして確定しない
+        _ = detector.ingest(rawText: "通常の会話が続いています", at: t0.addingTimeInterval(1))
+        #expect(detector.state != .awaitingApproval)
+        #expect(detector.state != .awaitingAnswer)
+        #expect(detector.pendingChoice == nil)
     }
 
     @Test func 起動時に生成中なら生成中として引き継ぐ() {
@@ -1855,7 +1903,12 @@ struct InitialAdoptionTests {
           2. No
         """
         _ = detector.adoptCurrentState(rawText: screen, at: t0)
-        let repeated = detector.ingest(rawText: screen, at: t0.addingTimeInterval(1))
+        // 次のポーリングで候補が確定する
+        _ = detector.ingest(rawText: screen, at: t0.addingTimeInterval(1))
+        #expect(detector.state == .awaitingApproval)
+
+        // 確定後、同じ画面が続いても二重通知しない
+        let repeated = detector.ingest(rawText: screen, at: t0.addingTimeInterval(2))
         #expect(repeated == .none)
         #expect(detector.state == .awaitingApproval)
     }

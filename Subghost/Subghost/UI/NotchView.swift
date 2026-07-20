@@ -127,6 +127,8 @@ struct NotchView: View {
     @State private var transitionID = UUID()
     /// 複数選択でチェックした選択肢の番号
     @State private var multiSelection: Set<Int> = []
+    /// ゴーストへの「覗き込み」合図（コンパクト表示にマウスが乗るたびに+1）
+    @State private var ghostPeekTrigger = 0
 
     private var metrics: NotchMetrics? { coordinator.notchMetrics }
     private var topInset: CGFloat { metrics?.topInset ?? 34 }
@@ -322,9 +324,17 @@ struct NotchView: View {
         HStack(spacing: 0) {
             // 左余白：アクティブセッションの状態
             HStack {
-                PixelGhostView(state: coordinator.watcher.activeSession?.state ?? .idle)
+                PixelGhostView(
+                    state: coordinator.watcher.activeSession?.state ?? .idle,
+                    peekTrigger: ghostPeekTrigger
+                )
             }
             .frame(width: NotchLayout.sideWidth)
+            // マウスが乗った瞬間だけ一瞬「覗き込む」。展開判定(coordinator.hoverChanged)とは
+            // 別に、ゴースト自体のちょっとした反応として独立させている。
+            .onHover { hovering in
+                if hovering { ghostPeekTrigger += 1 }
+            }
 
             Spacer(minLength: notchWidth)
 

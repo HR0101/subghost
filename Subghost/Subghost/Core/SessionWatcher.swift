@@ -13,6 +13,8 @@ import Observation
 nonisolated enum SessionError: Error, LocalizedError {
     case notMonitorable
     case backgroundInputUnavailable
+    /// 表示してから回答するまでの間に画面の内容が変わっていた（フールプルーフ: 送らずに中止）
+    case choiceScreenChanged
 
     var errorDescription: String? {
         switch self {
@@ -21,6 +23,9 @@ nonisolated enum SessionError: Error, LocalizedError {
         case .backgroundInputUnavailable:
             return "他の画面を見ながら回答するには tmux が必要です。"
                 + "ターミナルで tmux を実行してからCLIを起動すると、ノッチから直接回答できます。"
+        case .choiceScreenChanged:
+            return "表示してから画面の内容が変わったため、誤操作を避けて送信を中止しました。"
+                + "ターミナルで直接ご確認ください。"
         }
     }
 }
@@ -470,13 +475,23 @@ final class SessionWatcher {
             throw SessionError.backgroundInputUnavailable
         }
 
+        // フールプルーフ: 表示してから回答するまでの間に画面が別の内容へ進んでいないか、
+        // キーを送る前に確かめる。読めた場合のみ照合し、崩れていれば中止する。
+        // (実機で確認した不具合: 会話が進んだ後の画面に古い前提のままキーを送り誤爆した)
+        let expectedLabels = (session.pendingChoice?.options ?? options).map(\.label)
+        if let currentText = await TmuxClient.capturePane(target: target),
+           !ChoicePrompt.matchesCurrentScreen(optionLabels: expectedLabels, in: currentText) {
+            throw SessionError.choiceScreenChanged
+        }
+
+        // フォールバック用の総数は「選んだ数」ではなく「この問いの選択肢の総数」。
+        // 選ばなかった項目があると、選んだ数だけでは↓が足りず自由記述欄止まりになる。
+        let totalOptionCount = session.pendingChoice?.options.count ?? options.count
+
         if isMultiSelect {
-            // フォールバック用の総数は「選んだ数」ではなく「この問いの選択肢の総数」。
-            // 選ばなかった項目があると、選んだ数だけでは↓が足りず自由記述欄止まりになる。
-            let totalOptionCount = session.pendingChoice?.options.count ?? options.count
             try await TmuxClient.sendChoices(options, totalOptionCount: totalOptionCount, to: target)
         } else {
-            try await TmuxClient.sendChoice(first, to: target)
+            try await TmuxClient.sendChoice(first, totalOptionCount: totalOptionCount, to: target)
         }
         session.pendingChoice = nil
 
