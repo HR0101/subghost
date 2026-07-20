@@ -11,13 +11,9 @@ import SwiftUI
 struct SubghostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    // メニューバーには何も置かない。操作の入口はノッチUIに集約する。
+    // Settings シーンだけを持つことで、SettingsLink から設定を開ける。
     var body: some Scene {
-        MenuBarExtra {
-            MenuBarContent(coordinator: .shared)
-        } label: {
-            MenuBarLabel(coordinator: .shared)
-        }
-
         Settings {
             SettingsView()
         }

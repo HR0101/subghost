@@ -91,8 +91,10 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
     static let antigravity = CLIProfile(
         id: "antigravity",
         displayName: "Antigravity",
-        launchCommand: "antigravity",
-        executableNames: ["antigravity", "anti"],
+        launchCommand: "agy",
+        // 実体は "agy"（実測: /Users/*/.local/bin/agy）。
+        // "antigravity" という名前のコマンドは存在しない。
+        executableNames: ["agy", "antigravity"],
         promptPattern: #"(^|\n)\s*(❯|>|\$)\s*"#,
         spinnerPattern: #"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+"#,
         busyPattern: #"(?i)running|thinking|working|executing"#,
@@ -141,6 +143,10 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
     var hookSessionID: String?
     /// フック経由で得た作業ディレクトリ名（表示用）
     var projectName: String?
+    /// プロセスの作業ディレクトリ（表示用）。psで見つけたセッションでも解決する。
+    var workingDirectory: String?
+    /// 動作しているターミナルの名前（表示用）。検出時に一度だけ解決する。
+    var terminalName: String?
 
     var id: String { tty }
 
@@ -156,11 +162,17 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
         tty.hasPrefix("/dev/") ? String(tty.dropFirst(5)) : tty
     }
 
-    /// ノッチやメニューに出す表示名
+    /// CLIが起動しているフォルダ名（作業ディレクトリの末尾）
+    var folderName: String? {
+        if let projectName, !projectName.isEmpty { return projectName }
+        guard let workingDirectory, !workingDirectory.isEmpty else { return nil }
+        let name = (workingDirectory as NSString).lastPathComponent
+        return name.isEmpty ? nil : name
+    }
+
+    /// ノッチやメニューに出す表示名。ttyではなくフォルダ名を主体にする。
     var displayName: String {
-        if let projectName { return "\(projectName) (\(shortName))" }
-        if let tmuxSession { return "\(tmuxSession) (\(shortName))" }
-        return shortName
+        folderName ?? tmuxSession ?? shortName
     }
 
     /// 監視の経路（表示・診断用）

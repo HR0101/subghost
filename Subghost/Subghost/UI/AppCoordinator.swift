@@ -14,6 +14,7 @@ enum NotchMode: Equatable {
     case notification   // 応答チラ見せ
     case input          // プロンプト入力欄
     case choice         // 承認リクエスト／質問への回答
+    case sessions       // 複数CLIの一覧
 }
 
 @Observable
@@ -26,15 +27,18 @@ final class AppCoordinator {
     let hotkey = HotkeyManager()
     @ObservationIgnored private var panelController: NotchPanelController?
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
+    @ObservationIgnored private var hoverTask: Task<Void, Never>?
+    @ObservationIgnored private var notificationPresentationTask: Task<Void, Never>?
     /// ユーザーが閉じた問い合わせ（セッション名 → 内容）。同じ内容では再展開しない。
     @ObservationIgnored private var dismissedChoices: [String: PendingChoice] = [:]
 
     private(set) var mode: NotchMode = .compact
     /// パネルコントローラが算出したノッチ寸法（ビューが形状描画に使う）
     var notchMetrics: NotchMetrics?
-    var isHovering = false {
+    private(set) var isHovering = false {
         didSet { hoverChanged() }
     }
+    private var isPointerInside = false
     /// 通知展開で表示中のセッション
     private(set) var notificationSession: MonitoredSession?
     /// 承認/質問の回答待ちで表示中のセッション
@@ -43,13 +47,22 @@ final class AppCoordinator {
     var lastSendError: String?
     /// 回答送信に失敗したときのメッセージ
     var lastChoiceError: String?
+    /// 回答を送信中か（二重送信の防止と表示用）
+    private(set) var isSendingChoice = false
+    /// 送信できた選択肢のラベル（一瞬「送信しました」を出す）
+    private(set) var choiceSentLabel: String?
 
     /// 実際に画面へ出す表示モード（ホバー時は軽く展開してプレビュー: 設計書 6.4）
     var displayMode: NotchMode {
         if mode == .input { return .input }
+        // 送信中／送信完了表示のあいだは一覧へ切り替えない
         if mode == .choice { return .choice }
         if mode == .notification { return .notification }
-        if isHovering, watcher.activeSession != nil { return .notification }
+        // 入力画面の戻るボタンから開いた一覧は、ホバーが外れても表示を維持する。
+        if mode == .sessions { return .sessions }
+        // ホバー中は常に一覧を出す。
+        // メニューバー項目を置かないため、ここが設定・終了への唯一の入口になる。
+        if isHovering { return .sessions }
         return .compact
     }
 
@@ -106,13 +119,28 @@ final class AppCoordinator {
 
     /// 応答完了時にノッチを下方向へ展開し、数秒後に自動で折りたたむ (設計書 4.2)
     func showNotification(for session: MonitoredSession) {
-        guard mode != .input else { return }
+        notificationPresentationTask?.cancel()
+        notificationPresentationTask = Task { [weak self] in
+            guard let self else { return }
+            if NotchPreferences.smartNotificationSuppression,
+               await TerminalActivator.isSessionFrontmost(session.info) {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self.presentNotification(for: session)
+        }
+    }
+
+    private func presentNotification(for session: MonitoredSession) {
+        // 非同期の前面タブ判定中に入力や承認が開いた場合、それを通知で上書きしない。
+        guard mode != .input, mode != .choice else { return }
         notificationSession = session
         setMode(.notification)
 
         collapseTask?.cancel()
+        let displaySeconds = max(NotchPreferences.notificationDisplayDuration, 1.0)
         collapseTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(6))
+            try? await Task.sleep(for: .seconds(displaySeconds))
             // ホバー中は畳まない
             while let self, self.isHovering, !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
@@ -129,6 +157,7 @@ final class AppCoordinator {
     func showChoice(for session: MonitoredSession) {
         // 入力中は割り込まない。閉じたときに collapse() が改めて拾う。
         guard mode != .input else { return }
+        notificationPresentationTask?.cancel()
         collapseTask?.cancel()
         lastChoiceError = nil
         notificationSession = nil
@@ -141,13 +170,27 @@ final class AppCoordinator {
 
     /// 選択肢へ回答する（ノッチのボタン／数字キーから呼ばれる）
     func respond(with option: ChoiceOption) {
-        guard let session = choiceSession else { return }
+        respond(with: [option])
+    }
+
+    /// 複数選択の回答をまとめて送る（チェックした項目と決定ボタンから呼ばれる）
+    func respond(with options: [ChoiceOption]) {
+        guard let session = choiceSession, !isSendingChoice, !options.isEmpty else { return }
         lastChoiceError = nil
+        isSendingChoice = true
         Task {
+            defer { isSendingChoice = false }
             do {
-                try await watcher.respond(with: option, in: session)
-                collapse()
+                try await watcher.respond(with: options, in: session)
+                // 同じ呼び出しに問いが残っていれば、畳まずに次の問いを待つ
+                let hasMoreQuestions = !session.questionQueue.isEmpty
+                // 送信できたことを一瞬見せてから畳む（いきなり一覧へ飛ばさない）
+                choiceSentLabel = options.map(\.label).joined(separator: "、")
+                try? await Task.sleep(for: .milliseconds(700))
+                choiceSentLabel = nil
+                if !hasMoreQuestions { collapse() }
             } catch {
+                // 失敗は選択肢を出したまま理由を見せる（畳まない）
                 lastChoiceError = error.localizedDescription
             }
         }
@@ -186,10 +229,19 @@ final class AppCoordinator {
     }
 
     func expandInput() {
+        notificationPresentationTask?.cancel()
         collapseTask?.cancel()
         lastSendError = nil
         setMode(.input)
         panelController?.focusInput()
+    }
+
+    /// 入力内容を保持したまま、送信先を選べるセッション一覧へ戻る。
+    func showSessions() {
+        notificationPresentationTask?.cancel()
+        collapseTask?.cancel()
+        setMode(.sessions)
+        panelController?.resignInput()
     }
 
     func collapse() {
@@ -208,14 +260,16 @@ final class AppCoordinator {
             lastSendError = "AI CLI が見つかりません。ターミナルで claude / codex / antigravity を起動してください。"
             return
         }
-        guard session.info.isMonitorable else {
-            lastSendError = SessionError.notMonitorable.localizedDescription
+        // tmuxが無くてもキー入力の合成で送れるため、そちらの可否も見る
+        guard session.info.tmuxTarget != nil || KeystrokeSender.isTrusted else {
+            lastSendError = KeystrokeError.accessibilityNotTrusted.localizedDescription
             return
         }
         lastSendError = nil
         Task {
             do {
                 try await watcher.sendPrompt(text, to: session)
+                SoundAlerts.shared.play(.promptSent)
                 snippets.recordHistory(text)
                 inputText = ""
                 collapse()
@@ -234,6 +288,20 @@ final class AppCoordinator {
     }
 
     // MARK: - クリックでターミナルへ (設計書 4.2 / 6.4、追補: Jump)
+
+    /// 一覧から選んだセッションを送信先にして、プロンプト入力欄を開く
+    func promptSession(_ session: MonitoredSession) {
+        watcher.chooseActiveSession(session.info.tty)
+        expandInput()
+    }
+
+    /// 一覧から選んだセッションのタブへ移動する
+    func jump(to session: MonitoredSession) {
+        watcher.chooseActiveSession(session.info.tty)
+        watcher.acknowledge(session)
+        collapse()
+        Task { await TerminalActivator.jump(to: session.info) }
+    }
 
     /// 対象セッションが動いているターミナルのタブへ移動する
     func jumpToTerminal() {
@@ -261,6 +329,93 @@ final class AppCoordinator {
     /// 表示先の設定が変わったときにノッチを配置し直す
     func reloadDisplayPlacement() {
         panelController?.relayout()
+    }
+
+    /// 設定画面で表示関連の値が変わったとき、現在のパネルへ即時反映する。
+    func preferencesChanged() {
+        hoverTask?.cancel()
+        if !NotchPreferences.hoverExpansionEnabled {
+            isHovering = false
+        } else if isPointerInside {
+            hoverChanged(to: true)
+        }
+        panelController?.preferencesChanged()
+    }
+
+    // MARK: - サウンドの消音
+
+    /// 消音中か（一覧のスピーカーアイコンと連動）
+    var isMuted: Bool { !SoundAlerts.isEnabled }
+
+    func toggleMute() {
+        UserDefaults.standard.set(!SoundAlerts.isEnabled, forKey: "soundEnabled")
+    }
+
+    /// ビューが実際に描画した高さを伝える。
+    /// パネルを内容ぴったりにして、透明な余白がクリックを奪わないようにする。
+    func reportContentHeight(_ height: CGFloat, for mode: NotchMode) {
+        panelController?.adjustHeight(to: height, for: mode)
+    }
+
+    // MARK: - ホバー展開・収納
+
+    /// 展開アニメーションでビューの境界が入れ替わる瞬間にも mouseExited が届く。
+    /// 本当に外へ出た場合だけ畳むための短い猶予。
+    private static let hoverExitGrace: Duration = .milliseconds(180)
+
+    func hoverChanged(to hovering: Bool) {
+        isPointerInside = hovering
+        hoverTask?.cancel()
+
+        if hovering {
+            guard NotchPreferences.hoverExpansionEnabled else {
+                if isHovering { isHovering = false }
+                return
+            }
+            // 展開済みなら、一時的な exit → enter で再アニメーションさせない。
+            guard !isHovering else { return }
+            let delay = max(NotchPreferences.hoverDelay, 0)
+            hoverTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, !Task.isCancelled, self.isPointerInside else { return }
+                self.isHovering = true
+            }
+        } else if NotchPreferences.collapseOnMouseExit {
+            // SwiftUIは表示モードの切替中にも一瞬exitを通知することがある。
+            // 少し待ち、画面座標でも本当に外へ出た場合だけ収納する。
+            guard isHovering else { return }
+            hoverTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.hoverExitGrace)
+                guard let self, !Task.isCancelled else { return }
+
+                // 拡大アニメーション中のビュー差し替えでonHoverだけがfalseに
+                // なった場合は、実際にマウスが外へ出るまで監視を続ける。
+                while !self.isPointerInside,
+                      self.panelController?.containsCurrentMouseLocation() == true,
+                      !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+
+                guard !Task.isCancelled,
+                      !self.isPointerInside,
+                      self.panelController?.containsCurrentMouseLocation() != true
+                else { return }
+                self.isHovering = false
+            }
+        }
+    }
+
+    /// 外側クリックまたは一覧の閉じるボタンから、ホバー展開を明示的に閉じる。
+    func dismissExpandedPanel() {
+        hoverTask?.cancel()
+        isHovering = false
+        if mode == .notification || mode == .sessions { collapse() }
+    }
+
+    /// パネル外のクリックで閉じてよい、自動表示中のモードか。
+    var canCloseOnOutsideClick: Bool {
+        NotchPreferences.closeOnOutsideClick
+            && (mode == .notification || displayMode == .sessions)
     }
 
     // MARK: - 内部

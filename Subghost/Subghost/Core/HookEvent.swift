@@ -24,6 +24,7 @@ nonisolated enum HookEventKind: String, CaseIterable, Sendable {
     case stop = "Stop"
     case stopFailure = "StopFailure"
     case subagentStop = "SubagentStop"
+    case preCompact = "PreCompact"   // コンテキストが逼迫し圧縮が始まる
 
     /// このイベントが表すセッション状態。nilなら状態を変えない。
     var resultingState: AIState? {
@@ -32,6 +33,8 @@ nonisolated enum HookEventKind: String, CaseIterable, Sendable {
         case .userPromptSubmit, .preToolUse, .postToolUse: return .thinking
         // サブエージェントが終わっても親はまだ作業中
         case .subagentStop: return .thinking
+        // 圧縮は処理の一部なので状態は変えない
+        case .preCompact: return nil
         case .notification: return .awaitingAnswer
         case .permissionRequest: return .awaitingApproval
         case .stop: return .completed
@@ -69,6 +72,15 @@ nonisolated struct HookEvent: Sendable, Equatable {
     let toolSummary: String?
     /// Notificationイベントの本文
     let message: String?
+    /// セッション記録(JSONL)のパス。選択肢の復元に使う。
+    let transcriptPath: String?
+    /// tool_input に選択肢が含まれる場合の質問（AskUserQuestion）。
+    /// ペイロードから直接取れるため、記録を読む必要がない。
+    /// AskUserQuestion は複数の問いをまとめて送ってくるため配列で持つ。
+    let embeddedQuestions: [PendingChoice]
+
+    /// 先頭の質問（1問だけを扱う既存経路向け）
+    var embeddedQuestion: PendingChoice? { embeddedQuestions.first }
 
     /// ノッチに出す問いかけ文
     var title: String {
@@ -113,7 +125,9 @@ nonisolated enum HookEventDecoder {
             cwd: dict["cwd"] as? String,
             toolName: dict["tool_name"] as? String,
             toolSummary: toolInput.flatMap { summarize(toolInput: $0) },
-            message: dict["message"] as? String
+            message: dict["message"] as? String,
+            transcriptPath: dict["transcript_path"] as? String,
+            embeddedQuestions: toolInput.map { TranscriptReader.parseQuestions(input: $0) } ?? []
         )
     }
 

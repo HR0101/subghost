@@ -19,38 +19,105 @@ nonisolated struct ToneStep: Sendable {
 }
 
 nonisolated enum AlertSound: String, CaseIterable, Sendable {
-    case completed          // 応答完了：上行する明るい2音
-    case error              // エラー：下行する低音
-    case approval           // 承認待ち：注意を引く3連符
-    case question           // 質問：問いかけ調の2音
+    // セッション
+    case sessionStart       // 新しいCLIセッションを検出
+    case completed          // AIがターンを完了
+    case error              // ツールエラー / APIエラー
+
+    // インタラクション
+    case approval           // 権限の承認待ち
+    case question           // 質問への回答待ち
+    case promptSent         // ノッチからプロンプトを送信
+
+    // システム
+    case contextLimit       // コンテキストがもうすぐ満杯
 
     var displayName: String {
         switch self {
-        case .completed: return "応答完了"
-        case .error: return "エラー"
-        case .approval: return "承認待ち"
-        case .question: return "質問"
+        case .sessionStart: return "セッション開始"
+        case .completed: return "タスク完了"
+        case .error: return "タスクエラー"
+        case .approval: return "承認が必要"
+        case .question: return "入力待ち"
+        case .promptSent: return "プロンプト送信"
+        case .contextLimit: return "コンテキスト制限"
         }
     }
 
+    var detail: String {
+        switch self {
+        case .sessionStart: return "新しい Claude / Codex / Antigravity セッション"
+        case .completed: return "AI がターンを完了しました"
+        case .error: return "ツールエラーまたは API エラー"
+        case .approval: return "権限の承認待ち"
+        case .question: return "AI が入力を待っています"
+        case .promptSent: return "プロンプトを送信しました"
+        case .contextLimit: return "コンテキストウィンドウがもうすぐ満杯"
+        }
+    }
+
+    /// 設定画面での並び（参考にした分類に合わせる）
+    var category: String {
+        switch self {
+        case .sessionStart, .completed, .error: return "セッション"
+        case .approval, .question, .promptSent: return "インタラクション"
+        case .contextLimit: return "システム"
+        }
+    }
+
+    /// 個別に鳴らすかどうかの設定キー
+    var enabledKey: String { "sound.\(rawValue).enabled" }
+
+    var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true
+    }
+
     /// 8bit風モチーフ（音名はおおよそ C5=523Hz を基準）
+    ///
+    /// 意味と音形を対応させている:
+    ///   上行=良い知らせ / 下行=悪い知らせ / 反復=注意を引く / 単発=軽い確認
     var steps: [ToneStep] {
         switch self {
+        case .sessionStart:
+            // 起動音。低→高へ駆け上がる明るい和音進行
+            return [ToneStep(frequency: 523, duration: 0.05),     // C5
+                    ToneStep(frequency: 659, duration: 0.05),     // E5
+                    ToneStep(frequency: 784, duration: 0.12)]     // G5
+
         case .completed:
-            return [ToneStep(frequency: 784, duration: 0.07),    // G5
-                    ToneStep(frequency: 1046, duration: 0.11)]   // C6
+            // 完了。完全4度の上行で「収まった」感じ
+            return [ToneStep(frequency: 784, duration: 0.07),     // G5
+                    ToneStep(frequency: 1046, duration: 0.11)]    // C6
+
         case .error:
-            return [ToneStep(frequency: 415, duration: 0.09),    // G#4
-                    ToneStep(frequency: 311, duration: 0.16)]    // D#4
+            // エラー。下行させて不穏さを出す
+            return [ToneStep(frequency: 415, duration: 0.09),     // G#4
+                    ToneStep(frequency: 311, duration: 0.16)]     // D#4
+
         case .approval:
-            return [ToneStep(frequency: 880, duration: 0.06),    // A5
+            // 承認待ち。反復で気を引き、最後に上げて「待っている」ことを示す
+            return [ToneStep(frequency: 880, duration: 0.06),     // A5
                     ToneStep(frequency: 0, duration: 0.04),
                     ToneStep(frequency: 880, duration: 0.06),
                     ToneStep(frequency: 0, duration: 0.04),
-                    ToneStep(frequency: 1174, duration: 0.12)]   // D6
+                    ToneStep(frequency: 1174, duration: 0.12)]    // D6
+
         case .question:
-            return [ToneStep(frequency: 659, duration: 0.08),    // E5
-                    ToneStep(frequency: 988, duration: 0.13)]    // B5
+            // 質問。語尾を上げる問いかけ調
+            return [ToneStep(frequency: 659, duration: 0.08),     // E5
+                    ToneStep(frequency: 988, duration: 0.13)]     // B5
+
+        case .promptSent:
+            // 送信。邪魔にならないよう短い単発
+            return [ToneStep(frequency: 1046, duration: 0.04)]    // C6
+
+        case .contextLimit:
+            // 警告。低音の反復で他と明確に区別する
+            return [ToneStep(frequency: 392, duration: 0.09),     // G4
+                    ToneStep(frequency: 0, duration: 0.05),
+                    ToneStep(frequency: 392, duration: 0.09),
+                    ToneStep(frequency: 0, duration: 0.05),
+                    ToneStep(frequency: 294, duration: 0.16)]     // D4
         }
     }
 }
@@ -95,7 +162,8 @@ final class SoundAlerts {
     }
 
     func play(_ sound: AlertSound) {
-        guard Self.isEnabled else { return }
+        // 全体設定と、イベントごとの設定の両方を見る
+        guard Self.isEnabled, sound.isEnabled else { return }
         guard let buffer = buffer(for: sound) else { return }
 
         do {

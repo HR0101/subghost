@@ -36,7 +36,10 @@ extension NSScreen {
             id: stableIdentifier,
             name: localizedName,
             hasNotch: hasPhysicalNotch,
-            isMain: self == NSScreen.main
+            // 主ディスプレイは CGMainDisplayID で判定する。
+            // NSScreen.main は「フォーカスされている画面」であり主ディスプレイではない。
+            isPrimary: displayID == CGMainDisplayID(),
+            isActive: self == NSScreen.main
         )
     }
 
@@ -153,8 +156,13 @@ final class NotchPanelController {
     private unowned let coordinator: AppCoordinator
     private let panel: NotchPanel
     private(set) var metrics: NotchMetrics
-    private var pendingShrink: DispatchWorkItem?
+    /// NSPanelの拡大中にSwiftUIから届いた実測高さ。アニメーション完了後に反映する。
+    private var pendingMeasuredHeight: CGFloat?
+    private var isAnimatingFrame = false
+    private var pendingFrameTransition: DispatchWorkItem?
     private var menuBarTimer: Timer?
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
     /// パネルを画面に出しているか（メニューバー追従で切り替わる）
     private var isVisible = true
 
@@ -178,7 +186,9 @@ final class NotchPanelController {
         // クリックを受け取れるようにする（非アクティブのままでも入力は届く）
         panel.ignoresMouseEvents = false
         panel.acceptsMouseMovedEvents = true
-        panel.becomesKeyOnlyIfNeeded = true
+        // makeKeyAndOrderFront でキーウインドウにできるようにする。
+        // true のままだと入力欄にフォーカスが渡らないことがある。
+        panel.becomesKeyOnlyIfNeeded = false
         // 全画面アプリのスペースにも参加させる
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
@@ -210,6 +220,7 @@ final class NotchPanelController {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+        startOutsideClickMonitoring()
     }
 
     func show() {
@@ -269,36 +280,112 @@ final class NotchPanelController {
     private func shouldBeVisible() -> Bool {
         // 応答待ちや入力中は、全画面アプリの上でも見せる必要がある
         guard coordinator.displayMode == .compact else { return true }
+        if NotchPreferences.hideWhenNoSessions, coordinator.watcher.sessions.isEmpty {
+            return false
+        }
+        guard NotchPreferences.hideInFullScreen else { return true }
         guard let screen = NSScreen.preferredNotchScreen() else { return false }
         return MenuBarVisibility.shouldShowNotch(on: screen)
     }
 
+    /// 設定変更を、次回の定期監視を待たずに表示へ反映する。
+    func preferencesChanged() {
+        isVisible = !shouldBeVisible()
+        updateVisibility()
+        modeChanged()
+    }
+
+    // MARK: - 外側クリックで収納
+
+    private func startOutsideClickMonitoring() {
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.closeForOutsideClickIfNeeded()
+            }
+        }
+
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            if let self, event.windowNumber != self.panel.windowNumber {
+                self.closeForOutsideClickIfNeeded()
+            }
+            return event
+        }
+    }
+
+    private func closeForOutsideClickIfNeeded() {
+        guard coordinator.canCloseOnOutsideClick else { return }
+        coordinator.dismissExpandedPanel()
+    }
+
     /// モード変更時のパネルフレーム更新。
-    /// 拡大は即時、縮小はSwiftUIの折りたたみアニメーション後に行う。
+    ///
+    /// NSPanel自体をアニメーションすると「ノッチとは別のウインドウが現れる」見た目になる。
+    /// 展開時は透明な表示領域だけを先に確保し、黒いノッチ形状の変形はSwiftUIへ任せる。
+    /// 収納時は形状がノッチへ戻り終えてから、透明な表示領域を小さくする。
     func modeChanged() {
         // 承認待ちなどで展開する場合は、隠れていても即座に出す
         updateVisibility()
 
         let target = frame(for: coordinator.displayMode)
-        pendingShrink?.cancel()
-        pendingShrink = nil
-
         let current = panel.frame
-        if target.width >= current.width && target.height >= current.height {
+        let needsLargerCanvas = target.width * target.height >= current.width * current.height
+        let isCollapsingToNotch = coordinator.displayMode == .compact
+
+        pendingFrameTransition?.cancel()
+        pendingFrameTransition = nil
+
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let duration = isCollapsingToNotch
+            ? NotchLayout.collapseAnimationDuration
+            : NotchPreferences.expansionAnimationDuration
+
+        // setFrameによるホスティングビューの再レイアウトでも高さ通知が来るため、
+        // キャンバスを広げる前から実測値を保留する。
+        isAnimatingFrame = !reduceMotion
+
+        // 展開先の透明なキャンバスは先に用意する。黒い面はNotchView内で変形する。
+        if needsLargerCanvas || reduceMotion {
             panel.setFrame(target, display: true)
-        } else {
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.panel.setFrame(self.frame(for: self.coordinator.displayMode), display: true)
-            }
-            pendingShrink = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
         }
+
+        guard !reduceMotion else {
+            isAnimatingFrame = false
+            applyPendingMeasuredHeightIfNeeded()
+            return
+        }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // 収納時だけ、黒い面が小さくなった後でウインドウ領域を合わせる。
+            if !needsLargerCanvas {
+                self.panel.setFrame(
+                    self.frame(for: self.coordinator.displayMode),
+                    display: true
+                )
+            }
+            self.isAnimatingFrame = false
+            self.applyPendingMeasuredHeightIfNeeded()
+        }
+        pendingFrameTransition = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    private func applyPendingMeasuredHeightIfNeeded() {
+        guard let height = pendingMeasuredHeight else { return }
+        pendingMeasuredHeight = nil
+        applyMeasuredHeight(height)
     }
 
     // MARK: - キーボードフォーカス (設計書 4.3)
 
     func focusInput() {
+        // 常駐アプリ(LSUIElement)かつ非アクティブ化パネルのため、
+        // アプリ自体をアクティブにしないとキーボード入力が前面のアプリへ行ってしまう。
+        NSApp.activate()
         panel.makeKeyAndOrderFront(nil)
     }
 
@@ -307,6 +394,20 @@ final class NotchPanelController {
         // 一旦orderOutして直前のアプリへキーボードフォーカスを返す
         panel.orderOut(nil)
         panel.orderFrontRegardless()
+        // 入力を終えたら元のアプリへ操作を戻す
+        NSApp.deactivate()
+    }
+
+    /// SwiftUIのonHoverは、ビュー差し替えやウインドウの拡大中にも一時的な
+    /// mouseExitedを送ることがある。実際の画面座標でパネル内かを確認する。
+    func containsCurrentMouseLocation() -> Bool {
+        guard isVisible, panel.isVisible else { return false }
+        // NSPanel.frameをアニメーション中に繰り返し読むと、AppKitの暗黙フレーム
+        // アニメーションが現在値へ同期され、拡大が瞬時に完了して見えることがある。
+        // 表示モードから算出した「展開後の予定領域」で判定し、描画には触れない。
+        let hoverFrame = frame(for: coordinator.displayMode)
+        // 境界上の丸め誤差で内外を往復しないよう、わずかな余裕を持たせる。
+        return hoverFrame.insetBy(dx: -3, dy: -3).contains(NSEvent.mouseLocation)
     }
 
     // MARK: - フレーム計算
@@ -316,13 +417,34 @@ final class NotchPanelController {
         switch mode {
         case .compact:
             size = NSSize(
-                width: metrics.notchWidth + NotchLayout.sideWidth * 2,
+                width: NotchLayout.canvasWidth(
+                    for: metrics.notchWidth + NotchLayout.sideWidth * 2
+                ),
                 height: metrics.topInset
             )
         case .notification:
-            size = NSSize(width: max(metrics.notchWidth + 220, 560), height: 230)
+            // 応答の行数に応じて高さを変える（長文も読めるように）
+            let lines = coordinator.notificationSession?.preview.count ?? 0
+            let height = metrics.topInset + 110 + CGFloat(min(lines, 12)) * 17
+            size = NSSize(width: NotchLayout.canvasWidth(
+                for: max(metrics.notchWidth + 280, 620)),
+                          height: min(max(height, 200), 380))
         case .input:
-            size = NSSize(width: max(metrics.notchWidth + 280, 640), height: 260)
+            size = NSSize(
+                width: NotchLayout.canvasWidth(
+                    for: max(metrics.notchWidth + 280, 640)
+                ),
+                height: 260
+            )
+        case .sessions:
+            // 行数に応じて高さを変える
+            // 1行あたり3行ぶんの情報を出すため、行の高さを厚めに見積もる
+            let count = max(coordinator.watcher.sessions.count, 1)
+            size = NSSize(
+                width: NotchLayout.canvasWidth(
+                    for: max(metrics.notchWidth + 420, 760)
+                ),
+                height: min(metrics.topInset + 70 + CGFloat(count) * 68, 520))
         case .choice:
             // 選択肢の数と文脈行数で高さが変わるため実データから見積もる
             let choice = coordinator.pendingChoice
@@ -332,7 +454,9 @@ final class NotchPanelController {
                 + CGFloat(detailCount) * 16
                 + CGFloat(optionCount) * 38
             size = NSSize(
-                width: max(metrics.notchWidth + 320, 680),
+                width: NotchLayout.canvasWidth(
+                    for: max(metrics.notchWidth + 320, 680)
+                ),
                 height: min(estimated, 480)
             )
         }
@@ -348,6 +472,42 @@ final class NotchPanelController {
         relayout()
     }
 
+    /// SwiftUIが実際に描画した高さへパネルを合わせる。
+    ///
+    /// 高さを見積もりで決めると、描画された内容より下に透明な余白ができる。
+    /// パネルは透明部分でもマウスイベントを受け取るため、そこが「見えない当たり判定」になり
+    /// 下のアプリやメニューバーへのクリックを奪ってしまう。
+    func adjustHeight(to contentHeight: CGFloat, for measuredMode: NotchMode) {
+        guard contentHeight > 0 else { return }
+        // 内容は輪郭より遅れて差し替える。古いモードの高さで
+        // 展開先キャンバスを縮めないよう、現在の表示モードと対応する実測値だけ使う。
+        guard measuredMode == coordinator.displayMode else { return }
+        let target = ceil(contentHeight)
+        if isAnimatingFrame {
+            if measuredMode == .compact {
+                // 収納中は黒い面が縮み終わるまで大きな透明領域を維持する。
+                pendingMeasuredHeight = target
+            } else {
+                // 展開中は内容がフェードインする前に最終高が分かる。
+                // ここでキャンバスを合わせ、展開完了後の二段階の縮小を防ぐ。
+                pendingMeasuredHeight = nil
+                applyMeasuredHeight(target)
+            }
+            return
+        }
+        applyMeasuredHeight(target)
+    }
+
+    private func applyMeasuredHeight(_ target: CGFloat) {
+        // 1pt以内の誤差で作り直すと再測定と往復してしまうため許容する
+        guard abs(panel.frame.height - target) > 1 else { return }
+
+        var frame = panel.frame
+        frame.size.height = target
+        frame.origin.y = metrics.topY - target
+        panel.setFrame(frame, display: true)
+    }
+
     /// 表示先の画面や画面構成が変わったときに、寸法と位置を取り直す
     func relayout() {
         metrics = NotchMetrics.compute()
@@ -360,11 +520,22 @@ final class NotchPanelController {
 
     deinit {
         menuBarTimer?.invalidate()
+        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
     }
 }
 
 /// レイアウト定数（パネルとSwiftUIビューで共有）
 enum NotchLayout {
     static let sideWidth: CGFloat = 44      // コンパクト時、ノッチ左右のアイコン領域幅
-    static let cornerRadius: CGFloat = 18   // 展開時の下角丸
+    static let compactCornerRadius: CGFloat = 12
+    static let cornerRadius: CGFloat = 28   // 展開時の緩やかな下角丸
+    /// 四分円に近い、側面と底面の接線が連続するベジェ制御係数。
+    static let cornerBezierControl: CGFloat = 0.447715
+    static let topShoulderWidth: CGFloat = 12 // 画面上端とつなぐ外向きのカーブ
+    static let collapseAnimationDuration: TimeInterval = 0.32
+
+    static func canvasWidth(for surfaceWidth: CGFloat) -> CGFloat {
+        surfaceWidth + topShoulderWidth * 2
+    }
 }

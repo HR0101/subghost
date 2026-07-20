@@ -8,19 +8,61 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @State private var selection: SettingsPage = .general
+
     var body: some View {
-        TabView {
-            GeneralSettingsView()
-                .tabItem { Label("一般", systemImage: "gearshape") }
-            SnippetSettingsView()
-                .tabItem { Label("スニペット", systemImage: "text.badge.plus") }
-            HookSettingsView()
-                .tabItem { Label("フック連携", systemImage: "bolt.horizontal") }
-            SetupGuideView()
-                .tabItem { Label("セットアップ", systemImage: "questionmark.circle") }
+        HStack(spacing: 0) {
+            List(selection: $selection) {
+                Section {
+                    settingsLink(.general, "一般", "gearshape.fill")
+                    settingsLink(.integration, "統合", "puzzlepiece.extension.fill")
+                    settingsLink(.snippets, "スニペット", "text.badge.plus")
+                }
+                Section("詳細設定") {
+                    settingsLink(.shortcuts, "ショートカット", "keyboard.fill")
+                    settingsLink(.setup, "セットアップ", "wrench.and.screwdriver.fill")
+                }
+                Section {
+                    settingsLink(.information, "情報", "info.circle.fill")
+                }
+            }
+            .listStyle(.sidebar)
+            .frame(width: 190)
+
+            Divider()
+
+            Group {
+                switch selection {
+                case .general: GeneralSettingsView()
+                case .integration: HookSettingsView()
+                case .snippets: SnippetSettingsView()
+                case .shortcuts: ShortcutSettingsView()
+                case .setup: SetupGuideView()
+                case .information: InformationSettingsView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 480, height: 360)
+        .frame(width: 860, height: 680)
     }
+
+    private func settingsLink(
+        _ page: SettingsPage,
+        _ title: String,
+        _ systemImage: String
+    ) -> some View {
+        Label(title, systemImage: systemImage)
+            .tag(page)
+    }
+}
+
+private enum SettingsPage: Hashable {
+    case general
+    case integration
+    case snippets
+    case shortcuts
+    case setup
+    case information
 }
 
 private struct GeneralSettingsView: View {
@@ -32,9 +74,90 @@ private struct GeneralSettingsView: View {
     @AppStorage(DisplayPreference.userDefaultsKey) private var notchDisplay = ""
     @AppStorage("preferredTerminal") private var preferredTerminal = ""
     @AppStorage("tmuxPath") private var tmuxPath = ""
+    @AppStorage(NotchPreferences.hoverExpansionEnabledKey) private var hoverExpansionEnabled = true
+    @AppStorage(NotchPreferences.hoverDelayKey) private var hoverDelay = 0.15
+    @AppStorage(NotchPreferences.expansionAnimationDurationKey)
+    private var expansionAnimationDuration = NotchPreferences.defaultExpansionAnimationDuration
+    @AppStorage(NotchPreferences.smartNotificationSuppressionKey) private var smartNotificationSuppression = true
+    @AppStorage(NotchPreferences.hideInFullScreenKey) private var hideInFullScreen = true
+    @AppStorage(NotchPreferences.hideWhenNoSessionsKey) private var hideWhenNoSessions = false
+    @AppStorage(NotchPreferences.notificationDisplayDurationKey) private var notificationDisplayDuration = 5.0
+    @AppStorage(NotchPreferences.collapseOnMouseExitKey) private var collapseOnMouseExit = true
+    @AppStorage(NotchPreferences.closeOnOutsideClickKey) private var closeOnOutsideClick = true
+    @State private var launchAtLogin = false
+    @State private var isChangingLoginItem = false
+    @State private var loginItemError: String?
 
     var body: some View {
         Form {
+            Section("システム") {
+                Toggle("ログイン時に起動", isOn: Binding(
+                    get: { launchAtLogin },
+                    set: { updateLaunchAtLogin($0) }
+                ))
+                .disabled(isChangingLoginItem)
+                if let loginItemError {
+                    Text(loginItemError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Section("展開") {
+                Toggle("ホバーでノッチを展開", isOn: $hoverExpansionEnabled)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("展開までの待ち時間")
+                        Spacer()
+                        Text("\(hoverDelay, specifier: "%.2f")秒")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $hoverDelay, in: 0...1.0, step: 0.05)
+                        .disabled(!hoverExpansionEnabled)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("展開アニメーション時間")
+                        Spacer()
+                        Text("\(expansionAnimationDuration, specifier: "%.2f")秒")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: $expansionAnimationDuration,
+                        in: NotchPreferences.expansionAnimationDurationRange,
+                        step: 0.05
+                    )
+                }
+                Toggle("スマート抑制", isOn: $smartNotificationSuppression)
+                Text("対象のAIセッションをターミナルで見ている間は、完了パネルを自動展開しません。通知とサウンドは通常どおり届きます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("表示") {
+                Toggle("フルスクリーン時に非表示", isOn: $hideInFullScreen)
+                Toggle("アクティブなセッションがない時に自動非表示", isOn: $hideWhenNoSessions)
+                Text("承認待ち・質問・入力中は、見逃しを防ぐため設定に関係なく表示します。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("収納") {
+                Toggle("マウス離脱時に自動折りたたみ", isOn: $collapseOnMouseExit)
+                Stepper(value: $notificationDisplayDuration, in: 2...30, step: 1) {
+                    LabeledContent("自動表示の表示時間") {
+                        Text("\(notificationDisplayDuration, specifier: "%.0f")秒")
+                            .monospacedDigit()
+                    }
+                }
+                Text("完了通知と警告通知でパネルを表示しておく時間です。Escキーでも早めに閉じられます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("外側のクリックで自動表示を閉じる", isOn: $closeOnOutsideClick)
+            }
+
             Section("監視") {
                 VStack(alignment: .leading) {
                     Slider(value: $pollInterval, in: 0.4...3.0, step: 0.1) {
@@ -60,26 +183,33 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section("サウンド") {
-                Toggle("状態変化を8bit風のアラート音で知らせる", isOn: $soundEnabled)
+                Toggle("サウンドエフェクトを有効にする", isOn: $soundEnabled)
                 VStack(alignment: .leading) {
                     Slider(value: $soundVolume, in: 0.0...1.0, step: 0.05) {
                         Text("音量: \(Int(soundVolume * 100))%")
                     }
                     .disabled(!soundEnabled)
                 }
-                HStack {
-                    ForEach(AlertSound.allCases, id: \.self) { sound in
-                        Button(sound.displayName) {
-                            SoundAlerts.shared.play(sound)
-                        }
-                        .disabled(!soundEnabled)
+                Text("すべてコードで合成した8bit風の音です。音源ファイルは含んでいません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // 参考にしたアプリと同じ粒度で、イベントごとに鳴らし分ける
+            ForEach(SoundSettingsSection.all, id: \.name) { section in
+                Section(section.name) {
+                    ForEach(section.sounds, id: \.self) { sound in
+                        SoundRow(sound: sound)
+                            .disabled(!soundEnabled)
                     }
                 }
             }
+
             Section("表示先ディスプレイ") {
                 Picker("ノッチを表示する画面", selection: $notchDisplay) {
                     Text("自動（ノッチ搭載画面を優先）").tag("")
-                    Text("メインディスプレイ").tag("main")
+                    Text("使用中のモニターに追従").tag("active")
+                    Text("システムの主ディスプレイ").tag("main")
                     Divider()
                     ForEach(NSScreen.screens.map(\.descriptor)) { screen in
                         Text(screen.hasNotch ? "\(screen.name)（ノッチあり）" : screen.name)
@@ -89,7 +219,10 @@ private struct GeneralSettingsView: View {
                 .onChange(of: notchDisplay) { _, _ in
                     AppCoordinator.shared.reloadDisplayPlacement()
                 }
-                Text("ノッチの無い画面を選んだ場合は、メニューバー直下に同じ形のバーを表示します。")
+                Text("「使用中のモニターに追従」は、作業しているウインドウのある画面へノッチが移動します。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("ノッチの無い画面を選んだ場合は、メニューバーに重ねて同じ形のバーを表示します。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("指定した画面を取り外すと、自動選択に戻ります。")
@@ -110,6 +243,19 @@ private struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("キー入力の送信") {
+                LabeledContent("アクセシビリティ") {
+                    Label(KeystrokeSender.isTrusted ? "許可済み" : "未許可",
+                          systemImage: KeystrokeSender.isTrusted ? "checkmark.circle.fill" : "exclamationmark.circle")
+                        .foregroundStyle(KeystrokeSender.isTrusted ? Color.green : Color.orange)
+                }
+                Text("tmuxを介さないセッションへプロンプトや回答を送るには、キー入力を合成する必要があります。対象タブを前面に出してから入力するため、許可が必要です。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !KeystrokeSender.isTrusted {
+                    Button("アクセシビリティを許可する") { KeystrokeSender.requestTrust() }
+                }
+            }
             Section("tmux") {
                 TextField("tmuxのパス（空欄で自動検出）", text: $tmuxPath)
                     .font(.system(.body, design: .monospaced))
@@ -119,6 +265,35 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            launchAtLogin = LoginItemManager.isEnabled
+        }
+        .onChange(of: hoverExpansionEnabled) { _, _ in preferencesChanged() }
+        .onChange(of: hoverDelay) { _, _ in preferencesChanged() }
+        .onChange(of: expansionAnimationDuration) { _, _ in preferencesChanged() }
+        .onChange(of: hideInFullScreen) { _, _ in preferencesChanged() }
+        .onChange(of: hideWhenNoSessions) { _, _ in preferencesChanged() }
+        .onChange(of: collapseOnMouseExit) { _, _ in preferencesChanged() }
+        .onChange(of: closeOnOutsideClick) { _, _ in preferencesChanged() }
+    }
+
+    private func preferencesChanged() {
+        AppCoordinator.shared.preferencesChanged()
+    }
+
+    private func updateLaunchAtLogin(_ enabled: Bool) {
+        launchAtLogin = enabled
+        loginItemError = nil
+        isChangingLoginItem = true
+        Task {
+            do {
+                try await LoginItemManager.setEnabled(enabled)
+            } catch {
+                loginItemError = "ログイン項目を変更できませんでした: \(error.localizedDescription)"
+            }
+            launchAtLogin = LoginItemManager.isEnabled
+            isChangingLoginItem = false
+        }
     }
 }
 
@@ -173,6 +348,13 @@ private struct HookSettingsView: View {
     @State private var installed: [HookTarget: Bool] = [:]
     @State private var messages: [HookTarget: (text: String, isError: Bool)] = [:]
     @State private var confirming: HookTarget?
+    @State private var statuslineMessage: String?
+    @State private var shellMessage: String?
+
+    /// 失敗したらその内容を文字列で返す（成功時は nil）
+    private func run(_ work: () throws -> Void) -> String? {
+        do { try work(); return nil } catch { return "失敗しました: \(error.localizedDescription)" }
+    }
 
     private var serverRunning: Bool { AppCoordinator.shared.watcher.hookServerRunning }
 
@@ -226,6 +408,39 @@ private struct HookSettingsView: View {
                 }
             }
 
+            Section("使用量の取得") {
+                let installed = HookInstaller.isStatuslineInstalled()
+                Label(installed ? "有効" : "無効",
+                      systemImage: installed ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(installed ? Color.green : Color.secondary)
+
+                Text("5時間枠・7日枠の消費率は statusline へ渡されるJSONにしか含まれないため、"
+                     + "既存の statusline コマンドを包んで内容を読み取ります。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("元のコマンドは保存し、解除時に必ず戻します。出力はそのまま通すため、"
+                     + "statusline の見た目は変わりません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if installed {
+                    Button("解除して元に戻す", role: .destructive) {
+                        statuslineMessage = run { try HookInstaller.uninstallStatusline() }
+                            ?? "元の statusline に戻しました。"
+                    }
+                } else {
+                    Button("使用量の取得を有効にする") {
+                        statuslineMessage = run { try HookInstaller.installStatusline() }
+                            ?? "有効にしました。次回の statusline 更新から取得します。"
+                    }
+                }
+                if let statuslineMessage {
+                    Text(statuslineMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section {
                 Text("Subghostが起動していない場合、フックは何もせず即座に終了するため、CLIの動作を妨げません。書き換え前には自動でバックアップを取り、既存の設定は残します。")
                     .font(.caption)
@@ -233,6 +448,38 @@ private struct HookSettingsView: View {
                 Text("Antigravityはフック機構を確認できていないため、tmux方式で監視してください。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("自動でtmux内起動") {
+                let on = ShellIntegration.isInstalled()
+                Label(on ? "有効" : "無効",
+                      systemImage: on ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(on ? Color.green : Color.secondary)
+                Text("有効にすると、ターミナルで claude / codexA / codexB / agyy を起動したとき自動的にtmux内で立ち上がります。各エイリアスのオプションはそのまま保持されます。tmuxを介すと、他の画面を見ながらでもノッチから質問の選択肢に回答できます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("~/.zshrc に読み込み行を1行追加します（書き換え前にバックアップを取ります）。--version などの非対話実行や、すでにtmux内のときは何もしません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if TmuxClient.resolveTmuxPath() == nil {
+                    Text("tmuxが見つかりません。先に brew install tmux でインストールしてください。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if on {
+                    Button("解除する", role: .destructive) {
+                        shellMessage = run { try ShellIntegration.uninstall() } ?? "解除しました。"
+                    }
+                } else {
+                    Button("有効にする") {
+                        shellMessage = run { try ShellIntegration.install() }
+                            ?? "有効にしました。新しいターミナルタブから反映されます（既存タブは source ~/.zshrc）。"
+                    }
+                    .disabled(TmuxClient.resolveTmuxPath() == nil)
+                }
+                if let shellMessage {
+                    Text(shellMessage).font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -284,36 +531,176 @@ private struct HookSettingsView: View {
 }
 
 private struct SetupGuideView: View {
-    private let aliases = """
-    # ~/.zshrc に追加
-    alias aiclaude='tmux new-session -A -s ai-claude claude'
-    alias aicodex='tmux new-session -A -s ai-codex codex'
-    alias aiantigravity='tmux new-session -A -s ai-antigravity antigravity'
-    """
-
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("セットアップ (設計書 10.1)")
+            Text("セットアップ")
                 .font(.headline)
-            Text("AI CLIをtmuxセッション内で起動すると、Subghostが自動検出して監視を開始します。以下のエイリアスをシェル設定に登録し、GhosttyまたはターミナルAppで実行してください。")
+
+            Text("特別な設定は不要です。ターミナルで claude / codexA / codexB / agyy を普通に起動すれば、Subghostが自動的に検出します。セッション名の命名規則は要りません。")
                 .font(.callout)
-            Text(aliases)
-                .font(.system(size: 11, design: .monospaced))
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.5)))
-            HStack {
-                Spacer()
-                Button("エイリアスをコピー") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(aliases, forType: .string)
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("フック連携（Claude Code / Codex）", systemImage: "bolt.horizontal")
+                        .font(.callout).fontWeight(.medium)
+                    Text("「フック連携」タブから有効にすると、tmuxなしで状態監視・承認・質問への回答ができます。誤判定もなくなります。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            Text("⌥Space：ノッチのプロンプト入力欄を開く／閉じる")
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("tmuxを挟み忘れないようにする", systemImage: "terminal")
+                        .font(.callout).fontWeight(.medium)
+                    Text("「統合」タブの「自動でtmux内起動」を有効にすると、claude / codexA / codexB / agyy を普通に起動するだけで、自動的にtmux内で立ち上がります。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("tmux\ncodexA   # codexB / agyyも既存オプションを保持")
+                        .font(.system(size: 11, design: .monospaced))
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
+                }
+            }
+
+            Text("\(HotkeyPreset.current.displayName)：ノッチのプロンプト入力欄を開く／閉じる")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Spacer()
         }
         .padding(20)
+    }
+}
+
+private struct ShortcutSettingsView: View {
+    @AppStorage(HotkeyPreset.userDefaultsKey) private var preset = HotkeyPreset.optionSpace.rawValue
+
+    var body: some View {
+        Form {
+            Section("グローバルショートカット") {
+                Picker("プロンプト入力を開く／閉じる", selection: $preset) {
+                    ForEach(HotkeyPreset.allCases) { option in
+                        Text(option.displayName).tag(option.rawValue)
+                    }
+                }
+                Text("他のアプリを操作中でも使えます。Carbonのホットキーを使うため、アクセシビリティ権限は不要です。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("ノッチ内の操作") {
+                LabeledContent("送信", value: "Return")
+                LabeledContent("閉じる", value: "Esc")
+                LabeledContent("送信履歴", value: "↑")
+                LabeledContent("送信先を切り替える", value: "Tab")
+                LabeledContent("質問の選択肢", value: "1〜9")
+            }
+        }
+        .formStyle(.grouped)
+        .onChange(of: preset) { _, _ in
+            AppCoordinator.shared.hotkey.reload()
+        }
+    }
+}
+
+private struct InformationSettingsView: View {
+    private var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+
+    private var build: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(spacing: 14) {
+                    PixelGhostView(state: .idle, pixelSize: 4)
+                        .frame(width: 52, height: 52)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Subghost")
+                            .font(.title2.bold())
+                        Text("バージョン \(version)（\(build)）")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+
+            Section("対応") {
+                LabeledContent("AI CLI", value: "Claude Code / Codex / Antigravity")
+                LabeledContent("ターミナル", value: "Ghostty / ターミナル.app")
+                LabeledContent("監視方式", value: "フック / tmux")
+            }
+
+            Section("プライバシー") {
+                Text("セッション情報と設定はMac内だけで処理します。Subghost自身が外部サーバーへ会話内容を送信することはありません。")
+                    .foregroundStyle(.secondary)
+                Text("ターミナルへの移動とキー入力には、必要な場合だけmacOSの自動化・アクセシビリティ権限を使用します。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+
+// MARK: - サウンド設定の行
+
+/// 設定画面での分類（参考にしたアプリの並びに合わせている）
+private struct SoundSettingsSection {
+    let name: String
+    let sounds: [AlertSound]
+
+    static let all: [SoundSettingsSection] = {
+        // カテゴリ順を保ったままグループ化する
+        var order: [String] = []
+        var grouped: [String: [AlertSound]] = [:]
+        for sound in AlertSound.allCases {
+            if grouped[sound.category] == nil { order.append(sound.category) }
+            grouped[sound.category, default: []].append(sound)
+        }
+        return order.map { SoundSettingsSection(name: $0, sounds: grouped[$0] ?? []) }
+    }()
+}
+
+/// イベント1件ぶんの設定行（オン/オフ と 試聴）
+private struct SoundRow: View {
+    let sound: AlertSound
+    @State private var isEnabled: Bool
+
+    init(sound: AlertSound) {
+        self.sound = sound
+        _isEnabled = State(initialValue: sound.isEnabled)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(sound.displayName)
+                Text(sound.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+
+            Toggle("", isOn: $isEnabled)
+                .labelsHidden()
+                .onChange(of: isEnabled) { _, newValue in
+                    UserDefaults.standard.set(newValue, forKey: sound.enabledKey)
+                }
+
+            Button {
+                SoundAlerts.shared.play(sound)
+            } label: {
+                Image(systemName: "play.circle")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!isEnabled)
+            .help("試聴する")
+        }
     }
 }
