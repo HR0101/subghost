@@ -151,6 +151,8 @@ final class SessionWatcher {
 
     /// フック受信サーバが動いているか
     private(set) var hookServerRunning = false
+    /// CLIから最後にHookイベントを実受信した時刻。登録済み表示だけでは分からない疎通確認に使う。
+    private(set) var lastHookEventAt: Date?
     @ObservationIgnored private var hookServer: HookServer?
 
     /// 状態遷移イベントの通知先（AppCoordinatorが設定）
@@ -554,12 +556,12 @@ final class SessionWatcher {
             connection.respondPassthrough()
             return
         }
-
         guard let event = HookEventDecoder.decode(request.body) else {
             // 解釈できない形式ならCLI本来の挙動に任せる
             connection.respondPassthrough()
             return
         }
+        lastHookEventAt = Date()
 
         var session = matchSession(request: request, event: event)
         if session == nil {

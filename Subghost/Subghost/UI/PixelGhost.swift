@@ -97,6 +97,12 @@ nonisolated enum GhostSprite {
         default: return 2.2                // たまに瞬きするだけ
         }
     }
+
+    /// 動きは「生成中」の合図として専用に使う。
+    /// 待機中や監視可能というだけではキャラクターを動かさない。
+    static func shouldAnimate(for state: AIState) -> Bool {
+        state == .thinking
+    }
 }
 
 // MARK: - 描画
@@ -121,9 +127,15 @@ struct PixelGhostView: View {
         let (first, second) = GhostSprite.frames(for: state)
         let duration = GhostSprite.frameDuration(for: state)
 
-        // 2コマを交互に描く。状態が変わったらアニメーションを作り直す。
-        PhaseAnimatorFrames(first: first, second: second, duration: duration) { frame in
-            spriteView(frame)
+        Group {
+            if GhostSprite.shouldAnimate(for: state) {
+                // 生成中だけ裾を揺らす。動いているキャラクター＝生成中に統一する。
+                PhaseAnimatorFrames(first: first, second: second, duration: duration) { frame in
+                    spriteView(frame)
+                }
+            } else {
+                spriteView(first)
+            }
         }
         .id(state)
     }

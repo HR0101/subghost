@@ -301,6 +301,7 @@ struct NotchView: View {
         case .input: inputContent
         case .choice: choiceContent
         case .sessions: sessionsContent
+        case .activity: activityContent
         }
     }
 
@@ -311,6 +312,7 @@ struct NotchView: View {
         case .input: return max(notchWidth + 280, 640)
         case .choice: return max(notchWidth + 320, 680)
         case .sessions: return max(notchWidth + 420, 760)
+        case .activity: return max(notchWidth + 420, 760)
         }
     }
 
@@ -455,6 +457,25 @@ struct NotchView: View {
                 }
                 Spacer()
                 Button {
+                    coordinator.showActivity()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 11, weight: .semibold))
+                        if coordinator.activity.unreadCount > 0 {
+                            Text("\(coordinator.activity.unreadCount)")
+                                .font(.system(size: 9, weight: .bold, design: .rounded))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.red.opacity(0.85)))
+                        }
+                    }
+                    .foregroundStyle(.white.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .help("アクティビティ履歴")
+
+                Button {
                     coordinator.dismissExpandedPanel()
                 } label: {
                     Image(systemName: "chevron.up")
@@ -507,15 +528,87 @@ struct NotchView: View {
                 autoTmuxReminder
             }
 
-            VStack(spacing: 6) {
-                ForEach(coordinator.watcher.sessions) { session in
-                    SessionRow(
-                        session: session,
-                        isActive: session.info.tty == coordinator.watcher.activeSessionName,
-                        onJump: { coordinator.jump(to: session) },
-                        onPrompt: { coordinator.promptSession(session) }
-                    )
+            if !coordinator.watcher.sessions.isEmpty {
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: 6) {
+                        ForEach(coordinator.watcher.sessions) { session in
+                            SessionRow(
+                                session: session,
+                                isActive: session.info.tty == coordinator.watcher.activeSessionName,
+                                onJump: { coordinator.jump(to: session) },
+                                onPrompt: { coordinator.promptSession(session) }
+                            )
+                        }
+                    }
+                    .padding(.trailing, 4)
                 }
+                .scrollIndicators(.visible)
+                .frame(height: NotchLayout.sessionsListHeight(
+                    count: coordinator.watcher.sessions.count
+                ))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+    }
+
+    // MARK: - 展開（履歴）：見逃したイベントを確認
+
+    private var activityContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Color.clear.frame(height: topInset)
+
+            HStack(spacing: 8) {
+                Button {
+                    coordinator.showSessions()
+                } label: {
+                    Label("一覧", systemImage: "chevron.left")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+
+                Text("アクティビティ")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                if !coordinator.activity.entries.isEmpty {
+                    Button("すべて消去") {
+                        coordinator.activity.clear()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.5))
+                }
+            }
+
+            if coordinator.activity.entries.isEmpty {
+                ContentUnavailableView {
+                    Label("履歴はまだありません", systemImage: "clock")
+                } description: {
+                    Text("完了・エラー・承認待ち・質問がここに表示されます")
+                }
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(maxWidth: .infinity)
+                .frame(height: 150)
+            } else {
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: 6) {
+                        ForEach(coordinator.activity.entries) { entry in
+                            ActivityRow(
+                                entry: entry,
+                                hasLiveSession: coordinator.hasLiveSession(for: entry),
+                                onOpen: { coordinator.jump(to: entry) }
+                            )
+                        }
+                    }
+                    .padding(.trailing, 4)
+                }
+                .scrollIndicators(.visible)
+                .frame(height: min(
+                    CGFloat(coordinator.activity.entries.count) * 66,
+                    NotchLayout.sessionsListMaxHeight
+                ))
             }
         }
         .padding(.horizontal, 16)
@@ -831,33 +924,52 @@ struct NotchView: View {
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 Spacer()
-                if coordinator.watcher.sessions.count > 1 {
-                    Text("⇥ 送信先切替")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
+                Text("⌘↩ 送信")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.55))
                 Text("Esc で閉じる")
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.4))
             }
 
-            TextField("プロンプトを入力してEnterで送信…", text: $coordinator.inputText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .foregroundStyle(.white)
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.1)))
-                .focused($inputFocused)
-                .onSubmit {
-                    historyIndex = nil
-                    coordinator.sendPrompt()
+            ZStack(alignment: .topLeading) {
+                if coordinator.inputText.isEmpty {
+                    Text("プロンプトを入力…")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 13)
+                        .allowsHitTesting(false)
                 }
+
+                TextEditor(text: $coordinator.inputText)
+                    .scrollContentBackground(.hidden)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .focused($inputFocused)
+            }
+            .frame(minHeight: 88, maxHeight: 140)
+            .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.1)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.white.opacity(0.08), lineWidth: 1)
+            )
+            .onKeyPress(.return, phases: .down) { press in
+                guard press.modifiers.contains(.command) else { return .ignored }
+                historyIndex = nil
+                coordinator.sendPrompt()
+                return .handled
+            }
                 .onExitCommand { coordinator.collapse() }
-                .onKeyPress(.upArrow) { historyUp(); return .handled }
-                .onKeyPress(.downArrow) { historyDown(); return .handled }
-                .onKeyPress(.tab) {
-                    guard coordinator.watcher.sessions.count > 1 else { return .ignored }
-                    coordinator.watcher.cycleActiveSession()
+                .onKeyPress(.upArrow, phases: .down) { press in
+                    guard press.modifiers.contains(.option) else { return .ignored }
+                    historyUp()
+                    return .handled
+                }
+                .onKeyPress(.downArrow, phases: .down) { press in
+                    guard press.modifiers.contains(.option) else { return .ignored }
+                    historyDown()
                     return .handled
                 }
 
@@ -882,12 +994,22 @@ struct NotchView: View {
                 }
             }
 
+            HStack {
+                Text("⌥↑ / ⌥↓ で送信履歴")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+                Spacer()
+                Text("下書きは送信先ごとに保存されます")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+
             if let error = coordinator.lastSendError {
                 Text(error)
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
             } else if coordinator.watcher.sessions.isEmpty {
-                Text("AI CLI が見つかりません。ターミナルで claude / codex / antigravity を起動してください")
+                Text("AI CLI が見つかりません。ターミナルで claude / codexA・B / agyy を起動してください")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
             } else if coordinator.watcher.activeSession?.info.isMonitorable == false {
@@ -970,6 +1092,7 @@ struct SessionRow: View {
                                 .lineLimit(1)
                             Spacer(minLength: 4)
                             TagBadge(text: session.info.profile.displayName, tint: agentTint)
+                            TagBadge(text: session.state.displayName, tint: stateTint)
                             if let terminal = session.info.terminalName {
                                 TagBadge(text: terminal, tint: .white.opacity(0.18))
                             }
@@ -1040,6 +1163,17 @@ struct SessionRow: View {
         }
     }
 
+    private var stateTint: Color {
+        switch session.state {
+        case .idle: return Color.gray.opacity(0.3)
+        case .thinking: return Color.blue.opacity(0.55)
+        case .awaitingApproval: return Color.orange.opacity(0.5)
+        case .awaitingAnswer: return Color.yellow.opacity(0.45)
+        case .completed: return Color.green.opacity(0.45)
+        case .error: return Color.red.opacity(0.5)
+        }
+    }
+
     /// 3行目: 直近のAIの返信。状態が読めなくても記録から出す。
     private var secondaryText: String? {
         if let line = session.preview.first(where: { !$0.isEmpty }) { return line }
@@ -1071,6 +1205,70 @@ struct TagBadge: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(RoundedRectangle(cornerRadius: 4).fill(tint))
+    }
+}
+
+private struct ActivityRow: View {
+    let entry: ActivityEntry
+    let hasLiveSession: Bool
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 10) {
+                AgentBadgeIcon(agentID: entry.agentID, size: 24)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Label(entry.kind.displayName, systemImage: iconName)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(tint)
+                        Text(entry.sessionName)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                        Spacer()
+                        Text(entry.createdAt, style: .relative)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
+                    Text(entry.summary.isEmpty ? entry.agentName : entry.summary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Text(hasLiveSession ? "開く" : "終了済み")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(hasLiveSession ? 0.7 : 0.3))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.white.opacity(entry.isRead ? 0.04 : 0.09))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!hasLiveSession)
+    }
+
+    private var iconName: String {
+        switch entry.kind {
+        case .completed: return "checkmark.circle.fill"
+        case .error: return "exclamationmark.triangle.fill"
+        case .approval: return "hand.raised.fill"
+        case .question: return "questionmark.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch entry.kind {
+        case .completed: return .green
+        case .error: return .red
+        case .approval: return .orange
+        case .question: return .yellow
+        }
     }
 }
 

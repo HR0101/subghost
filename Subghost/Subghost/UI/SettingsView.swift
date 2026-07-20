@@ -5,7 +5,9 @@
 //  設計書 フェーズ5: 設定画面（判定閾値の調整: 設計書 12）
 //
 
+import AppKit
 import SwiftUI
+import UserNotifications
 
 struct SettingsView: View {
     @State private var selection: SettingsPage = .general
@@ -20,6 +22,7 @@ struct SettingsView: View {
                 }
                 Section("詳細設定") {
                     settingsLink(.shortcuts, "ショートカット", "keyboard.fill")
+                    settingsLink(.diagnostics, "診断", "stethoscope")
                     settingsLink(.setup, "セットアップ", "wrench.and.screwdriver.fill")
                 }
                 Section {
@@ -37,6 +40,7 @@ struct SettingsView: View {
                 case .integration: HookSettingsView()
                 case .snippets: SnippetSettingsView()
                 case .shortcuts: ShortcutSettingsView()
+                case .diagnostics: SetupDiagnosticsView()
                 case .setup: SetupGuideView()
                 case .information: InformationSettingsView()
                 }
@@ -61,6 +65,7 @@ private enum SettingsPage: Hashable {
     case integration
     case snippets
     case shortcuts
+    case diagnostics
     case setup
     case information
 }
@@ -601,6 +606,243 @@ private struct ShortcutSettingsView: View {
         .onChange(of: preset) { _, _ in
             AppCoordinator.shared.hotkey.reload()
         }
+    }
+}
+
+private enum DiagnosticHealth {
+    case checking
+    case ready
+    case attention
+    case information
+
+    var iconName: String {
+        switch self {
+        case .checking: return "clock"
+        case .ready: return "checkmark.circle.fill"
+        case .attention: return "exclamationmark.triangle.fill"
+        case .information: return "info.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .checking, .information: return .secondary
+        case .ready: return .green
+        case .attention: return .orange
+        }
+    }
+}
+
+private struct SetupDiagnosticsView: View {
+    @State private var notificationHealth: DiagnosticHealth = .checking
+    @State private var notificationDetail = "確認中…"
+    @State private var refreshedAt = Date()
+
+    private var watcher: SessionWatcher { AppCoordinator.shared.watcher }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("セットアップ診断")
+                            .font(.title2.bold())
+                        Text("権限と監視経路をまとめて確認します")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("再確認", systemImage: "arrow.clockwise") {
+                        refreshedAt = Date()
+                        Task { await refreshNotificationStatus() }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            Section("macOSの権限") {
+                DiagnosticRow(
+                    title: "通知",
+                    detail: notificationDetail,
+                    health: notificationHealth
+                ) {
+                    Button("通知設定を開く") {
+                        openSystemSettings("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+                    }
+                }
+
+                DiagnosticRow(
+                    title: "アクセシビリティ",
+                    detail: KeystrokeSender.isTrusted
+                        ? "tmux外のセッションにもキー入力を送れます"
+                        : "tmux外へのプロンプト送信には許可が必要です",
+                    health: KeystrokeSender.isTrusted ? .ready : .attention
+                ) {
+                    if !KeystrokeSender.isTrusted {
+                        Button("許可する") { KeystrokeSender.requestTrust() }
+                    }
+                    Button("設定を開く") {
+                        openSystemSettings(
+                            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+                        )
+                    }
+                }
+
+                DiagnosticRow(
+                    title: "ターミナル操作",
+                    detail: "ターミナル.appのタブ選択は、初回テスト時に自動化の許可を確認します",
+                    health: .information
+                ) {
+                    Button("移動をテスト") {
+                        guard let session = watcher.activeSession else {
+                            TerminalActivator.activate()
+                            return
+                        }
+                        Task { await TerminalActivator.jump(to: session.info) }
+                    }
+                }
+            }
+
+            Section("Hook") {
+                DiagnosticRow(
+                    title: "受信サーバー",
+                    detail: watcher.hookServerRunning
+                        ? "Unixソケットでイベントを待ち受けています"
+                        : "受信サーバーが停止しています",
+                    health: watcher.hookServerRunning ? .ready : .attention
+                )
+
+                ForEach(HookTarget.allCases) { target in
+                    let installed = HookInstaller.isInstalled(target)
+                    DiagnosticRow(
+                        title: "\(target.displayName)のHook",
+                        detail: installed ? "設定ファイルへ登録済み" : "未登録です。統合画面から有効にできます",
+                        health: installed ? .ready : .attention
+                    )
+                }
+
+                DiagnosticRow(
+                    title: "Hookの実受信",
+                    detail: hookReceiptDetail,
+                    health: watcher.lastHookEventAt == nil ? .information : .ready
+                )
+            }
+
+            Section("tmux") {
+                let tmuxPath = TmuxClient.resolveTmuxPath()
+                DiagnosticRow(
+                    title: "tmux本体",
+                    detail: tmuxPath ?? "tmuxが見つかりません",
+                    health: tmuxPath == nil ? .attention : .ready
+                )
+                DiagnosticRow(
+                    title: "自動tmux起動",
+                    detail: ShellIntegration.isInstalled()
+                        ? "claude / codexA / codexB / agyy を自動的にtmux内で起動します"
+                        : "未設定です。統合画面から有効にできます",
+                    health: ShellIntegration.isInstalled() ? .ready : .information
+                )
+            }
+
+            Section("検出中のセッション") {
+                if watcher.sessions.isEmpty {
+                    Text("AI CLIはまだ検出されていません")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(watcher.sessions) { session in
+                        DiagnosticRow(
+                            title: "\(session.info.profile.displayName) — \(session.info.displayName)",
+                            detail: sessionDetail(session),
+                            health: session.info.isMonitorable ? .ready : .attention
+                        )
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .id(refreshedAt)
+        .task { await refreshNotificationStatus() }
+    }
+
+    private var hookReceiptDetail: String {
+        guard let date = watcher.lastHookEventAt else {
+            return "まだ受信していません。Hook登録後にCLIでプロンプトを送ると確認できます"
+        }
+        return "最終受信: \(date.formatted(date: .abbreviated, time: .standard))"
+    }
+
+    private func sessionDetail(_ session: MonitoredSession) -> String {
+        var parts = ["監視: \(session.info.monitoringSource)", "TTY: \(session.info.shortName)"]
+        if let target = session.info.tmuxTarget { parts.append("tmux: \(target)") }
+        if session.info.isHookConnected { parts.append("Hook接続済み") }
+        if !session.info.isMonitorable { parts.append("状態取得不可") }
+        return parts.joined(separator: " ／ ")
+    }
+
+    private func refreshNotificationStatus() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            notificationHealth = .ready
+            notificationDetail = "通知の表示が許可されています"
+        case .denied:
+            notificationHealth = .attention
+            notificationDetail = "通知が拒否されています。完了や承認要求を見逃す可能性があります"
+        case .notDetermined:
+            notificationHealth = .attention
+            notificationDetail = "通知の許可がまだ選択されていません"
+        @unknown default:
+            notificationHealth = .information
+            notificationDetail = "通知状態を判定できませんでした"
+        }
+    }
+
+    private func openSystemSettings(_ value: String) {
+        guard let url = URL(string: value) else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+private struct DiagnosticRow<Actions: View>: View {
+    let title: String
+    let detail: String
+    let health: DiagnosticHealth
+    @ViewBuilder let actions: () -> Actions
+
+    init(
+        title: String,
+        detail: String,
+        health: DiagnosticHealth,
+        @ViewBuilder actions: @escaping () -> Actions
+    ) {
+        self.title = title
+        self.detail = detail
+        self.health = health
+        self.actions = actions
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: health.iconName)
+                .foregroundStyle(health.color)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            HStack(spacing: 6) { actions() }
+                .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private extension DiagnosticRow where Actions == EmptyView {
+    init(title: String, detail: String, health: DiagnosticHealth) {
+        self.init(title: title, detail: detail, health: health) { EmptyView() }
     }
 }
 
