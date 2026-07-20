@@ -42,6 +42,11 @@ nonisolated struct StateDetector: Sendable {
     /// ノッチから回答済みの選択肢（残像による再通知を抑制するために保持）
     private var answeredChoice: PendingChoice?
     private var answeredAt: Date?
+    /// 起動直後の初回判定で選択肢を見つけたが、まだ確定させていない候補。
+    /// (フールプルーフ: 起動直後はフックがまだ繋がっておらず、会話に残った過去の
+    /// テキストを誤って選択メニューと検出するリスクが最も高い。1回見ただけでは
+    /// 確定させず、次のポーリングでも同じ内容が見えて初めて「生きている」とみなす)
+    private var candidateChoice: PendingChoice?
 
     init(profile: CLIProfile) {
         self.profile = profile
@@ -63,11 +68,13 @@ nonisolated struct StateDetector: Sendable {
         lastCleanedText = Self.clean(rawText, profile: profile)
         lastChangeAt = now
 
-        // 応答待ちで止まっているものは、今も操作を必要としているので必ず拾う
+        // 応答待ちで止まっているものは、今も操作を必要としているので拾いたい。
+        // ただし起動直後はフックがまだ繋がっておらず誤検出のリスクが最も高いタイミングなので、
+        // ここでは即座に確定させず「次のポーリングでも同じなら確定する」候補として保持するに留める。
+        // (実機で確認した不具合: 会話に残った番号付き箇条書きを選択待ちと誤検出していた)
         if let choice = ChoicePrompt.detect(in: rawText, profile: profile) {
-            pendingChoice = choice
-            state = choice.kind == .approval ? .awaitingApproval : .awaitingAnswer
-            return .becameAwaitingChoice(choice)
+            candidateChoice = choice
+            return .none
         }
 
         // 実行中を示す表示が出ていれば生成中とみなす
@@ -98,9 +105,24 @@ nonisolated struct StateDetector: Sendable {
             lastChangeAt = now
         }
 
+        let detected = ChoicePrompt.detect(in: rawText, profile: profile)
+
+        // 起動直後の初回判定で見つけた候補が残っていれば、ここで様子見の結果を確認する。
+        // 今回も同じ内容が見えていれば「生きている」と確定し、消えていれば一過性の
+        // 誤検出だったとみなして破棄する（以降は detected を通常どおり使う）。
+        if let candidate = candidateChoice {
+            candidateChoice = nil
+            if detected == candidate {
+                pendingChoice = candidate
+                completedAt = nil
+                state = candidate.kind == .approval ? .awaitingApproval : .awaitingAnswer
+                return .becameAwaitingChoice(candidate)
+            }
+        }
+
         // 選択待ち（承認/質問）は他のどの判定よりも優先する。
         // ユーザーが答えるまでCLIは進まないため、completedと誤判定してはならない。
-        if let choice = ChoicePrompt.detect(in: rawText, profile: profile) {
+        if let choice = detected {
             // 回答直後は同じ選択肢が画面に残ることがあるため、一定時間は再通知しない
             if let answered = answeredChoice, answered == choice,
                let answeredAt, now.timeIntervalSince(answeredAt) < answeredSuppressionInterval {

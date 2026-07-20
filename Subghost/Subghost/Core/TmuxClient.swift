@@ -18,6 +18,10 @@ nonisolated struct TmuxResult: Sendable {
 nonisolated enum TmuxError: Error, LocalizedError {
     case tmuxNotFound
     case launchFailed(String)
+    /// 確定ボタンの位置を画面から確認できなかった（フェールセーフ: 当て推量では送らない）
+    case cannotVerifyMenuPosition
+    /// 送信後も選択待ちが解消していない（フェールソフト: 成功と偽って表示しない）
+    case choiceNotResolvedAfterSend
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +29,11 @@ nonisolated enum TmuxError: Error, LocalizedError {
             return "tmux が見つかりません。Homebrew等でインストールしてください。"
         case .launchFailed(let message):
             return "tmux の実行に失敗しました: \(message)"
+        case .cannotVerifyMenuPosition:
+            return "確定ボタンの位置を画面から確認できませんでした。誤操作を避けるため送信を中止しました。"
+                + "ターミナルで直接お選びください。"
+        case .choiceNotResolvedAfterSend:
+            return "送信しましたが、選択待ちがまだ解消していません。ターミナルでご確認ください。"
         }
     }
 }
@@ -146,19 +155,29 @@ nonisolated enum TmuxClient {
     /// キー送信のあいだにTUIが描画を追いつかせるための間隔
     private static let keyInterval = Duration.milliseconds(120)
 
-    /// 選択肢への回答キーを送信する（Approve / Ask）
-    /// 番号選択メニューは番号キーだけで確定するため、Enterは needsEnter のときのみ送る。
-    static func sendChoice(_ option: ChoiceOption, to target: String) async throws {
-        let key = sanitize(option.keystroke)
-        guard !key.isEmpty else { return }
-
-        try await sendLiteral(key, to: target)
-        guard option.needsEnter else { return }
-
-        // TUIがキー入力を処理してからEnterを送る
-        try? await Task.sleep(for: keyInterval)
-        try await sendEnter(to: target)
+    /// 選択肢への回答キーを送信する（Approve / Ask）。
+    ///
+    /// needsEnter で経路が分かれる:
+    /// - false: 画面解析で検出した番号メニュー（"❯ 1. Yes" 等、Submit行を持たない）。
+    ///   番号キーだけで即確定する構造を前提とし、Enterは送らない。
+    /// - true: AskUserQuestion由来の単一選択（タブ形式のUI）。
+    ///   番号キーはカーソル移動/選択の合図でしかなく、確定にはSubmit/Next行への
+    ///   到達とEnterが要る。複数選択(sendChoices)と全く同じ構造のため、
+    ///   要素1つの配列として同じ経路に委ねる。
+    ///   (実機で確認した不具合: ここを単純な「番号キー+Enter」のままにしていたため、
+    ///   Enterが意図しない場所へ着地し、確認画面の"Cancel"を踏んで拒否扱いになっていた)
+    static func sendChoice(_ option: ChoiceOption, totalOptionCount: Int, to target: String) async throws {
+        guard option.needsEnter else {
+            let key = sanitize(option.keystroke)
+            guard !key.isEmpty else { return }
+            try await sendLiteral(key, to: target)
+            return
+        }
+        try await sendChoices([option], totalOptionCount: totalOptionCount, to: target)
     }
+
+    /// 画面キャプチャの読み直しを試みる回数。1回失敗しただけの一時的な取りこぼしを拾うため。
+    private static let paneReadRetries = 2
 
     /// 複数選択の回答を送信する。
     ///
@@ -166,12 +185,14 @@ nonisolated enum TmuxClient {
     /// 確定は一覧の末尾にある `Submit`/`Next` 行へカーソルを下ろしてEnterを押す操作なので、
     /// 番号を送ったあとに画面を読み、そこまでの距離だけ↓を送ってから確定する。
     ///
+    /// フェールセーフ: Submit/Next行の位置は必ず画面から確認する。読めない場合は
+    /// 当て推量で↓の回数を決めず、送信を中止する（実機で確認した不具合の再発防止:
+    /// 推測値が実際とズレ、自由記述欄やレビュー画面のCancelを誤って踏んだことがあった）。
+    ///
     /// - Parameters:
     ///   - options: チェックを入れる（選んだ）選択肢。トグルするキーの対象。
-    ///   - totalOptionCount: この問いの選択肢の総数（自由記述欄を除く）。
-    ///     画面が読めなかったときの推定値に使うため、選んだ数と混同しないこと。
-    ///     選んだ数（options.count）を使うと、末尾の選択肢を選ばなかった場合に
-    ///     Submit/Nextの手前で止まり、後続のキー入力が自由記述欄に誤入力される。
+    ///   - totalOptionCount: この問いの選択肢の総数（自由記述欄を除く）。参考情報として保持するのみで、
+    ///     ↓の回数の当て推量には使わない（選んだ数と総数を混同しないこと自体は変わらず重要）。
     static func sendChoices(
         _ options: [ChoiceOption],
         totalOptionCount: Int,
@@ -187,12 +208,18 @@ nonisolated enum TmuxClient {
             try? await Task.sleep(for: keyInterval)
         }
 
-        // 画面を読めない場合に備えた推定値。
-        // カーソルは先頭の選択肢にある。末尾の選択肢まで (総数-1) 回、
-        // 自由記述欄まで+1回、Submit/Nextまでさらに+1回で「総数+1」回。
-        let fallback = totalOptionCount + 1
-        let paneText = await capturePane(target: target)
-        let steps = paneText.flatMap { stepsToSubmit(inPaneText: $0) } ?? fallback
+        // Submit/Next行までの距離は必ず画面から確認する。一時的な取りこぼしに備えて
+        // 数回だけ読み直すが、それでも読めなければ当て推量で↓を送らず中止する。
+        var steps: Int?
+        for _ in 0..<paneReadRetries {
+            if let paneText = await capturePane(target: target),
+               let found = stepsToSubmit(inPaneText: paneText) {
+                steps = found
+                break
+            }
+            try? await Task.sleep(for: keyInterval)
+        }
+        guard let steps else { throw TmuxError.cannotVerifyMenuPosition }
 
         for _ in 0..<steps {
             try await sendKey("Down", to: target)
@@ -207,6 +234,14 @@ nonisolated enum TmuxClient {
         try? await Task.sleep(for: keyInterval)
         if let confirmText = await capturePane(target: target), isReviewScreen(confirmText) {
             try await sendLiteral("1", to: target)
+            try? await Task.sleep(for: keyInterval)
+        }
+
+        // フェールソフト: 送信後もなお同じ選択メニューが画面に残っていれば、
+        // 「送信しました」と偽らずエラーとして報告し、手動対応へ導く。
+        if let afterText = await capturePane(target: target),
+           stepsToSubmit(inPaneText: afterText) != nil {
+            throw TmuxError.choiceNotResolvedAfterSend
         }
     }
 

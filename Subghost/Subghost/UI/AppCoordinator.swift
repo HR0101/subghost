@@ -71,6 +71,13 @@ final class AppCoordinator {
     private(set) var isSendingChoice = false
     /// 送信できた選択肢のラベル（一瞬「送信しました」を出す）
     private(set) var choiceSentLabel: String?
+    /// 消音中か（一覧のスピーカーアイコンと連動）。
+    /// SoundAlerts.isEnabled はUserDefaultsを都度読むだけの static var で、@Observable の
+    /// 変更検知の対象にならない（他クラスの静的プロパティのため）。ここにストアドプロパティとして
+    /// キャッシュし、変更のたびに明示的に更新することでボタンの見た目を追従させる。
+    /// (実機で確認した不具合: ボタンを押しても消音自体は効くが、アイコン表示が変わらなかった)
+    private(set) var isMuted: Bool = !SoundAlerts.isEnabled
+    @ObservationIgnored private var soundDefaultsObserver: NSObjectProtocol?
 
     /// 実際に画面へ出す表示モード（ホバー時は軽く展開してプレビュー: 設計書 6.4）
     var displayMode: NotchMode {
@@ -111,6 +118,17 @@ final class AppCoordinator {
         }
         watcher.startHookServer()
         watcher.start()
+
+        // 設定画面（@AppStorage経由）からサウンド設定が変わった場合にも
+        // ノッチのアイコンを追従させる。ノッチのボタン経由の変更は toggleMute() が
+        // 直接 isMuted を更新するため、ここでの再代入は実質的な変化がなければ無視される。
+        soundDefaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            let current = !SoundAlerts.isEnabled
+            if self.isMuted != current { self.isMuted = current }
+        }
     }
 
     // MARK: - 状態遷移イベント (設計書 4.1 / 4.2)
@@ -406,11 +424,9 @@ final class AppCoordinator {
 
     // MARK: - サウンドの消音
 
-    /// 消音中か（一覧のスピーカーアイコンと連動）
-    var isMuted: Bool { !SoundAlerts.isEnabled }
-
     func toggleMute() {
-        UserDefaults.standard.set(!SoundAlerts.isEnabled, forKey: "soundEnabled")
+        isMuted.toggle()
+        UserDefaults.standard.set(!isMuted, forKey: "soundEnabled")
     }
 
     /// ビューが実際に描画した高さを伝える。

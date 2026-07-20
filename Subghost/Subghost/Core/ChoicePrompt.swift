@@ -274,4 +274,19 @@ nonisolated enum ChoicePrompt {
         guard !pattern.isEmpty else { return false }
         return text.range(of: pattern, options: .regularExpression) != nil
     }
+
+    /// キー送信の直前に、これから回答しようとしている問いが今も画面上にあるかを確認する。
+    ///
+    /// フールプルーフ: 表示から回答までの間に画面が別の内容へ進んでいた場合、
+    /// 古い前提のままキーを送ると無関係な場所に着地しうる（実機で確認した不具合:
+    /// 会話が進んだ後の画面に、古い選択肢向けのキーを送って誤爆した）。
+    /// 送る前に必ずこれで確かめ、崩れていれば送らずに済ませる。
+    ///
+    /// タイトル全文の完全一致は求めない（長い問いは画面幅で折り返されるため）。
+    /// 各選択肢のラベルが画面テキストに含まれているかで緩やかに判定する。
+    nonisolated static func matchesCurrentScreen(optionLabels: [String], in paneText: String) -> Bool {
+        guard !optionLabels.isEmpty else { return false }
+        let normalized = normalizedLines(from: paneText).joined(separator: "\n")
+        return optionLabels.allSatisfy { normalized.contains($0) }
+    }
 }
