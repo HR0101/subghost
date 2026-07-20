@@ -1,0 +1,142 @@
+//
+//  ShellIntegration.swift
+//  Subghost
+//
+//  設計書 追補: AI CLIを自動的にtmux内で起動する
+//
+//  背景（他の画面を見ている間）からノッチで回答するにはtmuxが要る。
+//  毎回 tmux と打たなくて済むよう、claude/codex/agy をシェル関数で包み、
+//  対話起動のときだけ自動でtmuxセッション内に入れる。
+//  agyy → agy、codexA/codexB → codex のような既存エイリアスも、
+//  展開後に同じ関数を通るため、エイリアス側のオプションを保持できる。
+//
+//  安全設計:
+//  - ~/.zshrc は書き換え前にバックアップする
+//  - Subghostが追加した行は目印で囲み、解除時にその範囲だけを取り除く
+//  - 包む処理は「非対話・tmux内・tmux未導入」のときは何もせず素通しする
+//    （claude --version などが壊れない）
+//
+
+import Foundation
+
+nonisolated enum ShellIntegration {
+
+    /// 包む対象のコマンド（実体名）。エイリアス名は上書きしない。
+    static let wrappedCommands = ["claude", "codex", "agy"]
+
+    /// zshrc に挿入するブロックの目印
+    static let beginMarker = "# >>> subghost auto-tmux >>>"
+    static let endMarker = "# <<< subghost auto-tmux <<<"
+
+    static var scriptPath: String {
+        HookInstaller.supportDirectory.appendingPathComponent("shell/auto-tmux.sh").path
+    }
+
+    static var zshrcURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".zshrc")
+    }
+
+    // MARK: - スクリプト本体
+
+    /// 対象コマンドを包むシェル関数を生成する
+    static func scriptBody() -> String {
+        let functions = wrappedCommands.map { command in
+            "\(command)() { _subghost_run \(command) \"$@\"; }"
+        }.joined(separator: "\n")
+
+        return """
+        #!/bin/sh
+        # Subghost: AI CLIを対話起動のときだけ自動でtmux内に入れる。
+        _subghost_run() {
+            _sg_cmd="$1"; shift
+            # 既にtmux内 / tmux未導入 / 非対話（パイプ等）のときはそのまま実行する
+            if [ -n "$TMUX" ] || ! command -v tmux >/dev/null 2>&1 || [ ! -t 1 ]; then
+                command "$_sg_cmd" "$@"
+            else
+                tmux new-session "$_sg_cmd" "$@"
+            fi
+        }
+        \(functions)
+        """
+    }
+
+    /// zshrc へ挿入する1行（スクリプトが在るときだけ読み込む）
+    static func sourceLine() -> String {
+        """
+        \(beginMarker)
+        [ -f "\(scriptPath)" ] && . "\(scriptPath)"
+        \(endMarker)
+        """
+    }
+
+    // MARK: - 状態
+
+    static func isInstalled() -> Bool {
+        guard let contents = try? String(contentsOf: zshrcURL, encoding: .utf8) else { return false }
+        return contents.contains(beginMarker)
+    }
+
+    // MARK: - 導入 / 解除
+
+    static func install() throws {
+        try writeScript()
+
+        let current = (try? String(contentsOf: zshrcURL, encoding: .utf8)) ?? ""
+        // 既に入っていれば二重に足さない
+        guard !current.contains(beginMarker) else { return }
+
+        try backupZshrc()
+        let separator = current.isEmpty || current.hasSuffix("\n") ? "" : "\n"
+        let updated = current + separator + "\n" + sourceLine() + "\n"
+        try updated.write(to: zshrcURL, atomically: true, encoding: .utf8)
+    }
+
+    static func uninstall() throws {
+        guard let current = try? String(contentsOf: zshrcURL, encoding: .utf8),
+              current.contains(beginMarker) else { return }
+        try backupZshrc()
+        let cleaned = removeBlock(from: current)
+        try cleaned.write(to: zshrcURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.removeItem(atPath: scriptPath)
+    }
+
+    // MARK: - テキスト操作（テスト対象の純粋ロジック）
+
+    /// 目印で囲まれたブロックを取り除く
+    static func removeBlock(from text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        var result: [String] = []
+        var inside = false
+        for line in lines {
+            if line.contains(beginMarker) { inside = true; continue }
+            if line.contains(endMarker) { inside = false; continue }
+            if !inside { result.append(line) }
+        }
+        // 除去で生じた連続空行を1つに畳む
+        var collapsed: [String] = []
+        for line in result {
+            if line.isEmpty, collapsed.last?.isEmpty == true { continue }
+            collapsed.append(line)
+        }
+        return collapsed.joined(separator: "\n")
+    }
+
+    // MARK: - ファイル入出力
+
+    private static func writeScript() throws {
+        let dir = (scriptPath as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try scriptBody().write(toFile: scriptPath, atomically: true, encoding: .utf8)
+    }
+
+    private static func backupZshrc() throws {
+        guard FileManager.default.fileExists(atPath: zshrcURL.path) else { return }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let backup = zshrcURL.deletingLastPathComponent()
+            .appendingPathComponent(".zshrc.subghost-backup-\(formatter.string(from: Date()))")
+        try FileManager.default.copyItem(at: zshrcURL, to: backup)
+    }
+}

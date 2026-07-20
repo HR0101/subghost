@@ -11,6 +11,7 @@
 //
 
 import AppKit
+import ApplicationServices
 
 // MARK: - 対応ターミナル
 
@@ -100,6 +101,34 @@ enum TerminalActivator {
             return
         }
         launch(app)
+    }
+
+    /// 指定セッションを表示しているターミナルタブが、いま実際に前面にあるか。
+    ///
+    /// 完了通知をユーザーがすでに見ている画面へ重ねないために使う。
+    /// 判定材料が足りない場合は、通知を見逃させないよう false を返す。
+    static func isSessionFrontmost(_ session: SessionInfo) async -> Bool {
+        let terminalTTY: String
+        if let tmuxSession = session.tmuxSession {
+            guard let clientTTY = await TmuxClient.clientTTY(session: tmuxSession) else {
+                return false
+            }
+            terminalTTY = clientTTY
+        } else {
+            terminalTTY = session.tty
+        }
+
+        guard let app = hostingTerminal(tty: terminalTTY),
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == app.bundleID
+        else { return false }
+
+        switch app {
+        case .terminal:
+            return frontmostTTY() == terminalTTY
+        case .ghostty:
+            guard let title = frontmostGhosttyTitle() else { return false }
+            return titleMatches(title, session: session)
+        }
     }
 
     private static func launch(_ app: TerminalApp) {
@@ -201,13 +230,56 @@ enum TerminalActivator {
     }
 
     /// 指定セッションのタブが前面にあると確認できたか。
-    /// 確認できない場合（Ghostty等）は nil を返し、呼び出し側で送信を中止させる。
+    /// 確認できない場合は nil を返し、呼び出し側で送信を中止させる。
     static func isFrontmostTab(session: SessionInfo) -> Bool? {
         // tmux配下なら送信はtmux経由で行うため、この検証は不要
         guard session.tmuxTarget == nil else { return true }
 
-        guard let focused = frontmostTTY() else { return nil }
-        return focused == session.tty
+        // ターミナル.appは tty で厳密に照合できる
+        if let focused = frontmostTTY() { return focused == session.tty }
+
+        // Ghostty は tty を問い合わせられないが、前面ウインドウのタイトルに
+        // セッションID・作業ディレクトリが含まれるため、それで照合する。
+        if let title = frontmostGhosttyTitle() {
+            return titleMatches(title, session: session)
+        }
+        return nil
+    }
+
+    /// ウインドウタイトルが対象セッションを指しているか（純粋ロジック）
+    nonisolated static func titleMatches(_ title: String, session: SessionInfo) -> Bool {
+        // セッションIDの先頭（Ghosttyはタイトルを短縮するため前方一致で見る）
+        if let id = session.hookSessionID, id.count >= 8 {
+            let prefix = String(id.prefix(8))
+            if title.contains(prefix) { return true }
+        }
+        // 作業ディレクトリのフォルダ名
+        if let cwd = session.workingDirectory {
+            let folder = (cwd as NSString).lastPathComponent
+            if !folder.isEmpty, title.contains(folder) { return true }
+        }
+        return false
+    }
+
+    /// Ghosttyの前面ウインドウのタイトル（Accessibility経由）
+    static func frontmostGhosttyTitle() -> String? {
+        guard TerminalApp.ghostty.isRunning,
+              let app = NSRunningApplication.runningApplications(
+                withBundleIdentifier: TerminalApp.ghostty.bundleID).first
+        else { return nil }
+
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            axApp, kAXFocusedWindowAttribute as CFString, &focused) == .success,
+            let window = focused
+        else { return nil }
+
+        var title: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window as! AXUIElement, kAXTitleAttribute as CFString, &title) == .success
+        else { return nil }
+        return title as? String
     }
 
     /// AppleScriptへ埋め込む前にttyの形式を検証する（スクリプト注入の防止）

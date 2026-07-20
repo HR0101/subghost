@@ -12,11 +12,15 @@ import Observation
 /// セッション操作のエラー
 nonisolated enum SessionError: Error, LocalizedError {
     case notMonitorable
+    case backgroundInputUnavailable
 
     var errorDescription: String? {
         switch self {
         case .notMonitorable:
             return "このセッションはtmuxの外で動いているため、送信できません。tmux内で起動し直すと操作できます。"
+        case .backgroundInputUnavailable:
+            return "他の画面を見ながら回答するには tmux が必要です。"
+                + "ターミナルで tmux を実行してからCLIを起動すると、ノッチから直接回答できます。"
         }
     }
 }
@@ -28,8 +32,20 @@ final class MonitoredSession: Identifiable {
     var state: AIState = .idle
     var preview: [String] = []
     var lastCompletedAt: Date?
+    /// 直近のユーザー発言（一覧に出す）
+    var lastUserPrompt: String?
+    /// 直近のAIの返信（一覧に出す。監視できなくても記録から読む）
+    var lastReply: String?
+    /// 解決済みの作業ディレクトリ（表示用）
+    var workingDirectory: String?
+    /// 最後に何か動きがあった時刻（経過時間の表示に使う）
+    var lastActivityAt: Date = Date()
     /// ノッチから回答すべき選択肢（承認/質問）。なければ nil。
     var pendingChoice: PendingChoice?
+    /// まだ尋ねていない残りの質問。
+    /// AskUserQuestion は複数の問いを1回で送ってくるが、CLIは1問ずつ順に尋ねる。
+    /// 1問答えるたびにここから次を取り出して表示する。
+    @ObservationIgnored var questionQueue: [PendingChoice] = []
 
     @ObservationIgnored var detector: StateDetector
     /// 応答待ちで保持しているフック接続。返答するまでCLIは停止している。
@@ -55,16 +71,17 @@ final class MonitoredSession: Identifiable {
         preview = []
         releasePendingHook(with: .passthrough)
         pendingChoice = nil
+        questionQueue = []
         lastCompletedAt = nil
     }
 
     /// この選択肢に回答を返せるか。
     /// 承認はフックの戻り値で答えられるが、質問への回答はCLIへ文字を送る必要があり、
     /// tmuxを介していないセッションでは送る手段がない。
+    /// 背景（他の画面を見ている間）でも回答を届けられるか。
+    /// フックの戻り値かtmuxのpty書き込みのみが該当する。キー入力の合成は前面タブが要るため含めない。
     var canRespondToChoice: Bool {
-        // キー入力の合成が使えるかは送信直前にタブを検証して決まるため、
-        // ここでは可能性として真を返し、確定判断は KeystrokeSender 側に任せる。
-        pendingHookConnection != nil || info.tmuxTarget != nil || KeystrokeSender.isTrusted
+        pendingHookConnection != nil || info.tmuxTarget != nil
     }
 
     /// 識別情報だけを差し替える（状態や承認待ちは維持する）
@@ -83,6 +100,10 @@ final class MonitoredSession: Identifiable {
 /// ai-* セッションの検出・ポーリング・状態遷移イベントの発火を担う。
 @Observable
 final class SessionWatcher {
+
+    /// 1問答えてから次の問いをノッチへ出すまでの待ち時間。
+    /// CLIが次の問いを描画し終える前に出すと、送ったキーが前の画面に入る。
+    static let nextQuestionDelay = Duration.milliseconds(500)
 
     private(set) var sessions: [MonitoredSession] = []
     var activeSessionName: String? {
@@ -106,6 +127,26 @@ final class SessionWatcher {
     /// 検出はできたが監視も操作もできないセッションがあるか
     var hasUnmonitorableSession: Bool {
         sessions.contains { !$0.info.isMonitorable }
+    }
+
+    /// CLIごとの使用量。Claudeはstatusline経由、Codexはセッション記録から取得する。
+    private(set) var usageByAgent: [String: UsageStats] = [:]
+
+    /// 取得済みの全AIの使用量（アイコン順に並べる）
+    var allUsage: [UsageStats] {
+        let order = ["claude", "codex", "antigravity"]
+        return usageByAgent.values.sorted {
+            (order.firstIndex(of: $0.agentID) ?? 99) < (order.firstIndex(of: $1.agentID) ?? 99)
+        }
+    }
+
+    /// 最後に使ったAIの使用量。無ければ取得済みのうち最も新しいもの。
+    var usage: UsageStats? {
+        let lastUsed = sessions
+            .max { $0.lastActivityAt < $1.lastActivityAt }?
+            .info.profile.id
+        if let lastUsed, let stats = usageByAgent[lastUsed] { return stats }
+        return usageByAgent.values.max { $0.updatedAt < $1.updatedAt }
     }
 
     /// フック受信サーバが動いているか
@@ -179,7 +220,51 @@ final class SessionWatcher {
             apply(event: event, to: session)
         }
 
+        refreshCodexUsage()
+        await refreshConversationTails()
         writeStateDumpIfEnabled()
+    }
+
+    /// 各セッションの直近のやり取りを記録から読み出す。
+    /// 状態（動作中か）が分からないセッションでも、送ったプロンプトと返信は出せる。
+    private func refreshConversationTails() async {
+        for session in sessions {
+            let pid = session.info.pid
+            let profileID = session.info.profile.id
+            let needsTail = !(session.info.isHookConnected && session.lastUserPrompt != nil)
+            // 作業ディレクトリは一度解決すれば変わらないので、未取得のときだけ求める
+            let needsCwd = session.info.workingDirectory == nil
+
+            guard needsTail || needsCwd else { continue }
+
+            // ファイルI/Oとlsofを伴うため、メインアクターの外で実行する
+            let result = await Task.detached { () -> (ConversationTail, String?) in
+                let cwd = needsCwd ? ConversationLocator.workingDirectory(pid: pid) : nil
+                let tail = needsTail
+                    ? ConversationLocator.conversationTail(pid: pid, profileID: profileID)
+                    : ConversationTail(userPrompt: nil, assistantReply: nil)
+                return (tail, cwd)
+            }.value
+
+            if let prompt = result.0.userPrompt { session.lastUserPrompt = prompt }
+            if let reply = result.0.assistantReply { session.lastReply = reply }
+            if let cwd = result.1 {
+                var info = session.info
+                info.workingDirectory = cwd
+                session.replaceInfoPreservingState(info)
+            }
+        }
+    }
+
+    /// Codexの使用量をセッション記録から読み出す。
+    /// Codexにはstatuslineの仕組みが無いため、記録の `token_count` イベントを見る。
+    private func refreshCodexUsage() {
+        guard sessions.contains(where: { $0.info.profile.id == "codex" }) else { return }
+        guard let path = CodexRollout.latestPath() else { return }
+        guard let text = TranscriptReader.readTail(path: path) else { return }
+        if let stats = UsageParser.parseCodexRateLimits(inJSONLines: text) {
+            usageByAgent[stats.agentID] = stats
+        }
     }
 
     /// 内部状態をJSONで書き出す（診断用）。
@@ -234,7 +319,10 @@ final class SessionWatcher {
 
         let existing = Set(sessions.map { $0.info.tty })
         for agent in agents where !existing.contains(agent.tty) {
-            sessions.append(MonitoredSession(info: SessionInfo(agent: agent)))
+            var info = SessionInfo(agent: agent)
+            // ターミナルの特定はプロセス走査を伴うため、検出時に一度だけ行う
+            info.terminalName = resolveTerminalName(for: info)
+            sessions.append(MonitoredSession(info: info))
         }
 
         // 表示順を安定させる（CLI種別 → tty）
@@ -256,6 +344,14 @@ final class SessionWatcher {
                 ?? sessions.first?.info.tty
         }
         preferMonitorableSession()
+    }
+
+    /// そのセッションが動いているターミナルの名前を求める
+    private func resolveTerminalName(for info: SessionInfo) -> String? {
+        // tmux配下ではペインのptyであり、アタッチ中クライアントのttyとは別物
+        let tty = info.tmuxSession == nil ? info.tty : nil
+        guard let tty else { return nil }
+        return TerminalActivator.hostingTerminal(tty: tty)?.displayName
     }
 
     /// 送信先が監視できないセッションのままなら、監視できるものへ移す。
@@ -301,11 +397,15 @@ final class SessionWatcher {
             session.state = .completed
             session.preview = preview
             session.lastCompletedAt = Date()
+            // 一連の問いは終わっている。積み残しを次の応答へ持ち越さない。
+            session.questionQueue = []
         case .becameError(let preview):
             session.state = .error
             session.preview = preview
+            session.questionQueue = []
         case .becameIdle:
             session.state = .idle
+            session.questionQueue = []
         case .becameAwaitingChoice(let choice):
             session.state = choice.kind == .approval ? .awaitingApproval : .awaitingAnswer
             session.pendingChoice = choice
@@ -341,9 +441,18 @@ final class SessionWatcher {
 
     /// ノッチで選ばれた選択肢をセッションへ送信する
     func respond(with option: ChoiceOption, in session: MonitoredSession) async throws {
+        try await respond(with: [option], in: session)
+    }
+
+    /// 複数選択の回答をまとめて送信する。
+    /// 単一選択でも要素1つの配列として扱えるため、こちらが実体になる。
+    func respond(with options: [ChoiceOption], in session: MonitoredSession) async throws {
+        guard let first = options.first else { return }
+        let isMultiSelect = session.pendingChoice?.isMultiSelect ?? false
+
         // フック経由の承認は、待たせている接続に判定を返すだけでよい（キー送信は不要）
         if session.pendingHookConnection != nil {
-            let decision: HookDecision = option.isNegative
+            let decision: HookDecision = first.isNegative
                 ? .deny(reason: "Subghostで拒否しました")
                 : .allow
             session.releasePendingHook(with: decision)
@@ -353,18 +462,47 @@ final class SessionWatcher {
         }
 
         guard let target = session.info.tmuxTarget else {
-            // tmuxが無い場合はキー入力を合成して送る（要アクセシビリティ権限）
-            try await KeystrokeSender.send(
-                text: option.keystroke, to: session.info, submit: option.needsEnter)
-            session.pendingChoice = nil
-            session.state = .thinking
+            // tmuxもフック接続も無い場合、背景のタブへ入力を届ける手段がない。
+            // キー入力の合成は「前面のタブ」にしか届かず、他を見ている間は送れないため、
+            // 空振りさせずに理由を返す（誤送信も防ぐ）。
+            throw SessionError.backgroundInputUnavailable
+        }
+
+        if isMultiSelect {
+            // フォールバック用の総数は「選んだ数」ではなく「この問いの選択肢の総数」。
+            // 選ばなかった項目があると、選んだ数だけでは↓が足りず自由記述欄止まりになる。
+            let totalOptionCount = session.pendingChoice?.options.count ?? options.count
+            try await TmuxClient.sendChoices(options, totalOptionCount: totalOptionCount, to: target)
+        } else {
+            try await TmuxClient.sendChoice(first, to: target)
+        }
+        session.pendingChoice = nil
+
+        // 同じ呼び出しに問いが残っていれば、完了扱いにせず次の1問を出す
+        if !session.questionQueue.isEmpty {
+            presentNextQuestion(in: session)
             return
         }
-        try await TmuxClient.sendChoice(option, to: target)
-        session.pendingChoice = nil
+
         let event = session.detector.noteUserAnsweredChoice(at: Date())
         apply(event: event, to: session)
         if event == .none { session.state = .thinking }
+    }
+
+    /// 残りの質問から次の1問をノッチへ出す。
+    ///
+    /// CLIは前の回答を受け取ってから次の問いを描画するため、すぐに次を出すと
+    /// 送ったキーが前の画面に入ってしまう。描画が追いつく分だけ待ってから表示する。
+    private func presentNextQuestion(in session: MonitoredSession) {
+        guard !session.questionQueue.isEmpty else { return }
+        session.state = .awaitingAnswer
+
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.nextQuestionDelay)
+            guard let self, !session.questionQueue.isEmpty else { return }
+            let next = session.questionQueue.removeFirst()
+            self.apply(event: .becameAwaitingChoice(next), to: session)
+        }
     }
 
     // MARK: - フック方式 (追補: ゼロコンフィグ監視)
@@ -410,6 +548,13 @@ final class SessionWatcher {
     }
 
     private func handleHook(request: HookRequest, connection: HookServer.Connection) async {
+        // statuslineからの使用量は別経路。応答は不要なので即座に返す。
+        if request.path == "/usage" {
+            if let stats = UsageParser.parse(request.body) { usageByAgent[stats.agentID] = stats }
+            connection.respondPassthrough()
+            return
+        }
+
         guard let event = HookEventDecoder.decode(request.body) else {
             // 解釈できない形式ならCLI本来の挙動に任せる
             connection.respondPassthrough()
@@ -437,11 +582,42 @@ final class SessionWatcher {
         info.hookSessionID = event.sessionID
         info.projectName = event.projectName
         session.replaceInfoPreservingState(info)
+        session.lastActivityAt = Date()
+        // 一覧に出すため、直近のユーザー発言を記録から拾う
+        if let path = event.transcriptPath,
+           let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
+            session.lastUserPrompt = prompt
+        }
         // 実際に動いているセッションを送信先にする
         preferMonitorableSession()
 
         applyHook(event: event, to: session, connection: connection)
         writeStateDumpIfEnabled(trigger: "hook:\(event.kind.rawValue)")
+    }
+
+    /// 記録に質問が書かれるまで短い間隔で読み直す。
+    /// Notification発火時点では質問がまだ記録に無いため（実測）、遅れて現れるのを待つ。
+    private func pollForQuestion(path: String, in session: MonitoredSession) {
+        Task { @MainActor in
+            // 0.3秒間隔で最大2秒ほど待つ
+            for _ in 0..<6 {
+                try? await Task.sleep(for: .milliseconds(300))
+                // 既に別の状態へ移っていたら打ち切る（回答済み・完了など）
+                guard session.state == .awaitingAnswer else { return }
+                let questions = TranscriptReader.latestQuestions(transcriptPath: path)
+                if !questions.isEmpty {
+                    enqueue(questions: questions, in: session)
+                    return
+                }
+            }
+        }
+    }
+
+    /// 一連の質問を受け取り、先頭をノッチへ出して残りをキューに積む
+    private func enqueue(questions: [PendingChoice], in session: MonitoredSession) {
+        guard let first = questions.first else { return }
+        session.questionQueue = Array(questions.dropFirst())
+        apply(event: .becameAwaitingChoice(first), to: session)
     }
 
     /// フックのイベントを既知のセッションに突き合わせる。
@@ -477,6 +653,24 @@ final class SessionWatcher {
 
         switch event.kind {
         case .permissionRequest:
+            // AskUserQuestion は「ツール実行の許可」ではなく「選択肢への回答」なので、
+            // 許可/拒否の2択で見せるのは誤り。自動で許可し、Claude Codeに本来の
+            // 質問を出させてから、Notification経由で実際の選択肢を表示する。
+            if event.toolName == "AskUserQuestion" {
+                // ツール実行を許可し、Claude Codeに本来の質問を出させる。
+                connection.respond(json: HookDecision.allow.json)
+                // 選択肢は tool_input に入っているので、記録を待たずそのまま表示する。
+                // 複数の問いが含まれる場合は、先頭を出して残りをキューへ積む。
+                if !event.embeddedQuestions.isEmpty {
+                    enqueue(questions: event.embeddedQuestions, in: session)
+                } else {
+                    session.state = .awaitingAnswer
+                    onEvent?(session, .none)
+                    if let path = event.transcriptPath { pollForQuestion(path: path, in: session) }
+                }
+                return
+            }
+
             session.pendingHookConnection = connection
             let choice = PendingChoice(
                 kind: .approval,
@@ -493,13 +687,21 @@ final class SessionWatcher {
         case .notification:
             // Notificationのペイロードには本文しか入っていないため、
             // セッション記録から直近の質問と選択肢を復元して選べるようにする。
-            if let path = event.transcriptPath,
-               let choice = TranscriptReader.latestQuestion(transcriptPath: path) {
-                apply(event: .becameAwaitingChoice(choice), to: session)
+            //
+            // 重要: Claude Codeは質問を記録へ書き込む前にNotificationを発火する（実測）。
+            // 発火直後は記録に未回答の質問が無いため、少し待ってから読み直す。
+            let questions = event.transcriptPath
+                .map { TranscriptReader.latestQuestions(transcriptPath: $0) } ?? []
+            if !questions.isEmpty {
+                enqueue(questions: questions, in: session)
             } else {
+                // まず質問中として表示し、記録が書かれ次第、選択肢へ差し替える
                 session.state = .awaitingAnswer
                 session.preview = [event.title]
                 onEvent?(session, .none)
+                if let path = event.transcriptPath {
+                    pollForQuestion(path: path, in: session)
+                }
             }
 
         case .stop:
@@ -515,11 +717,13 @@ final class SessionWatcher {
         case .sessionStart:
             session.state = .idle
             session.pendingChoice = nil
+            session.questionQueue = []
             SoundAlerts.shared.play(.sessionStart)
 
         case .sessionEnd:
             session.state = .idle
             session.pendingChoice = nil
+            session.questionQueue = []
 
         case .preCompact:
             // コンテキストが逼迫していることを音だけで知らせる（状態は変えない）

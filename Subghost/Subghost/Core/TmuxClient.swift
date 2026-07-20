@@ -143,24 +143,129 @@ nonisolated enum TmuxClient {
         }
     }
 
+    /// キー送信のあいだにTUIが描画を追いつかせるための間隔
+    private static let keyInterval = Duration.milliseconds(120)
+
     /// 選択肢への回答キーを送信する（Approve / Ask）
     /// 番号選択メニューは番号キーだけで確定するため、Enterは needsEnter のときのみ送る。
     static func sendChoice(_ option: ChoiceOption, to target: String) async throws {
         let key = sanitize(option.keystroke)
         guard !key.isEmpty else { return }
 
-        let sendKey = try await run(["send-keys", "-t", target, "-l", "--", key])
-        guard sendKey.succeeded else {
-            throw TmuxError.launchFailed(sendKey.stderr.isEmpty ? "send-keys failed" : sendKey.stderr)
-        }
+        try await sendLiteral(key, to: target)
         guard option.needsEnter else { return }
 
         // TUIがキー入力を処理してからEnterを送る
-        try? await Task.sleep(for: .milliseconds(120))
-        let sendEnter = try await run(["send-keys", "-t", target, "Enter"])
-        guard sendEnter.succeeded else {
-            throw TmuxError.launchFailed(sendEnter.stderr.isEmpty ? "send-keys Enter failed" : sendEnter.stderr)
+        try? await Task.sleep(for: keyInterval)
+        try await sendEnter(to: target)
+    }
+
+    /// 複数選択の回答を送信する。
+    ///
+    /// 複数選択UIでは番号キーが「選択のトグル」で、Enterは「カーソル行の選択」を意味する。
+    /// 確定は一覧の末尾にある `Submit`/`Next` 行へカーソルを下ろしてEnterを押す操作なので、
+    /// 番号を送ったあとに画面を読み、そこまでの距離だけ↓を送ってから確定する。
+    ///
+    /// - Parameters:
+    ///   - options: チェックを入れる（選んだ）選択肢。トグルするキーの対象。
+    ///   - totalOptionCount: この問いの選択肢の総数（自由記述欄を除く）。
+    ///     画面が読めなかったときの推定値に使うため、選んだ数と混同しないこと。
+    ///     選んだ数（options.count）を使うと、末尾の選択肢を選ばなかった場合に
+    ///     Submit/Nextの手前で止まり、後続のキー入力が自由記述欄に誤入力される。
+    static func sendChoices(
+        _ options: [ChoiceOption],
+        totalOptionCount: Int,
+        to target: String
+    ) async throws {
+        let keys = options.map { sanitize($0.keystroke) }.filter { !$0.isEmpty }
+        guard !keys.isEmpty else { return }
+
+        // 番号キーは選択のトグル。カーソルの位置は動かない。
+        for key in keys {
+            try await sendLiteral(key, to: target)
+            // 連続して送るとトグルを取りこぼすため、1つずつ間を空ける
+            try? await Task.sleep(for: keyInterval)
         }
+
+        // 画面を読めない場合に備えた推定値。
+        // カーソルは先頭の選択肢にある。末尾の選択肢まで (総数-1) 回、
+        // 自由記述欄まで+1回、Submit/Nextまでさらに+1回で「総数+1」回。
+        let fallback = totalOptionCount + 1
+        let paneText = await capturePane(target: target)
+        let steps = paneText.flatMap { stepsToSubmit(inPaneText: $0) } ?? fallback
+
+        for _ in 0..<steps {
+            try await sendKey("Down", to: target)
+            try? await Task.sleep(for: keyInterval)
+        }
+        try await sendEnter(to: target)
+    }
+
+    /// 文字列をリテラル（`-l`）として送る
+    private static func sendLiteral(_ text: String, to target: String) async throws {
+        let result = try await run(["send-keys", "-t", target, "-l", "--", text])
+        guard result.succeeded else {
+            throw TmuxError.launchFailed(result.stderr.isEmpty ? "send-keys failed" : result.stderr)
+        }
+    }
+
+    /// Enterキーを送る
+    private static func sendEnter(to target: String) async throws {
+        try await sendKey("Enter", to: target)
+    }
+
+    /// 名前付きのキー（Enter / Down など）を送る
+    private static func sendKey(_ name: String, to target: String) async throws {
+        let result = try await run(["send-keys", "-t", target, name])
+        guard result.succeeded else {
+            throw TmuxError.launchFailed(
+                result.stderr.isEmpty ? "send-keys \(name) failed" : result.stderr)
+        }
+    }
+
+    // MARK: - 確定ボタンの位置（テスト対象の純粋ロジック）
+
+    /// カーソル行の目印
+    private static let cursorMarker = "❯"
+    /// 確定ボタンの表示。
+    /// 複数の問いが1画面にタブでまとまっている場合、最後の問いだけ "Submit"、
+    /// それ以外は次のタブへ進む "Next" と表示される。どちらも「↓とEnterで進む」操作は同じ。
+    private static let submitLabels: Set<String> = ["Submit", "Next"]
+    /// 選択肢行の書式: "1. [ ] ラベル"
+    private static let numberedLinePattern = #"^\d{1,2}\.\s"#
+
+    /// 画面テキストから、カーソル位置からSubmitまでに必要な↓の回数を求める。
+    ///
+    /// 選択肢の下には説明文が挟まるが、↓は説明文を飛ばして選択肢単位で動く。
+    /// そのため行数ではなく「移動できる行」の数を数える。
+    /// 見つからなければ nil（呼び出し側で推定値を使う）。
+    nonisolated static func stepsToSubmit(inPaneText text: String) -> Int? {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        // 画面上部の会話にも "❯" が現れうるため、一番下の出現をカーソルとみなす
+        guard let cursorLine = lines.lastIndex(where: { $0.contains(cursorMarker) }) else { return nil }
+
+        var steps = 0
+        for line in lines[(cursorLine + 1)...] {
+            if isSubmitLine(line) { return steps + 1 }
+            if isOptionLine(line) { steps += 1 }
+        }
+        return nil
+    }
+
+    /// 確定ボタンだけの行か（上部のタブ表示と区別する）
+    private static func isSubmitLine(_ line: String) -> Bool {
+        submitLabels.contains(stripped(line))
+    }
+
+    /// 番号付きの選択肢行か
+    private static func isOptionLine(_ line: String) -> Bool {
+        stripped(line).range(of: numberedLinePattern, options: .regularExpression) != nil
+    }
+
+    /// カーソル記号と前後の空白を落とす
+    private static func stripped(_ line: String) -> String {
+        line.replacingOccurrences(of: cursorMarker, with: "")
+            .trimmingCharacters(in: .whitespaces)
     }
 
     /// send-keysに渡す前に制御文字を除去する (設計書 9)

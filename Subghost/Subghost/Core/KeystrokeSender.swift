@@ -106,11 +106,25 @@ enum KeystrokeSender {
 
     // MARK: - 低レベル
 
+    /// 数字・英字の仮想キーコード（US配列）。
+    /// ターミナルはUnicode文字列イベントを文字として受け取らないことがあるため、
+    /// 選択肢の回答（数字・y/n）は実キーコードで送る。
+    private static let keyCodes: [Character: CGKeyCode] = [
+        "0": 29, "1": 18, "2": 19, "3": 20, "4": 21,
+        "5": 23, "6": 22, "7": 26, "8": 28, "9": 25,
+        "y": 16, "n": 45,
+    ]
+
     /// 任意の文字列をキーイベントとして送る。
-    /// 仮想キーコードへの変換はキーボード配列に依存するため、
-    /// Unicode文字列を直接載せる方式にしている（配列非依存）。
+    /// 数字・y/nは実キーコードで、それ以外はUnicode文字列で送る。
     static func type(_ text: String) throws {
         let source = CGEventSource(stateID: .combinedSessionState)
+
+        // 選択肢の回答（"1" や "y" など単一文字）は実キーコードで確実に送る
+        if text.count == 1, let key = keyCodes[Character(text.lowercased())] {
+            try postKeyCode(key, source: source)
+            return
+        }
 
         for chunk in chunked(text) {
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
@@ -123,6 +137,15 @@ enum KeystrokeSender {
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
         }
+    }
+
+    /// 仮想キーコードでキーを1つ送る
+    private static func postKeyCode(_ key: CGKeyCode, source: CGEventSource?) throws {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
+        else { throw KeystrokeError.eventCreationFailed }
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 
     static func pressReturn() throws {

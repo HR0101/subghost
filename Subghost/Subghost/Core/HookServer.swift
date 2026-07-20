@@ -18,6 +18,8 @@ import Foundation
 // MARK: - リクエスト
 
 nonisolated struct HookRequest: Sendable {
+    /// リクエストの宛先パス（"/hook" か "/usage"）
+    let path: String
     let source: String          // "claude" 等
     let tty: String?            // ブリッジが付けるヘッダ由来。取れないこともある。
     let pid: Int32?             // CLI本体のpid。ttyより確実にセッションを特定できる。
@@ -171,6 +173,7 @@ final class HookServer: @unchecked Sendable {
             return
         }
         let request = HookRequest(
+            path: parsed.path,
             source: parsed.query["source"] ?? "unknown",
             tty: HookRequest.normalizeTTY(parsed.headers["x-subghost-tty"]),
             pid: parsed.headers["x-subghost-pid"].flatMap { Int32($0) }.flatMap { $0 > 0 ? $0 : nil },

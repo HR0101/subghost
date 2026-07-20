@@ -74,6 +74,13 @@ nonisolated struct HookEvent: Sendable, Equatable {
     let message: String?
     /// セッション記録(JSONL)のパス。選択肢の復元に使う。
     let transcriptPath: String?
+    /// tool_input に選択肢が含まれる場合の質問（AskUserQuestion）。
+    /// ペイロードから直接取れるため、記録を読む必要がない。
+    /// AskUserQuestion は複数の問いをまとめて送ってくるため配列で持つ。
+    let embeddedQuestions: [PendingChoice]
+
+    /// 先頭の質問（1問だけを扱う既存経路向け）
+    var embeddedQuestion: PendingChoice? { embeddedQuestions.first }
 
     /// ノッチに出す問いかけ文
     var title: String {
@@ -119,7 +126,8 @@ nonisolated enum HookEventDecoder {
             toolName: dict["tool_name"] as? String,
             toolSummary: toolInput.flatMap { summarize(toolInput: $0) },
             message: dict["message"] as? String,
-            transcriptPath: dict["transcript_path"] as? String
+            transcriptPath: dict["transcript_path"] as? String,
+            embeddedQuestions: toolInput.map { TranscriptReader.parseQuestions(input: $0) } ?? []
         )
     }
 

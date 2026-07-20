@@ -57,11 +57,42 @@ nonisolated struct PendingChoice: Sendable, Equatable, Hashable {
     /// 問いかけの直前にある文脈行（差分の要約など）を最大3行
     let detail: [String]
     let options: [ChoiceOption]
+    /// 複数の選択肢を同時に選べる問いか（AskUserQuestion の multiSelect）
+    let isMultiSelect: Bool
+    /// 一度に出された問いのうち何問目か（1始まり）
+    let questionIndex: Int
+    /// 一度に出された問いの総数
+    let questionCount: Int
+
+    /// 既定値付きの初期化子。
+    /// 承認リクエストや y/n 形式は単一選択の1問目なので、後ろ3つは省略できる。
+    init(
+        kind: ChoiceKind,
+        title: String,
+        detail: [String],
+        options: [ChoiceOption],
+        isMultiSelect: Bool = false,
+        questionIndex: Int = 1,
+        questionCount: Int = 1
+    ) {
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+        self.options = options
+        self.isMultiSelect = isMultiSelect
+        self.questionIndex = questionIndex
+        self.questionCount = questionCount
+    }
 
     /// 「はい」に相当する選択肢（通知の承認アクション用）
     var affirmativeOption: ChoiceOption? { options.first { $0.isAffirmative } }
     /// 「いいえ」に相当する選択肢（通知の拒否アクション用）
     var negativeOption: ChoiceOption? { options.first { $0.isNegative } }
+
+    /// 複数問あるときだけ「2 / 3」のような進捗表示を返す
+    var progressLabel: String? {
+        questionCount > 1 ? "\(questionIndex) / \(questionCount)" : nil
+    }
 }
 
 // MARK: - 抽出ロジック

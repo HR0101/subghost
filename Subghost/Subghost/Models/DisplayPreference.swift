@@ -20,18 +20,22 @@ nonisolated struct ScreenDescriptor: Sendable, Equatable, Identifiable, Hashable
     let name: String
     /// 物理的なノッチ（切り欠き）を持つか
     let hasNotch: Bool
-    /// システムのメインディスプレイか
-    let isMain: Bool
+    /// システムの主ディスプレイ（ディスプレイ設定で「主」に指定された画面）か
+    let isPrimary: Bool
+    /// 今フォーカスされている画面か（ユーザーが作業している画面）
+    let isActive: Bool
 }
 
 // MARK: - 設定値
 
 /// どの画面にノッチUIを出すか
 nonisolated enum DisplayPreference: Sendable, Equatable {
-    /// ノッチ搭載画面を優先し、無ければメインディスプレイ
+    /// ノッチ搭載画面を優先し、無ければ主ディスプレイ
     case automatic
-    /// 常にメインディスプレイ
-    case main
+    /// 常にシステムの主ディスプレイ
+    case primary
+    /// 今使っている（フォーカスされている）画面に追従する
+    case followActive
     /// 特定のディスプレイを指定
     case specific(id: String)
 
@@ -39,7 +43,8 @@ nonisolated enum DisplayPreference: Sendable, Equatable {
     var storedValue: String {
         switch self {
         case .automatic: return ""
-        case .main: return "main"
+        case .primary: return "main"      // 既存の設定値との互換のため "main" のまま
+        case .followActive: return "active"
         case .specific(let id): return id
         }
     }
@@ -47,7 +52,8 @@ nonisolated enum DisplayPreference: Sendable, Equatable {
     init(storedValue: String) {
         switch storedValue {
         case "": self = .automatic
-        case "main": self = .main
+        case "main": self = .primary
+        case "active": self = .followActive
         default: self = .specific(id: storedValue)
         }
     }
@@ -81,18 +87,22 @@ nonisolated enum DisplaySelector {
             // 指定の画面が見つからないので自動にフォールバック
             return automaticChoice(from: screens)
 
-        case .main:
-            return screens.first { $0.isMain } ?? automaticChoice(from: screens)
+        case .primary:
+            return screens.first { $0.isPrimary } ?? automaticChoice(from: screens)
+
+        case .followActive:
+            // 作業中の画面へ追従する。特定できなければ自動と同じ規則。
+            return screens.first { $0.isActive } ?? automaticChoice(from: screens)
 
         case .automatic:
             return automaticChoice(from: screens)
         }
     }
 
-    /// ノッチ搭載画面 → メインディスプレイ → 先頭 の順に選ぶ
+    /// ノッチ搭載画面 → 主ディスプレイ → 先頭 の順に選ぶ
     private static func automaticChoice(from screens: [ScreenDescriptor]) -> ScreenDescriptor? {
         screens.first { $0.hasNotch }
-            ?? screens.first { $0.isMain }
+            ?? screens.first { $0.isPrimary }
             ?? screens.first
     }
 }

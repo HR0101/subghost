@@ -8,8 +8,89 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import SwiftUI
 import Testing
 @testable import Subghost
+
+// MARK: - ノッチ表示設定
+
+struct NotchPreferencesTests {
+    @Test func 未保存の設定は指定した既定値を返す() {
+        let suiteName = "SubghostTests.NotchPreferences.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(NotchPreferences.bool(
+            forKey: "enabled", default: true, defaults: defaults))
+        #expect(NotchPreferences.number(
+            forKey: "duration", default: 5.0, defaults: defaults) == 5.0)
+    }
+
+    @Test func 保存済みの設定は既定値より優先される() {
+        let suiteName = "SubghostTests.NotchPreferences.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "enabled")
+        defaults.set(0.35, forKey: "delay")
+
+        #expect(!NotchPreferences.bool(
+            forKey: "enabled", default: true, defaults: defaults))
+        #expect(NotchPreferences.number(
+            forKey: "delay", default: 0.15, defaults: defaults) == 0.35)
+    }
+
+    @Test func ショートカットの未設定と不正値は既定値へ戻る() {
+        #expect(HotkeyPreset.resolve(storedValue: nil) == .optionSpace)
+        #expect(HotkeyPreset.resolve(storedValue: "unknown") == .optionSpace)
+        #expect(HotkeyPreset.resolve(storedValue: "controlSpace") == .controlSpace)
+    }
+
+    @Test func 展開アニメーション時間を安全な範囲へ補正する() {
+        #expect(NotchPreferences.normalizedExpansionAnimationDuration(0) == 0.15)
+        #expect(NotchPreferences.normalizedExpansionAnimationDuration(0.65) == 0.65)
+        #expect(NotchPreferences.normalizedExpansionAnimationDuration(3) == 1.20)
+    }
+}
+
+struct NotchSurfaceShapeTests {
+    private let canvas = CGRect(x: 0, y: 0, width: 800, height: 400)
+    private let compactWidth: CGFloat = 278
+    private let compactHeight: CGFloat = 34
+
+    @Test func 変形開始時は本体の外側に上部ショルダーを持つ() {
+        let bounds = makeShape(progress: 0).path(in: canvas).boundingRect
+
+        #expect(abs(bounds.width - NotchLayout.canvasWidth(for: compactWidth)) < 0.01)
+        #expect(abs(bounds.height - compactHeight) < 0.01)
+        #expect(abs(bounds.midX - canvas.midX) < 0.01)
+        #expect(abs(bounds.minY - canvas.minY) < 0.01)
+    }
+
+    @Test func 変形完了時は展開領域全体に一致する() {
+        let bounds = makeShape(progress: 1).path(in: canvas).boundingRect
+
+        #expect(abs(bounds.width - canvas.width) < 0.01)
+        #expect(abs(bounds.height - canvas.height) < 0.01)
+    }
+
+    @Test func 変形途中は横方向が下方向より先行する() {
+        let bounds = makeShape(progress: 0.5).path(in: canvas).boundingRect
+        let initialWidth = NotchLayout.canvasWidth(for: compactWidth)
+        let horizontal = (bounds.width - initialWidth) / (canvas.width - initialWidth)
+        let vertical = (bounds.height - compactHeight) / (canvas.height - compactHeight)
+
+        #expect(horizontal > vertical)
+    }
+
+    private func makeShape(progress: CGFloat) -> NotchSurfaceShape {
+        NotchSurfaceShape(
+            progress: progress,
+            compactWidth: compactWidth,
+            compactHeight: compactHeight,
+            canvasShoulderInset: NotchLayout.topShoulderWidth
+        )
+    }
+}
 
 struct StateDetectorTests {
 
@@ -246,8 +327,15 @@ struct AgentDiscoveryTests {
 
         #expect(inTmux.isMonitorable)
         #expect(!outside.isMonitorable)
-        #expect(inTmux.displayName == "work (ttys006)")
+        // 作業ディレクトリが未解決なら、tmuxセッション名 → tty の順にフォールバック
+        #expect(inTmux.displayName == "work")
         #expect(outside.displayName == "ttys003")
+
+        // 作業ディレクトリが分かればフォルダ名を主体にする
+        var withFolder = outside
+        withFolder.workingDirectory = "/Users/me/Create App/subghost"
+        #expect(withFolder.displayName == "subghost")
+        #expect(withFolder.folderName == "subghost")
     }
 }
 
@@ -521,11 +609,14 @@ struct NotchMetricsTests {
 struct DisplaySelectorTests {
 
     private let builtin = ScreenDescriptor(
-        id: "uuid-builtin", name: "内蔵ディスプレイ", hasNotch: true, isMain: false)
+        id: "uuid-builtin", name: "内蔵ディスプレイ", hasNotch: true,
+        isPrimary: false, isActive: false)
     private let external = ScreenDescriptor(
-        id: "uuid-studio", name: "Studio Display", hasNotch: false, isMain: true)
+        id: "uuid-studio", name: "Studio Display", hasNotch: false,
+        isPrimary: true, isActive: false)
     private let third = ScreenDescriptor(
-        id: "uuid-third", name: "サブモニタ", hasNotch: false, isMain: false)
+        id: "uuid-third", name: "サブモニタ", hasNotch: false,
+        isPrimary: false, isActive: true)
 
     private var all: [ScreenDescriptor] { [builtin, external, third] }
 
@@ -533,13 +624,23 @@ struct DisplaySelectorTests {
         #expect(DisplaySelector.select(from: all, preference: .automatic) == builtin)
     }
 
-    @Test func 自動でノッチ搭載画面が無ければメインを使う() {
+    @Test func 自動でノッチ搭載画面が無ければ主ディスプレイを使う() {
         let noNotch = [external, third]
         #expect(DisplaySelector.select(from: noNotch, preference: .automatic) == external)
     }
 
-    @Test func メイン指定はノッチ搭載画面より優先される() {
-        #expect(DisplaySelector.select(from: all, preference: .main) == external)
+    @Test func 主ディスプレイ指定はノッチ搭載画面より優先される() {
+        #expect(DisplaySelector.select(from: all, preference: .primary) == external)
+    }
+
+    @Test func 追従指定では作業中の画面を選ぶ() {
+        // 主ディスプレイでもノッチ搭載でもない画面が、フォーカスされていれば選ばれる
+        #expect(DisplaySelector.select(from: all, preference: .followActive) == third)
+    }
+
+    @Test func 追従先が不明なら自動に倒す() {
+        let noneActive = [builtin, external]
+        #expect(DisplaySelector.select(from: noneActive, preference: .followActive) == builtin)
     }
 
     @Test func 特定のディスプレイを指定できる() {
@@ -555,23 +656,25 @@ struct DisplaySelectorTests {
 
     @Test func 画面が1枚も無ければnilを返す() {
         #expect(DisplaySelector.select(from: [], preference: .automatic) == nil)
-        #expect(DisplaySelector.select(from: [], preference: .main) == nil)
+        #expect(DisplaySelector.select(from: [], preference: .primary) == nil)
+        #expect(DisplaySelector.select(from: [], preference: .followActive) == nil)
     }
 
     @Test func 設定値の保存と復元が往復する() {
         #expect(DisplayPreference(storedValue: "") == .automatic)
-        #expect(DisplayPreference(storedValue: "main") == .main)
+        #expect(DisplayPreference(storedValue: "main") == .primary)
+        #expect(DisplayPreference(storedValue: "active") == .followActive)
         #expect(DisplayPreference(storedValue: "uuid-x") == .specific(id: "uuid-x"))
 
         #expect(DisplayPreference.automatic.storedValue == "")
-        #expect(DisplayPreference.main.storedValue == "main")
+        #expect(DisplayPreference.primary.storedValue == "main")
+        #expect(DisplayPreference.followActive.storedValue == "active")
         #expect(DisplayPreference.specific(id: "uuid-x").storedValue == "uuid-x")
     }
 
-    @Test func メイン指定でメインが見つからなければ自動に倒す() {
-        // 異常系: どの画面もメインでない
+    @Test func 主ディスプレイが見つからなければ自動に倒す() {
         let none = [builtin, third]
-        #expect(DisplaySelector.select(from: none, preference: .main) == builtin)
+        #expect(DisplaySelector.select(from: none, preference: .primary) == builtin)
     }
 }
 
@@ -601,6 +704,48 @@ struct HookEventTests {
         #expect(event.title.contains("Bash"))
         #expect(event.kind.isBlocking)
         #expect(event.kind.resultingState == .awaitingApproval)
+    }
+
+    @Test func AskUserQuestionの権限リクエストから選択肢を取り出す() {
+        // tool_input に questions/options が入っているため、記録を読まずに選択肢を作れる
+        let data = payload([
+            "hook_event_name": "PermissionRequest",
+            "session_id": "s1",
+            "tool_name": "AskUserQuestion",
+            "tool_input": ["questions": [[
+                "question": "どうしますか?",
+                "options": [["label": "続ける"], ["label": "やめる"]],
+            ]]],
+        ])
+        guard let event = HookEventDecoder.decode(data) else {
+            Issue.record("解釈できなかった"); return
+        }
+        #expect(event.toolName == "AskUserQuestion")
+        #expect(event.embeddedQuestion?.title == "どうしますか?")
+        #expect(event.embeddedQuestion?.options.map(\.label) == ["続ける", "やめる"])
+    }
+
+    @Test func AskUserQuestionの複数の問いを全て取り出す() {
+        // 1問目だけ取り出すと、2問目以降がノッチに出ないまま終わってしまう
+        let data = payload([
+            "hook_event_name": "PermissionRequest",
+            "session_id": "s1",
+            "tool_name": "AskUserQuestion",
+            "tool_input": ["questions": [
+                ["question": "1問目", "options": [["label": "A"], ["label": "B"]]],
+                ["question": "2問目",
+                 "multiSelect": true,
+                 "options": [["label": "C"], ["label": "D"]]],
+            ]],
+        ])
+        guard let event = HookEventDecoder.decode(data) else {
+            Issue.record("解釈できなかった"); return
+        }
+        #expect(event.embeddedQuestions.count == 2)
+        #expect(event.embeddedQuestions.map(\.title) == ["1問目", "2問目"])
+        #expect(event.embeddedQuestions[1].isMultiSelect)
+        // 先頭を返す互換プロパティは1問目を指したまま
+        #expect(event.embeddedQuestion?.title == "1問目")
     }
 
     @Test func 各イベントが状態に対応する() {
@@ -801,6 +946,31 @@ struct KeystrokeSenderTests {
     }
 }
 
+struct ConversationLocatorTests {
+
+    @Test func lsofの出力から作業ディレクトリを取り出す() {
+        let output = """
+        p3514
+        fcwd
+        n/Users/Rhara/Create App/subghost
+        """
+        #expect(ConversationLocator.parseWorkingDirectory(output)
+                == "/Users/Rhara/Create App/subghost")
+    }
+
+    @Test func パスでない行は無視する() {
+        #expect(ConversationLocator.parseWorkingDirectory("p3514\nfcwd\n") == nil)
+    }
+
+    @Test func 作業ディレクトリをClaudeのプロジェクト名へ変換する() {
+        // スラッシュと空白を "-" に置換する（実測の命名規則）
+        #expect(ConversationLocator.claudeProjectDirName(cwd: "/Users/Rhara/Create App/subghost")
+                == "-Users-Rhara-Create-App-subghost")
+        #expect(ConversationLocator.claudeProjectDirName(cwd: "/tmp/x")
+                == "-tmp-x")
+    }
+}
+
 struct TranscriptReaderTests {
 
     /// 実際のセッション記録と同じ形
@@ -848,6 +1018,26 @@ struct TranscriptReaderTests {
         #expect(answer.count <= TranscriptReader.maxAnswerLines)
     }
 
+    @Test func 回答済みの質問は復元しない() {
+        // tool_use の後に、同じ tool_use_id の tool_result があれば回答済み
+        let jsonl = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"古い質問","options":[{"label":"A"},{"label":"B"}]}]}}]}}
+        {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"回答しました"}]}}
+        """
+        #expect(TranscriptReader.latestQuestion(inJSONLines: jsonl) == nil)
+    }
+
+    @Test func 未回答の質問だけを返す() {
+        // 古い質問は回答済み、新しい質問は未回答
+        let jsonl = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"古い質問","options":[{"label":"A"},{"label":"B"}]}]}}]}}
+        {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"回答済み"}]}}
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"q2","name":"AskUserQuestion","input":{"questions":[{"question":"新しい質問","options":[{"label":"はい"},{"label":"いいえ"}]}]}}]}}
+        """
+        let choice = TranscriptReader.latestQuestion(inJSONLines: jsonl)
+        #expect(choice?.title == "新しい質問")
+    }
+
     @Test func 質問が無ければnilを返す() {
         let plain = """
         {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"完了しました"}]}}
@@ -863,6 +1053,316 @@ struct TranscriptReaderTests {
     @Test func 壊れた行があっても他の行から復元する() {
         let broken = "これはJSONではない\n" + jsonl
         #expect(TranscriptReader.latestQuestion(inJSONLines: broken)?.options.count == 3)
+    }
+
+    @Test func 複数の問いを順番どおり全件取り出す() {
+        // AskUserQuestion は複数の問いを1回にまとめる。1問目で打ち切らないこと。
+        let input: [String: Any] = ["questions": [
+            ["question": "1問目", "options": [["label": "A"], ["label": "B"]]],
+            ["question": "2問目", "options": [["label": "C"], ["label": "D"]]],
+            ["question": "3問目", "options": [["label": "E"], ["label": "F"]]],
+        ]]
+        let questions = TranscriptReader.parseQuestions(input: input)
+
+        #expect(questions.map(\.title) == ["1問目", "2問目", "3問目"])
+        #expect(questions.map(\.questionIndex) == [1, 2, 3])
+        #expect(questions.allSatisfy { $0.questionCount == 3 })
+        #expect(questions[1].progressLabel == "2 / 3")
+    }
+
+    @Test func 単一の問いには進捗表示を付けない() {
+        let input: [String: Any] = ["questions": [
+            ["question": "1問だけ", "options": [["label": "A"], ["label": "B"]]],
+        ]]
+        #expect(TranscriptReader.parseQuestions(input: input).first?.progressLabel == nil)
+    }
+
+    @Test func 複数選択の問いを見分けて確定キーを分ける() {
+        let input: [String: Any] = ["questions": [
+            ["question": "複数選べます",
+             "multiSelect": true,
+             "options": [["label": "A"], ["label": "B"], ["label": "C"]]],
+        ]]
+        guard let choice = TranscriptReader.parseQuestions(input: input).first else {
+            Issue.record("解釈できなかった"); return
+        }
+        #expect(choice.isMultiSelect)
+        // 複数選択では番号キーはトグルなので、選択肢ごとにEnterを送ってはいけない
+        #expect(choice.options.allSatisfy { !$0.needsEnter })
+    }
+
+    @Test func 単一選択は番号のあとにEnterを送る() {
+        let input: [String: Any] = ["questions": [
+            ["question": "1つ選んでください", "options": [["label": "A"], ["label": "B"]]],
+        ]]
+        guard let choice = TranscriptReader.parseQuestions(input: input).first else {
+            Issue.record("解釈できなかった"); return
+        }
+        #expect(!choice.isMultiSelect)
+        #expect(choice.options.allSatisfy { $0.needsEnter })
+    }
+
+    @Test func 選択肢が1つ以下の問いだけ除いて残りを返す() {
+        let input: [String: Any] = ["questions": [
+            ["question": "不正", "options": [["label": "はい"]]],
+            ["question": "正しい", "options": [["label": "A"], ["label": "B"]]],
+        ]]
+        // 除外しても、元の並びに基づく問番号は保つ
+        let questions = TranscriptReader.parseQuestions(input: input)
+        #expect(questions.map(\.title) == ["正しい"])
+        #expect(questions.first?.questionIndex == 2)
+    }
+}
+
+/// 複数選択UIの確定ボタンまでの距離を測るロジック
+/// 画面テキストは実際の tmux capture-pane の出力から起こしている
+struct SubmitNavigationTests {
+
+    /// 先頭の選択肢にカーソルがある状態
+    private let atFirstOption = """
+    ←  ☒ 送信検証  ✔ Submit  →
+
+    【複数選択の検証】
+
+    ❯ 1. [ ] 項目A
+      1番目の項目です.
+      2. [✔] 項目B
+      2番目の項目です.
+      3. [✔] 項目C
+      3番目の項目です.
+      4. [✔] 項目D
+      4番目の項目です.
+      5. [ ] Type something
+         Submit
+
+    Enter to select · ↑/↓ to navigate · Esc to cancel
+    """
+
+    @Test func 説明文を飛ばして選択肢の数だけ数える() {
+        // 項目B・C・D・Type something・Submit の5回で届く（説明文は数えない）
+        #expect(TmuxClient.stepsToSubmit(inPaneText: atFirstOption) == 5)
+    }
+
+    @Test func カーソルが自由記述欄にあれば1回で届く() {
+        let atTypeSomething = atFirstOption
+            .replacingOccurrences(of: "❯ 1. [ ] 項目A", with: "  1. [ ] 項目A")
+            .replacingOccurrences(of: "  5. [ ] Type something", with: "❯ 5. [ ] Type something")
+        #expect(TmuxClient.stepsToSubmit(inPaneText: atTypeSomething) == 1)
+    }
+
+    @Test func 上部のタブ表示をSubmitと取り違えない() {
+        // "✔ Submit" を含むタブ行が上にあるが、確定ボタンは一覧の末尾だけ
+        #expect(TmuxClient.stepsToSubmit(inPaneText: atFirstOption) != 0)
+    }
+
+    @Test func 確定ボタンが無ければnilを返す() {
+        let withoutSubmit = """
+        ❯ 1. [ ] 項目A
+          2. [ ] 項目B
+        """
+        #expect(TmuxClient.stepsToSubmit(inPaneText: withoutSubmit) == nil)
+    }
+
+    @Test func カーソルが見つからなければnilを返す() {
+        let withoutCursor = """
+          1. [ ] 項目A
+             Submit
+        """
+        #expect(TmuxClient.stepsToSubmit(inPaneText: withoutCursor) == nil)
+    }
+
+    /// 複数の問いが1画面にタブでまとまっている場合の実際の画面
+    /// (実機テストで再現した不具合: 最終問以外は確定ボタンが "Next" と表示される)
+    private let atFirstOptionOfTabbedQuestion = """
+    ←  ☒ 複数選択  ☐ 4択  ☐ 長文ラベル  ✔ Submit  →
+
+    【テスト1・複数選択】有効にしたい機能をすべて選んでください.
+
+    ❯ 1. [✔] ノッチ表示
+      ノッチ領域にパネルを表示します.
+      2. [✔] 効果音
+      イベント発生時にサウンドを鳴らします.
+      3. [✔] 自動監視
+      送信時に自動でセッション監視を開始します.
+      4. [ ] 使用量表示
+      トークン使用量をパネルに表示します.
+      5. [ ] Type something
+         Next
+
+    Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+    """
+
+    @Test func 最終問以外の確定ボタンNextも認識する() {
+        // 4項目中3つしか選ばなくても、総数4を基準にした5回で正しくNextへ届く
+        #expect(TmuxClient.stepsToSubmit(inPaneText: atFirstOptionOfTabbedQuestion) == 5)
+    }
+
+    @Test func 選んだ数ではなく総数を基準にしないと自由記述欄で止まる() {
+        // 実際に起きた不具合の再現: 選択済み3件を基準にすると4回しか↓を送らず、
+        // Next の1つ手前「Type something」で止まってしまう
+        let wrongStepsBasedOnSelectedCount = 3 + 1
+        #expect(wrongStepsBasedOnSelectedCount != TmuxClient.stepsToSubmit(inPaneText: atFirstOptionOfTabbedQuestion))
+    }
+}
+
+struct ShellIntegrationTests {
+
+    @Test func 対象コマンドを包む関数を生成する() {
+        let body = ShellIntegration.scriptBody()
+        #expect(body.contains("claude() { _subghost_run claude"))
+        #expect(body.contains("codex() { _subghost_run codex"))
+        #expect(body.contains("agy() { _subghost_run agy"))
+        // codexA/codexBは既存エイリアスのまま残し、展開先のcodexを包む。
+        #expect(!body.contains("codexA()"))
+        #expect(!body.contains("codexB()"))
+        // agyy="agy --dangerously-skip-permissions" は既存のまま残し、
+        // 展開先のagyだけを包むことでオプションを失わない。
+        #expect(!body.contains("agyy()"))
+        // 非対話・tmux内・tmux未導入では素通しする条件が入っていること
+        #expect(body.contains("[ -n \"$TMUX\" ]"))
+        #expect(body.contains("[ ! -t 1 ]"))
+    }
+
+    @Test func 目印で囲んだブロックだけを取り除く() {
+        let zshrc = """
+        export PATH=/usr/bin
+        \(ShellIntegration.beginMarker)
+        [ -f "x" ] && . "x"
+        \(ShellIntegration.endMarker)
+        alias ll='ls -la'
+        """
+        let cleaned = ShellIntegration.removeBlock(from: zshrc)
+        #expect(cleaned.contains("export PATH=/usr/bin"))
+        #expect(cleaned.contains("alias ll='ls -la'"))
+        // Subghostのブロックは消える
+        #expect(!cleaned.contains("subghost"))
+        #expect(!cleaned.contains("_subghost"))
+    }
+
+    @Test func 既存の内容を壊さない() {
+        let original = "line1\nline2"
+        let cleaned = ShellIntegration.removeBlock(from: original)
+        #expect(cleaned.contains("line1"))
+        #expect(cleaned.contains("line2"))
+    }
+}
+
+struct UsageParserTests {
+
+    private func payload(_ dict: [String: Any]) -> Data {
+        try! JSONSerialization.data(withJSONObject: dict)
+    }
+
+    @Test func statuslineのJSONから使用量を取り出す() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let data = payload([
+            "rate_limits": [
+                "five_hour": ["used_percentage": 68, "resets_at": 1_000_000 + 48 * 60],
+                "seven_day": ["used_percentage": 40.5,
+                              "resets_at": 1_000_000 + 6 * 3600 + 48 * 60],
+            ],
+            "context_window": ["used_percentage": 40],
+        ])
+        guard let usage = UsageParser.parse(data, now: now) else {
+            Issue.record("解析できなかった"); return
+        }
+        #expect(usage.fiveHour?.usedPercent == 68)
+        #expect(usage.fiveHour?.remainingText(now: now) == "48m")
+        #expect(usage.sevenDay?.remainingText(now: now) == "6h48m")
+        #expect(usage.contextUsedPercent == 40)
+    }
+
+    @Test func ミリ秒のリセット時刻も解釈する() {
+        // 秒とミリ秒は桁数で見分けるため、現実的な値（2026年相当）で確認する
+        let base = 1_770_000_000.0
+        let now = Date(timeIntervalSince1970: base)
+        let data = payload(["rate_limits": [
+            "five_hour": ["used_percentage": 10, "resets_at": (base + 600) * 1000],
+        ]])
+        #expect(UsageParser.parse(data, now: now)?.fiveHour?.remainingText(now: now) == "10m")
+    }
+
+    @Test func 秒のリセット時刻も解釈する() {
+        let base = 1_770_000_000.0
+        let now = Date(timeIntervalSince1970: base)
+        let data = payload(["rate_limits": [
+            "five_hour": ["used_percentage": 10, "resets_at": base + 600],
+        ]])
+        #expect(UsageParser.parse(data, now: now)?.fiveHour?.remainingText(now: now) == "10m")
+    }
+
+    @Test func Codexの記録からレート制限を取り出す() {
+        // 実測の形式: event_msg の token_count に rate_limits が入る。
+        // キーは used_percent、枠は window_minutes で判別する。
+        let jsonl = """
+        {"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex",\
+        "primary":{"used_percent":6.0,"window_minutes":10080,"resets_at":1785069709},\
+        "secondary":{"used_percent":42.0,"window_minutes":300,"resets_at":1785000000}}}}
+        """
+        guard let usage = UsageParser.parseCodexRateLimits(inJSONLines: jsonl) else {
+            Issue.record("解析できなかった"); return
+        }
+        #expect(usage.agentID == "codex")
+        // window_minutes で振り分ける（300分=5時間枠、10080分=7日枠）
+        #expect(usage.fiveHour?.usedPercent == 42.0)
+        #expect(usage.sevenDay?.usedPercent == 6.0)
+    }
+
+    @Test func Codexで片方の枠しか無くても取り出す() {
+        // 実測データは primary のみで secondary が null だった
+        let jsonl = """
+        {"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex",\
+        "primary":{"used_percent":6.0,"window_minutes":10080,"resets_at":1785069709},\
+        "secondary":null}}}
+        """
+        let usage = UsageParser.parseCodexRateLimits(inJSONLines: jsonl)
+        #expect(usage?.sevenDay?.usedPercent == 6.0)
+        #expect(usage?.fiveHour == nil)
+    }
+
+    @Test func Codexのレート制限が無い記録では何も返さない() {
+        let jsonl = """
+        {"type":"event_msg","payload":{"type":"agent_message","message":"やあ"}}
+        """
+        #expect(UsageParser.parseCodexRateLimits(inJSONLines: jsonl) == nil)
+    }
+
+    @Test func 使用量が無ければnilを返す() {
+        #expect(UsageParser.parse(payload(["foo": "bar"])) == nil)
+        #expect(UsageParser.parse(Data("壊れている".utf8)) == nil)
+    }
+
+    @Test func リセット済みなら残り時間を出さない() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let window = UsageWindow(usedPercent: 5, resetsAt: Date(timeIntervalSince1970: 999_000))
+        #expect(window.remainingText(now: now) == nil)
+    }
+
+    @Test func 消費率に応じて警戒度が変わる() {
+        #expect(UsageWindow(usedPercent: 95, resetsAt: nil).isCritical)
+        #expect(UsageWindow(usedPercent: 75, resetsAt: nil).isWarning)
+        #expect(!UsageWindow(usedPercent: 30, resetsAt: nil).isWarning)
+    }
+
+    @Test func statuslineの包みは元のコマンドへ渡し直す() {
+        let script = HookInstaller.statuslineScript(
+            socketPath: "/tmp/s.sock", next: "bash /Users/me/.claude/statusline-command.sh")
+        // 標準入力は一度しか読めないため、読み切ってから元のコマンドへ渡す
+        #expect(script.contains("PAY=$(cat)"))
+        #expect(script.contains("statusline-command.sh"))
+        #expect(script.contains("/usage"))
+    }
+
+    @Test func 元のstatuslineが無ければ何も呼ばない() {
+        let script = HookInstaller.statuslineScript(socketPath: "/tmp/s.sock", next: nil)
+        #expect(!script.contains("NEXT="))
+    }
+
+    @Test func 元コマンドの引用符を安全に埋め込む() {
+        // シングルクォートを含むコマンドでスクリプトが壊れないこと
+        let script = HookInstaller.statuslineScript(
+            socketPath: "/tmp/s.sock", next: "echo 'hello world'")
+        #expect(script.contains("'\\''"))
     }
 }
 
@@ -922,6 +1422,20 @@ struct HTTPParserTests {
 // MARK: - ターミナルへの移動 (Jump)
 
 struct TerminalJumpTests {
+
+    @Test func Ghosttyのタイトルでセッションを照合する() {
+        var info = SessionInfo(agent: DiscoveredAgent(
+            pid: 1, tty: "/dev/ttys003", profile: .claude, tmuxTarget: nil, tmuxSession: nil))
+        info.hookSessionID = "dd7867b0-0cbc-4857-8ae6-e36e2fc2e292"
+        info.workingDirectory = "/Users/me/Create App/subghost"
+
+        // セッションIDの先頭が含まれれば一致
+        #expect(TerminalActivator.titleMatches("チャット · dd7867b0-0cbc-48", session: info))
+        // フォルダ名が含まれれば一致
+        #expect(TerminalActivator.titleMatches("subghost — zsh", session: info))
+        // どちらも含まれなければ不一致（別タブへの誤送信を防ぐ）
+        #expect(!TerminalActivator.titleMatches("別のプロジェクト — vim", session: info))
+    }
 
     @Test func 正常なttyパスを受け入れる() {
         #expect(TerminalActivator.isValidTTY("/dev/ttys004"))

@@ -170,3 +170,79 @@ private struct PhaseAnimatorFrames<Content: View>: View {
         }
     }
 }
+
+
+// MARK: - CLIごとのアイコン
+
+/// CLIを見分けるための小さなドット絵。
+/// ゴーストと同じく画像を持たず、配置を文字列で定義する。
+nonisolated enum AgentSprite {
+
+    /// Claude: 放射状のきらめき
+    static let claude = PixelSprite(rows: [
+        "..#..",
+        "#.#.#",
+        ".###.",
+        "#.#.#",
+        "..#..",
+    ])
+
+    /// Codex: 環
+    static let codex = PixelSprite(rows: [
+        ".###.",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".###.",
+    ])
+
+    /// Antigravity: 菱形
+    static let antigravity = PixelSprite(rows: [
+        "..#..",
+        ".###.",
+        "#####",
+        ".###.",
+        "..#..",
+    ])
+
+    static func sprite(for agentID: String) -> PixelSprite {
+        switch agentID {
+        case "claude": return claude
+        case "codex": return codex
+        default: return antigravity
+        }
+    }
+
+    /// バッジの色分けと揃える
+    static func color(for agentID: String) -> Color {
+        switch agentID {
+        case "claude": return .orange
+        case "codex": return .blue
+        default: return .green
+        }
+    }
+}
+
+struct AgentIconView: View {
+    let agentID: String
+    var pixelSize: CGFloat = 2
+
+    var body: some View {
+        let sprite = AgentSprite.sprite(for: agentID)
+        let tint = AgentSprite.color(for: agentID)
+
+        VStack(spacing: 0) {
+            ForEach(0..<sprite.height, id: \.self) { row in
+                HStack(spacing: 0) {
+                    ForEach(0..<sprite.width, id: \.self) { column in
+                        Rectangle()
+                            .fill(sprite.character(row: row, column: column) == "#"
+                                  ? tint : Color.clear)
+                            .frame(width: pixelSize, height: pixelSize)
+                    }
+                }
+            }
+        }
+        .shadow(color: tint.opacity(0.5), radius: 2)
+    }
+}

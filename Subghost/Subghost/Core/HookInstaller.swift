@@ -165,6 +165,115 @@ nonisolated enum HookInstaller {
             [.posixPermissions: 0o700], ofItemAtPath: bridgeScriptPath)
     }
 
+    // MARK: - statusline の連鎖（使用量の取得）
+
+    static var statuslineScriptPath: String {
+        supportDirectory.appendingPathComponent("bin/subghost-statusline").path
+    }
+
+    /// 元々設定されていたstatuslineコマンドの保存先
+    static var previousStatuslinePath: URL {
+        supportDirectory.appendingPathComponent("previous-statusline")
+    }
+
+    /// 使用量（5時間枠・7日枠）はstatuslineへ渡されるJSONにしか含まれないため、
+    /// 既存のstatuslineコマンドを包んで内容を横取りする。
+    ///
+    /// 安全設計:
+    /// - 元のコマンドは保存し、解除時に必ず戻す
+    /// - 標準入力は読み切ってから元のコマンドへ渡し直す（出力はそのまま通す）
+    /// - Subghostが動いていなくても、元のstatuslineは変わらず動作する
+    static func statuslineScript(socketPath: String, next: String?) -> String {
+        let forward = next.map {
+            """
+            NEXT='\($0.replacingOccurrences(of: "'", with: "'\\''"))'
+            printf '%s' "$PAY" | /bin/sh -c "$NEXT"
+            """
+        } ?? ""
+
+        return """
+        #!/bin/sh
+        # Subghost statusline chain (\(marker))
+        # statuslineのJSONを横取りしつつ、元のコマンドへそのまま渡す。
+        PAY=$(cat)
+
+        SOCK="\(socketPath)"
+        if [ -S "$SOCK" ]; then
+            printf '%s' "$PAY" | curl -s -m 2 --unix-socket "$SOCK" \\
+                -H 'Content-Type: application/json' \\
+                --data-binary @- "http://localhost/usage" >/dev/null 2>&1
+        fi
+
+        \(forward)
+        exit 0
+        """
+    }
+
+    static func isStatuslineInstalled() -> Bool {
+        guard let root = try? loadSettings(.claude),
+              let statusLine = root["statusLine"] as? [String: Any],
+              let command = statusLine["command"] as? String
+        else { return false }
+        return command == statuslineScriptPath
+    }
+
+    /// statuslineの横取りを開始する
+    static func installStatusline() throws {
+        var root = try loadSettings(.claude)
+        let statusLine = root["statusLine"] as? [String: Any]
+        let current = statusLine?["command"] as? String
+
+        // 既に自分が入っている場合は元コマンドを上書きしない
+        let previous: String?
+        if current == statuslineScriptPath {
+            previous = try? String(contentsOf: previousStatuslinePath, encoding: .utf8)
+        } else {
+            previous = current
+            if let current {
+                try FileManager.default.createDirectory(
+                    at: supportDirectory, withIntermediateDirectories: true)
+                try current.write(to: previousStatuslinePath, atomically: true, encoding: .utf8)
+            }
+        }
+
+        let binDirectory = supportDirectory.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: binDirectory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try statuslineScript(socketPath: socketPath, next: previous)
+            .write(toFile: statuslineScriptPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: statuslineScriptPath)
+
+        try backupSettings(.claude)
+        var updated = statusLine ?? ["type": "command"]
+        updated["command"] = statuslineScriptPath
+        if updated["type"] == nil { updated["type"] = "command" }
+        root["statusLine"] = updated
+        try writeSettings(root, target: .claude)
+    }
+
+    /// 元のstatuslineコマンドへ戻す
+    static func uninstallStatusline() throws {
+        var root = try loadSettings(.claude)
+        guard var statusLine = root["statusLine"] as? [String: Any],
+              statusLine["command"] as? String == statuslineScriptPath
+        else { return }
+
+        try backupSettings(.claude)
+        if let previous = try? String(contentsOf: previousStatuslinePath, encoding: .utf8),
+           !previous.isEmpty {
+            statusLine["command"] = previous
+            root["statusLine"] = statusLine
+        } else {
+            // 元が無かった場合は設定ごと取り除く
+            root.removeValue(forKey: "statusLine")
+        }
+        try writeSettings(root, target: .claude)
+        try? FileManager.default.removeItem(atPath: statuslineScriptPath)
+        try? FileManager.default.removeItem(at: previousStatuslinePath)
+    }
+
     // MARK: - settings.json への登録
 
     /// フックのコマンド文字列。スクリプトが無い場合は何もせず成功で抜ける。
@@ -283,7 +392,7 @@ nonisolated enum HookInstaller {
 
     // MARK: - ファイル入出力
 
-    private static func loadSettings(_ target: HookTarget) throws -> [String: Any] {
+    static func loadSettings(_ target: HookTarget) throws -> [String: Any] {
         let url = target.settingsURL
         guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
         let data = try Data(contentsOf: url)
@@ -295,7 +404,7 @@ nonisolated enum HookInstaller {
     }
 
     /// 書き換え前に日時付きのバックアップを残す
-    private static func backupSettings(_ target: HookTarget) throws {
+    static func backupSettings(_ target: HookTarget) throws {
         let url = target.settingsURL
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         let formatter = DateFormatter()
@@ -307,7 +416,7 @@ nonisolated enum HookInstaller {
         try FileManager.default.copyItem(at: url, to: backup)
     }
 
-    private static func writeSettings(_ root: [String: Any], target: HookTarget) throws {
+    static func writeSettings(_ root: [String: Any], target: HookTarget) throws {
         let url = target.settingsURL
         // 専用ファイルで中身が空になったらファイルごと消す（元が無かった状態に戻す）
         if target.isDedicatedFile, root.isEmpty {
