@@ -198,7 +198,16 @@ nonisolated enum TmuxClient {
             try await sendKey("Down", to: target)
             try? await Task.sleep(for: keyInterval)
         }
+        // Submit行はEnterで確定する。ただし最後の問いの場合、これは即送信ではなく
+        // 「Review your answers」という確認画面を開くだけの操作になる（実機で確認した挙動）。
+        // Next行（中間の問い）はこの確認画面を経由せず、そのまま次のタブへ進む。
         try await sendEnter(to: target)
+
+        // 確認画面が開いていれば、そこでもう一段 "1"（1. Submit answers）を送って確定する。
+        try? await Task.sleep(for: keyInterval)
+        if let confirmText = await capturePane(target: target), isReviewScreen(confirmText) {
+            try await sendLiteral("1", to: target)
+        }
     }
 
     /// 文字列をリテラル（`-l`）として送る
@@ -255,6 +264,15 @@ nonisolated enum TmuxClient {
     /// 確定ボタンだけの行か（上部のタブ表示と区別する）
     private static func isSubmitLine(_ line: String) -> Bool {
         submitLabels.contains(stripped(line))
+    }
+
+    /// 最終問のSubmitを押した後に出る「Review your answers」確認画面の目印。
+    /// この画面には "1. Submit answers" という、選択肢とは別番号体系の確定行がある。
+    private static let reviewScreenMarker = "Submit answers"
+
+    /// 確認画面（もう一段の確定が要る画面）が開いているか
+    nonisolated static func isReviewScreen(_ paneText: String) -> Bool {
+        paneText.contains(reviewScreenMarker)
     }
 
     /// 番号付きの選択肢行か

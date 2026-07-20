@@ -9,6 +9,73 @@
 import Foundation
 import UserNotifications
 
+/// 通知を発行した時点のCLIプロセスを特定する情報。
+/// ttyは再利用されるため、PIDも一致した場合だけ同じセッションとみなす。
+nonisolated struct NotificationSessionReference: Sendable, Equatable, Hashable {
+    static let ttyKey = "sessionTTY"
+    static let pidKey = "sessionPID"
+
+    let tty: String
+    let pid: Int32
+
+    init(tty: String, pid: Int32) {
+        self.tty = tty
+        self.pid = pid
+    }
+
+    init(session: SessionInfo) {
+        self.init(tty: session.tty, pid: session.pid)
+    }
+
+    init?(userInfo: [AnyHashable: Any]) {
+        guard let tty = userInfo[Self.ttyKey] as? String,
+              let rawPID = userInfo[Self.pidKey] as? NSNumber
+        else { return nil }
+        self.init(tty: tty, pid: rawPID.int32Value)
+    }
+
+    var userInfo: [AnyHashable: Any] {
+        [Self.ttyKey: tty, Self.pidKey: Int(pid)]
+    }
+
+    func matches(_ session: SessionInfo) -> Bool {
+        session.tty == tty && session.pid == pid
+    }
+}
+
+/// 同じTTYへ届いた古い承認通知を確実に失効させる、一度限りのトークン管理。
+nonisolated struct ChoiceNotificationRegistry {
+    private var tokens: [NotificationSessionReference: String] = [:]
+
+    mutating func issue(
+        for reference: NotificationSessionReference,
+        token: String = UUID().uuidString
+    ) -> String {
+        tokens[reference] = token
+        return token
+    }
+
+    func isCurrent(_ token: String, for reference: NotificationSessionReference) -> Bool {
+        tokens[reference] == token
+    }
+
+    mutating func consume(_ token: String, for reference: NotificationSessionReference) -> Bool {
+        guard isCurrent(token, for: reference) else { return false }
+        tokens[reference] = nil
+        return true
+    }
+
+    mutating func restore(_ token: String, for reference: NotificationSessionReference) {
+        guard tokens[reference] == nil else { return }
+        tokens[reference] = token
+    }
+
+    mutating func invalidate(_ reference: NotificationSessionReference) {
+        tokens[reference] = nil
+    }
+}
+
+@MainActor
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     static let shared = NotificationManager()
@@ -22,12 +89,10 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     /// 通知のuserInfoに載せるキー
     private nonisolated enum UserInfoKey {
-        static let session = "session"
-        static let approveKey = "approveKey"
-        static let approveNeedsEnter = "approveNeedsEnter"
-        static let denyKey = "denyKey"
-        static let denyNeedsEnter = "denyNeedsEnter"
+        static let choiceToken = "choiceToken"
     }
+
+    private var choiceRegistry = ChoiceNotificationRegistry()
 
     func setup() {
         let center = UNUserNotificationCenter.current()
@@ -70,8 +135,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         content.subtitle = session.displayName
         content.body = preview.joined(separator: "\n")
         content.sound = Self.notificationSound
+        content.userInfo = NotificationSessionReference(session: session).userInfo
 
-        post(content: content, identifier: "subghost-\(session.tty)")
+        post(content: content, identifier: notificationIdentifier(prefix: "subghost", session: session))
     }
 
     // MARK: - 承認リクエスト／質問の通知 (Approve / Ask)
@@ -87,18 +153,25 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         // 回答しないと処理が止まるため、集中モード中でも届くようにする
         content.interruptionLevel = .timeSensitive
 
-        var userInfo: [String: Any] = [UserInfoKey.session: session.tty]
+        let reference = NotificationSessionReference(session: session)
+        let choiceToken = choiceRegistry.issue(for: reference)
+        var userInfo = reference.userInfo
+        userInfo[UserInfoKey.choiceToken] = choiceToken
         // はい／いいえが揃っているときだけバナーにボタンを出す
-        if let affirmative = choice.affirmativeOption, let negative = choice.negativeOption {
+        if choice.affirmativeOption != nil, choice.negativeOption != nil {
             content.categoryIdentifier = Category.choice
-            userInfo[UserInfoKey.approveKey] = affirmative.keystroke
-            userInfo[UserInfoKey.approveNeedsEnter] = affirmative.needsEnter
-            userInfo[UserInfoKey.denyKey] = negative.keystroke
-            userInfo[UserInfoKey.denyNeedsEnter] = negative.needsEnter
         }
         content.userInfo = userInfo
 
-        post(content: content, identifier: "subghost-choice-\(session.tty)")
+        post(content: content, identifier: notificationIdentifier(prefix: "subghost-choice", session: session))
+    }
+
+    /// 回答済み・完了などで不要になった承認通知を失効させる。
+    func invalidateChoice(for session: SessionInfo) {
+        choiceRegistry.invalidate(NotificationSessionReference(session: session))
+        UNUserNotificationCenter.current().removeDeliveredNotifications(
+            withIdentifiers: [notificationIdentifier(prefix: "subghost-choice", session: session)]
+        )
     }
 
     // MARK: - 共通
@@ -110,6 +183,10 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 NSLog("Subghost: 通知の送信に失敗しました: \(error.localizedDescription)")
             }
         }
+    }
+
+    private func notificationIdentifier(prefix: String, session: SessionInfo) -> String {
+        "\(prefix)-\(session.pid)-\(session.tty)"
     }
 
     private static var notificationsEnabled: Bool {
@@ -132,26 +209,20 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         let userInfo = response.notification.request.content.userInfo
 
         // userInfoはSendableでないため、Taskへ渡す前に必要な値だけ取り出す
-        let sessionName = userInfo[UserInfoKey.session] as? String
-        let keyField = actionIdentifier == Category.approve
-            ? UserInfoKey.approveKey : UserInfoKey.denyKey
-        let enterField = actionIdentifier == Category.approve
-            ? UserInfoKey.approveNeedsEnter : UserInfoKey.denyNeedsEnter
-        let keystroke = userInfo[keyField] as? String
-        let needsEnter = userInfo[enterField] as? Bool ?? false
+        let sessionReference = NotificationSessionReference(userInfo: userInfo)
+        let choiceToken = userInfo[UserInfoKey.choiceToken] as? String
 
         Task { @MainActor in
             switch actionIdentifier {
             case Category.approve, Category.deny:
                 Self.respondFromNotification(
-                    sessionName: sessionName,
-                    keystroke: keystroke,
-                    needsEnter: needsEnter,
-                    label: actionIdentifier == Category.approve ? "承認" : "拒否"
+                    sessionReference: sessionReference,
+                    choiceToken: choiceToken,
+                    isAffirmative: actionIdentifier == Category.approve
                 )
             default:
-                // 本体タップ：ターミナルへ移動する (設計書 4.2)
-                TerminalActivator.activate()
+                // 本体タップ：通知を発行したセッションのタブへ移動する (設計書 4.2)
+                Self.jumpFromNotification(to: sessionReference)
             }
             completionHandler()
         }
@@ -160,30 +231,64 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     /// 通知アクションから選択肢へ回答する
     @MainActor
     private static func respondFromNotification(
-        sessionName: String?,
-        keystroke: String?,
-        needsEnter: Bool,
-        label: String
+        sessionReference: NotificationSessionReference?,
+        choiceToken: String?,
+        isAffirmative: Bool
     ) {
-        guard let sessionName, let keystroke else {
+        guard let sessionReference, let choiceToken else {
             NSLog("Subghost: 通知アクションに必要な情報が欠けています")
             return
         }
 
         let watcher = AppCoordinator.shared.watcher
-        guard let session = watcher.sessions.first(where: { $0.info.tty == sessionName }) else {
-            NSLog("Subghost: 通知の対象セッション \(sessionName) が見つかりません")
+        guard let session = watcher.sessions.first(where: { sessionReference.matches($0.info) }) else {
+            NSLog("Subghost: 通知の対象セッション \(sessionReference.tty) が見つかりません")
             return
         }
-        let option = ChoiceOption(number: 0, label: label, keystroke: keystroke, needsEnter: needsEnter)
+        guard shared.choiceRegistry.isCurrent(choiceToken, for: sessionReference),
+              let choice = session.pendingChoice
+        else {
+            NSLog("Subghost: 古い、または解決済みの通知アクションを無視しました")
+            return
+        }
+        let option = isAffirmative ? choice.affirmativeOption : choice.negativeOption
+        guard let option else {
+            NSLog("Subghost: 現在の質問に対応する選択肢がありません")
+            return
+        }
+        guard shared.choiceRegistry.consume(choiceToken, for: sessionReference) else { return }
 
-        Task {
+        Task { @MainActor in
             do {
                 try await watcher.respond(with: option, in: session)
+                UNUserNotificationCenter.current().removeDeliveredNotifications(
+                    withIdentifiers: [shared.notificationIdentifier(
+                        prefix: "subghost-choice",
+                        session: session.info
+                    )]
+                )
             } catch {
+                // 送信失敗時は、同じ質問がまだ待機中なら再試行できるように戻す。
+                if session.pendingChoice == choice {
+                    shared.choiceRegistry.restore(choiceToken, for: sessionReference)
+                }
                 NSLog("Subghost: 通知からの回答送信に失敗しました: \(error.localizedDescription)")
             }
         }
+    }
+
+    @MainActor
+    private static func jumpFromNotification(to reference: NotificationSessionReference?) {
+        guard let reference,
+              let session = AppCoordinator.shared.watcher.sessions.first(where: {
+                  reference.matches($0.info)
+              })
+        else {
+            // 終了済みのセッションや旧形式の通知では、誤ったタブへ移動しない。
+            TerminalActivator.activate()
+            return
+        }
+        AppCoordinator.shared.jump(to: session)
     }
 
     // アプリ動作中でもバナー表示する

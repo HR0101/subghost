@@ -92,6 +92,146 @@ struct NotchSurfaceShapeTests {
     }
 }
 
+struct PixelGhostAnimationTests {
+    @Test func ゴーストは生成中だけ動く() {
+        #expect(GhostSprite.shouldAnimate(for: .thinking))
+        #expect(!GhostSprite.shouldAnimate(for: .idle))
+        #expect(!GhostSprite.shouldAnimate(for: .completed))
+        #expect(!GhostSprite.shouldAnimate(for: .error))
+        #expect(!GhostSprite.shouldAnimate(for: .awaitingApproval))
+        #expect(!GhostSprite.shouldAnimate(for: .awaitingAnswer))
+    }
+}
+
+struct SessionsListLayoutTests {
+    @Test func 少数のセッションでは行数に合わせた高さになる() {
+        #expect(NotchLayout.sessionsListHeight(count: 0) == 0)
+        #expect(NotchLayout.sessionsListHeight(count: 2) == 136)
+    }
+
+    @Test func 多数のセッションでも一覧の最大高を超えない() {
+        #expect(NotchLayout.sessionsListHeight(count: 100) == NotchLayout.sessionsListMaxHeight)
+    }
+}
+
+struct PromptDraftStoreTests {
+    @Test func セッションを切り替えても下書きが混ざらない() {
+        var drafts = PromptDraftStore()
+
+        drafts.setText("Claudeへの質問", for: "101:/dev/ttys001")
+        drafts.setText("Codexへの依頼\n二行目", for: "202:/dev/ttys002")
+
+        #expect(drafts.text(for: "101:/dev/ttys001") == "Claudeへの質問")
+        #expect(drafts.text(for: "202:/dev/ttys002") == "Codexへの依頼\n二行目")
+    }
+
+    @Test func 送信したセッションの下書きだけを消せる() {
+        var drafts = PromptDraftStore()
+        drafts.setText("送信する内容", for: "101:/dev/ttys001")
+        drafts.setText("残す内容", for: "202:/dev/ttys002")
+
+        drafts.setText("", for: "101:/dev/ttys001")
+
+        #expect(drafts.text(for: "101:/dev/ttys001").isEmpty)
+        #expect(drafts.text(for: "202:/dev/ttys002") == "残す内容")
+    }
+}
+
+struct ActivityStoreTests {
+    @Test func 履歴を新しい順に上限件数まで保存して復元する() {
+        let suiteName = "SubghostTests.Activity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let key = "history"
+        let store = ActivityStore(defaults: defaults, storageKey: key, maximumCount: 2)
+
+        let first = makeEntry(summary: "1")
+        let second = makeEntry(summary: "2")
+        let third = makeEntry(summary: "3")
+        store.append(first)
+        store.append(second)
+        store.append(third)
+
+        #expect(store.entries.map(\.summary) == ["3", "2"])
+        #expect(store.unreadCount == 2)
+
+        store.markRead(third.id)
+        let restored = ActivityStore(defaults: defaults, storageKey: key, maximumCount: 2)
+        #expect(restored.entries == store.entries)
+        #expect(restored.unreadCount == 1)
+    }
+
+    @Test func 履歴をすべて既読にして消去できる() {
+        let suiteName = "SubghostTests.Activity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ActivityStore(defaults: defaults, storageKey: "history")
+        store.append(makeEntry(summary: "完了"))
+
+        store.markAllRead()
+        #expect(store.unreadCount == 0)
+
+        store.clear()
+        #expect(store.entries.isEmpty)
+    }
+
+    private func makeEntry(summary: String) -> ActivityEntry {
+        ActivityEntry(
+            createdAt: Date(timeIntervalSince1970: 100),
+            kind: .completed,
+            sessionTTY: "/dev/ttys004",
+            sessionPID: 100,
+            agentID: "codex",
+            agentName: "Codex CLI",
+            sessionName: "subghost",
+            summary: summary
+        )
+    }
+}
+
+// MARK: - 通知のセッション紐付け
+
+struct NotificationRoutingTests {
+
+    @Test func 通知ペイロードからセッション情報を復元できる() {
+        let original = NotificationSessionReference(tty: "/dev/ttys004", pid: 100)
+
+        let restored = NotificationSessionReference(userInfo: original.userInfo)
+
+        #expect(restored == original)
+    }
+
+    @Test func 同じTTYでもPIDが違えば別セッションとして管理する() {
+        let oldSession = NotificationSessionReference(tty: "/dev/ttys004", pid: 100)
+        let newSession = NotificationSessionReference(tty: "/dev/ttys004", pid: 200)
+
+        #expect(oldSession != newSession)
+    }
+
+    @Test func 新しい質問通知を発行すると古いトークンは無効になる() {
+        let session = NotificationSessionReference(tty: "/dev/ttys004", pid: 100)
+        var registry = ChoiceNotificationRegistry()
+
+        let oldToken = registry.issue(for: session, token: "old")
+        let newToken = registry.issue(for: session, token: "new")
+
+        #expect(!registry.isCurrent(oldToken, for: session))
+        #expect(registry.isCurrent(newToken, for: session))
+    }
+
+    @Test func 通知トークンは一度だけ使用できる() {
+        let session = NotificationSessionReference(tty: "/dev/ttys004", pid: 100)
+        var registry = ChoiceNotificationRegistry()
+        let token = registry.issue(for: session, token: "single-use")
+
+        let firstResult = registry.consume(token, for: session)
+        let secondResult = registry.consume(token, for: session)
+
+        #expect(firstResult)
+        #expect(!secondResult)
+    }
+}
+
 struct StateDetectorTests {
 
     private func makeDetector() -> StateDetector {
@@ -1203,6 +1343,30 @@ struct SubmitNavigationTests {
         let wrongStepsBasedOnSelectedCount = 3 + 1
         #expect(wrongStepsBasedOnSelectedCount != TmuxClient.stepsToSubmit(inPaneText: atFirstOptionOfTabbedQuestion))
     }
+
+    /// 最終問でSubmitを押した直後に実際に現れた確認画面
+    /// (実機テストで再現した不具合: ここでもう一段 "1" を送らないと確定しないまま止まる)
+    private let reviewScreenAfterSubmit = """
+    ←  ☒ 提出検証2  ✔ Submit  →
+
+    Review your answers
+
+     ● 【提出検証、2回目】複数の項目にチェックを入れてから「決定」を押してください.
+       → 項目B, 項目D
+
+    Ready to submit your answers?
+
+    ❯ 1. Submit answers
+      2. Cancel
+    """
+
+    @Test func Submit直後の確認画面を検知する() {
+        #expect(TmuxClient.isReviewScreen(reviewScreenAfterSubmit))
+    }
+
+    @Test func 通常の選択肢画面は確認画面と誤認しない() {
+        #expect(!TmuxClient.isReviewScreen(atFirstOptionOfTabbedQuestion))
+    }
 }
 
 struct ShellIntegrationTests {
@@ -1578,6 +1742,51 @@ struct ChoicePromptTests {
         3. 三番目の項目
         """
         #expect(ChoicePrompt.detect(in: screen, profile: .claude) == nil)
+    }
+
+    /// 実際に起きた不具合の再現: 説明文中の番号付き箇条書き（項目ごとの説明行を挟まない
+    /// 単純な連番）が、会話が先へ進んだ後も画面に残っていると選択待ちと誤検出されていた。
+    /// (Subghost起動直後、フックがまだ繋がっていない一瞬に画面解析が走ると
+    /// この文面を拾ってしまい、選んだつもりが数字だけ誤送信される不具合につながっていた)
+    @Test func 説明文中の番号付き箇条書きを選択待ちと誤認しない() {
+        let screen = """
+        状況をまとめます.
+
+        1. 複数選択のトグルは正しく動作しています
+        2. Submit直後に確認画面が挟まることが分かりました
+        3. 確認画面では改めて1を送る必要があります
+
+        修正を実装します.
+        """
+        #expect(ChoicePrompt.detect(in: screen, profile: .claude) == nil)
+    }
+
+    @Test func ヒント行だけで終わる生きたメニューは引き続き検出する() {
+        // 選択肢の後に操作ヒントだけがあり、それ以降に何も続かない（＝画面の最後）なら生きている
+        let screen = """
+        【複数選択の検証】
+
+        ❯ 1. [ ] 項目A
+          2. [ ] 項目B
+             Submit
+
+        Enter to select · ↑/↓ to navigate · Esc to cancel
+        """
+        guard let choice = ChoicePrompt.detect(in: screen, profile: .claude) else {
+            Issue.record("生きたメニューを検出できなかった")
+            return
+        }
+        #expect(choice.options.count == 2)
+    }
+
+    @Test func 選択肢の直後で画面が終わっていれば生きていると判定する() {
+        // ヒント行すら無く、選択肢の直後で画面がそのまま終わる（＝末尾）なら生きている
+        let screen = """
+        どちらにしますか?
+        ❯ 1. こちら
+          2. あちら
+        """
+        #expect(ChoicePrompt.detect(in: screen, profile: .claude) != nil)
     }
 }
 

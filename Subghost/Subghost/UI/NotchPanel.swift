@@ -434,17 +434,29 @@ final class NotchPanelController {
                 width: NotchLayout.canvasWidth(
                     for: max(metrics.notchWidth + 280, 640)
                 ),
-                height: 260
+                height: 340
             )
         case .sessions:
-            // 行数に応じて高さを変える
-            // 1行あたり3行ぶんの情報を出すため、行の高さを厚めに見積もる
-            let count = max(coordinator.watcher.sessions.count, 1)
+            // 一覧は最大高を超えた分だけ内部スクロールする。
+            let listHeight = NotchLayout.sessionsListHeight(
+                count: coordinator.watcher.sessions.count
+            )
             size = NSSize(
                 width: NotchLayout.canvasWidth(
                     for: max(metrics.notchWidth + 420, 760)
                 ),
-                height: min(metrics.topInset + 70 + CGFloat(count) * 68, 520))
+                height: min(metrics.topInset + 120 + listHeight, 520))
+        case .activity:
+            let listHeight = min(
+                CGFloat(coordinator.activity.entries.count) * 66,
+                NotchLayout.sessionsListMaxHeight
+            )
+            size = NSSize(
+                width: NotchLayout.canvasWidth(
+                    for: max(metrics.notchWidth + 420, 760)
+                ),
+                height: min(metrics.topInset + 90 + max(listHeight, 150), 520)
+            )
         case .choice:
             // 選択肢の数と文脈行数で高さが変わるため実データから見積もる
             let choice = coordinator.pendingChoice
@@ -534,6 +546,13 @@ enum NotchLayout {
     static let cornerBezierControl: CGFloat = 0.447715
     static let topShoulderWidth: CGFloat = 12 // 画面上端とつなぐ外向きのカーブ
     static let collapseAnimationDuration: TimeInterval = 0.32
+    /// セッションが増えてもノッチが画面下まで伸びないよう、一覧部分だけを制限する。
+    static let sessionRowEstimatedHeight: CGFloat = 68
+    static let sessionsListMaxHeight: CGFloat = 330
+
+    static func sessionsListHeight(count: Int) -> CGFloat {
+        min(CGFloat(max(count, 0)) * sessionRowEstimatedHeight, sessionsListMaxHeight)
+    }
 
     static func canvasWidth(for surfaceWidth: CGFloat) -> CGFloat {
         surfaceWidth + topShoulderWidth * 2

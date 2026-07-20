@@ -15,6 +15,20 @@ enum NotchMode: Equatable {
     case input          // プロンプト入力欄
     case choice         // 承認リクエスト／質問への回答
     case sessions       // 複数CLIの一覧
+    case activity       // 完了・エラー・回答待ちの履歴
+}
+
+/// セッションを切り替えても入力途中の内容を混ぜないための下書き置き場。
+nonisolated struct PromptDraftStore {
+    private var drafts: [String: String] = [:]
+
+    func text(for key: String) -> String {
+        drafts[key] ?? ""
+    }
+
+    mutating func setText(_ text: String, for key: String) {
+        drafts[key] = text
+    }
 }
 
 @Observable
@@ -24,6 +38,7 @@ final class AppCoordinator {
 
     let watcher = SessionWatcher()
     let snippets = SnippetStore()
+    let activity = ActivityStore()
     let hotkey = HotkeyManager()
     @ObservationIgnored private var panelController: NotchPanelController?
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
@@ -43,7 +58,12 @@ final class AppCoordinator {
     private(set) var notificationSession: MonitoredSession?
     /// 承認/質問の回答待ちで表示中のセッション
     private(set) var choiceSession: MonitoredSession?
-    var inputText = ""
+    /// セッションごとの入力下書き。TTY再利用時の混同を避けるためPIDも含める。
+    private var promptDrafts = PromptDraftStore()
+    var inputText: String {
+        get { promptDrafts.text(for: promptDraftKey) }
+        set { promptDrafts.setText(newValue, for: promptDraftKey) }
+    }
     var lastSendError: String?
     /// 回答送信に失敗したときのメッセージ
     var lastChoiceError: String?
@@ -60,6 +80,7 @@ final class AppCoordinator {
         if mode == .notification { return .notification }
         // 入力画面の戻るボタンから開いた一覧は、ホバーが外れても表示を維持する。
         if mode == .sessions { return .sessions }
+        if mode == .activity { return .activity }
         // ホバー中は常に一覧を出す。
         // メニューバー項目を置かないため、ここが設定・終了への唯一の入口になる。
         if isHovering { return .sessions }
@@ -97,22 +118,34 @@ final class AppCoordinator {
     private func handle(event: DetectorEvent, session: MonitoredSession) {
         switch event {
         case .becameCompleted(let preview):
+            NotificationManager.shared.invalidateChoice(for: session.info)
+            activity.record(kind: .completed, session: session.info, preview: preview)
             SoundAlerts.shared.play(for: .completed)
             NotificationManager.shared.notify(session: session.info, state: .completed, preview: preview)
             showNotification(for: session)
         case .becameError(let preview):
+            NotificationManager.shared.invalidateChoice(for: session.info)
+            activity.record(kind: .error, session: session.info, preview: preview)
             SoundAlerts.shared.play(for: .error)
             NotificationManager.shared.notify(session: session.info, state: .error, preview: preview)
             showNotification(for: session)
         case .becameAwaitingChoice(let choice):
+            activity.record(
+                kind: choice.kind == .approval ? .approval : .question,
+                session: session.info,
+                preview: [choice.title]
+            )
             SoundAlerts.shared.play(for: session.state)
             NotificationManager.shared.notifyChoice(session: session.info, choice: choice)
             showChoice(for: session)
         case .choiceResolved:
+            NotificationManager.shared.invalidateChoice(for: session.info)
             dismissedChoices[session.info.tty] = nil
             // ターミナル側で回答された場合はノッチを畳む
             if choiceSession === session { collapse() }
-        case .becameThinking, .becameIdle, .none:
+        case .becameThinking, .becameIdle:
+            NotificationManager.shared.invalidateChoice(for: session.info)
+        case .none:
             break
         }
     }
@@ -244,6 +277,14 @@ final class AppCoordinator {
         panelController?.resignInput()
     }
 
+    func showActivity() {
+        notificationPresentationTask?.cancel()
+        collapseTask?.cancel()
+        activity.markAllRead()
+        setMode(.activity)
+        panelController?.resignInput()
+    }
+
     func collapse() {
         collapseTask?.cancel()
         notificationSession = nil
@@ -257,9 +298,10 @@ final class AppCoordinator {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard let session = watcher.activeSession else {
-            lastSendError = "AI CLI が見つかりません。ターミナルで claude / codex / antigravity を起動してください。"
+            lastSendError = "AI CLI が見つかりません。ターミナルで claude / codexA・B / agyy を起動してください。"
             return
         }
+        let submittedDraftKey = promptDraftKey
         // tmuxが無くてもキー入力の合成で送れるため、そちらの可否も見る
         guard session.info.tmuxTarget != nil || KeystrokeSender.isTrusted else {
             lastSendError = KeystrokeError.accessibilityNotTrusted.localizedDescription
@@ -271,12 +313,18 @@ final class AppCoordinator {
                 try await watcher.sendPrompt(text, to: session)
                 SoundAlerts.shared.play(.promptSent)
                 snippets.recordHistory(text)
-                inputText = ""
+                // 送信中にPickerが切り替わっても、送信したセッションの下書きだけを消す。
+                promptDrafts.setText("", for: submittedDraftKey)
                 collapse()
             } catch {
                 lastSendError = error.localizedDescription
             }
         }
+    }
+
+    private var promptDraftKey: String {
+        guard let session = watcher.activeSession else { return "no-session" }
+        return "\(session.info.pid):\(session.info.tty)"
     }
 
     func insertSnippet(_ snippet: Snippet) {
@@ -301,6 +349,20 @@ final class AppCoordinator {
         watcher.acknowledge(session)
         collapse()
         Task { await TerminalActivator.jump(to: session.info) }
+    }
+
+    func jump(to entry: ActivityEntry) {
+        activity.markRead(entry.id)
+        guard let session = watcher.sessions.first(where: {
+            $0.info.tty == entry.sessionTTY && $0.info.pid == entry.sessionPID
+        }) else { return }
+        jump(to: session)
+    }
+
+    func hasLiveSession(for entry: ActivityEntry) -> Bool {
+        watcher.sessions.contains {
+            $0.info.tty == entry.sessionTTY && $0.info.pid == entry.sessionPID
+        }
     }
 
     /// 対象セッションが動いているターミナルのタブへ移動する
@@ -409,13 +471,13 @@ final class AppCoordinator {
     func dismissExpandedPanel() {
         hoverTask?.cancel()
         isHovering = false
-        if mode == .notification || mode == .sessions { collapse() }
+        if mode == .notification || mode == .sessions || mode == .activity { collapse() }
     }
 
     /// パネル外のクリックで閉じてよい、自動表示中のモードか。
     var canCloseOnOutsideClick: Bool {
         NotchPreferences.closeOnOutsideClick
-            && (mode == .notification || displayMode == .sessions)
+            && (mode == .notification || displayMode == .sessions || mode == .activity)
     }
 
     // MARK: - 内部

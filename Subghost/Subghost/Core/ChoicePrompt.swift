@@ -110,9 +110,10 @@ nonisolated enum ChoicePrompt {
     private static let optionPattern = #"^(?:[❯>▶●•*]\s*)?(\d{1,2})[.)]\s+(\S.*)$"#
     /// y/n 形式: "Continue? (y/n)" / "上書きしますか [Y/n]:"
     private static let yesNoPattern = #"(?i)[\[(]\s*y(?:es)?\s*/\s*n(?:o)?\s*[\])]\s*[:?]?\s*$"#
-    /// 選択肢ブロックの直上にあってもタイトルとみなさないノイズ行
+    /// 選択肢ブロックの直上にあってもタイトルとみなさないノイズ行。
+    /// 選択肢ブロックの「下」に続く操作ヒントの判定にも流用する（生きたメニューかどうかの判定）。
     private static let noisePattern =
-        #"(?i)^(\?? ?for shortcuts|shift\+tab|tab to|auto-accept|bypass|plan mode|context left|esc to|press |use (arrow|↑))"#
+        #"(?i)^(\?? ?for shortcuts|shift\+tab|tab to|auto-accept|bypass|plan mode|context left|esc to|press |use (arrow|↑)|enter to select|.*to navigate|ctrl\+g to edit)"#
 
     /// 生のcapture-paneテキストから選択待ちブロックを検出する。
     /// 見つからなければ nil（＝ユーザー応答は不要）。
@@ -142,6 +143,12 @@ nonisolated enum ChoicePrompt {
         // 1から始まる2つ以上の連番のみを選択メニューとみなす（誤検出防止）
         guard collected.count >= 2, collected.first?.number == 1 else { return nil }
 
+        // 選択肢ブロックの後（ヒント行を除く）に別の内容が続いていれば、
+        // それは既に回答済みで会話が先へ進んだ「過去の」メニューの引用とみなし、
+        // 生きた選択待ちとして検出しない。
+        // (会話本文にUIキャプチャの引用が残っているだけで「選択待ち」と誤検出することがあった)
+        guard !hasContentAfterMenu(lines, menuEndIndex: lastIndex) else { return nil }
+
         let (title, detail) = extractTitle(above: index, in: lines)
         guard !title.isEmpty else { return nil }
 
@@ -151,6 +158,18 @@ nonisolated enum ChoicePrompt {
             detail: detail,
             options: collected
         )
+    }
+
+    /// 選択肢ブロックの後に、空行を挟んで別の内容（新しい会話・応答）が続いているか。
+    /// ヒント行（"Enter to select" 等）は無視する。続いていれば「過去の」メニューとみなす。
+    private static func hasContentAfterMenu(_ lines: [String], menuEndIndex: Int) -> Bool {
+        var sawBlank = false
+        for line in lines[(menuEndIndex + 1)...] {
+            if line.isEmpty { sawBlank = true; continue }
+            if matches(pattern: noisePattern, in: line) { continue }
+            if sawBlank { return true }
+        }
+        return false
     }
 
     /// "❯ 1. Yes" 形式の1行を選択肢へ変換する
