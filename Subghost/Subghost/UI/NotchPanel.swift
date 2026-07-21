@@ -471,6 +471,15 @@ final class NotchPanelController {
                 ),
                 height: min(estimated, 480)
             )
+        case .onboarding:
+            // 「フック連携」ステップだけ対象CLI数ぶん行が増える。他のステップは短い固定文言。
+            let extraRows = coordinator.onboardingStep == .hooks ? HookTarget.allCases.count : 0
+            size = NSSize(
+                width: NotchLayout.canvasWidth(
+                    for: max(metrics.notchWidth + 320, 680)
+                ),
+                height: metrics.topInset + 150 + CGFloat(extraRows) * 40
+            )
         }
         return NSRect(
             x: metrics.screenFrame.midX - size.width / 2,

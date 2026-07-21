@@ -89,6 +89,7 @@ private struct GeneralSettingsView: View {
     @AppStorage(NotchPreferences.notificationDisplayDurationKey) private var notificationDisplayDuration = 5.0
     @AppStorage(NotchPreferences.collapseOnMouseExitKey) private var collapseOnMouseExit = true
     @AppStorage(NotchPreferences.closeOnOutsideClickKey) private var closeOnOutsideClick = true
+    @AppStorage(NotchPreferences.choiceAutoCloseIntervalKey) private var choiceAutoCloseInterval = 0.0
     @State private var launchAtLogin = false
     @State private var isChangingLoginItem = false
     @State private var loginItemError: String?
@@ -161,6 +162,25 @@ private struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("外側のクリックで自動表示を閉じる", isOn: $closeOnOutsideClick)
+            }
+
+            Section("選択肢（承認/質問）") {
+                Toggle("回答するまで自動で閉じない（既定）", isOn: Binding(
+                    get: { choiceAutoCloseInterval <= 0 },
+                    set: { choiceAutoCloseInterval = $0 ? 0 : max(choiceAutoCloseInterval, 10) }
+                ))
+                if choiceAutoCloseInterval > 0 {
+                    Stepper(value: $choiceAutoCloseInterval, in: 10...120, step: 5) {
+                        LabeledContent("自動で閉じるまでの時間") {
+                            Text("\(choiceAutoCloseInterval, specifier: "%.0f")秒")
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                Text("ノッチから消えてもCLI側は引き続き回答を待っています。ターミナルで直接答えるか、"
+                     + "ノッチにカーソルを合わせると一覧からいつでも選び直せます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("監視") {
@@ -355,10 +375,18 @@ private struct HookSettingsView: View {
     @State private var confirming: HookTarget?
     @State private var statuslineMessage: String?
     @State private var shellMessage: String?
+    @State private var newAliasName = ""
+    @State private var newAliasBaseProfileID = CLIProfile.codex.id
+    @State private var aliasMessage: String?
+    @State private var customAliasStore = AppCoordinator.shared.customAliasStore
 
     /// 失敗したらその内容を文字列で返す（成功時は nil）
     private func run(_ work: () throws -> Void) -> String? {
         do { try work(); return nil } catch { return "失敗しました: \(error.localizedDescription)" }
+    }
+
+    private func displayName(for profileID: String) -> String {
+        CLIProfile.builtins.first { $0.id == profileID }?.displayName ?? profileID
     }
 
     private var serverRunning: Bool { AppCoordinator.shared.watcher.hookServerRunning }
@@ -460,7 +488,7 @@ private struct HookSettingsView: View {
                 Label(on ? "有効" : "無効",
                       systemImage: on ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(on ? Color.green : Color.secondary)
-                Text("有効にすると、ターミナルで claude / codexA / codexB / agyy を起動したとき自動的にtmux内で立ち上がります。各エイリアスのオプションはそのまま保持されます。tmuxを介すと、他の画面を見ながらでもノッチから質問の選択肢に回答できます。")
+                Text("有効にすると、ターミナルで claude / codex / agy（カスタムエイリアス含む）を起動したとき自動的にtmux内で立ち上がります。既存のシェルエイリアスのオプションもそのまま保持されます。tmuxを介すと、他の画面を見ながらでもノッチから質問の選択肢に回答できます。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("~/.zshrc に読み込み行を1行追加します（書き換え前にバックアップを取ります）。--version などの非対話実行や、すでにtmux内のときは何もしません。")
@@ -477,13 +505,59 @@ private struct HookSettingsView: View {
                     }
                 } else {
                     Button("有効にする") {
-                        shellMessage = run { try ShellIntegration.install() }
+                        let extra = AppCoordinator.shared.customAliasStore.aliases.map(\.name)
+                        shellMessage = run { try ShellIntegration.install(extraCommands: extra) }
                             ?? "有効にしました。新しいターミナルタブから反映されます（既存タブは source ~/.zshrc）。"
                     }
                     .disabled(TmuxClient.resolveTmuxPath() == nil)
                 }
                 if let shellMessage {
                     Text(shellMessage).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            Section("カスタムエイリアス") {
+                Text("独自の名前（ラッパースクリプトやシンボリックリンクなど）でCLIを起動している場合、"
+                     + "ここに登録するとそのCLIとして検出されます。単純なシェルエイリアス（alias付き）は"
+                     + "登録しなくても自動的に検出されます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach(customAliasStore.aliases) { alias in
+                    HStack {
+                        Text(alias.name)
+                            .font(.system(.body, design: .monospaced))
+                        Text(displayName(for: alias.baseProfileID))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("削除", role: .destructive) {
+                            AppCoordinator.shared.removeCustomAlias(alias)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.red)
+                    }
+                }
+
+                HStack {
+                    TextField("エイリアス名（例: codexA）", text: $newAliasName)
+                    Picker("", selection: $newAliasBaseProfileID) {
+                        ForEach(CLIProfile.builtins) { profile in
+                            Text(profile.displayName).tag(profile.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                    Button("追加") {
+                        let added = AppCoordinator.shared.addCustomAlias(
+                            name: newAliasName, baseProfileID: newAliasBaseProfileID)
+                        if added { newAliasName = "" }
+                        aliasMessage = added ? nil : "その名前は既に登録されているか、空です。"
+                    }
+                    .disabled(newAliasName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if let aliasMessage {
+                    Text(aliasMessage).font(.caption).foregroundStyle(.orange)
                 }
             }
         }
@@ -541,7 +615,7 @@ private struct SetupGuideView: View {
             Text("セットアップ")
                 .font(.headline)
 
-            Text("特別な設定は不要です。ターミナルで claude / codexA / codexB / agyy を普通に起動すれば、Subghostが自動的に検出します。セッション名の命名規則は要りません。")
+            Text("特別な設定は不要です。ターミナルで claude / codex / agy を普通に起動すれば、Subghostが自動的に検出します。セッション名の命名規則は要りません。独自の名前で起動している場合は「カスタムエイリアス」から登録してください。")
                 .font(.callout)
 
             GroupBox {
@@ -558,10 +632,10 @@ private struct SetupGuideView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("tmuxを挟み忘れないようにする", systemImage: "terminal")
                         .font(.callout).fontWeight(.medium)
-                    Text("「統合」タブの「自動でtmux内起動」を有効にすると、claude / codexA / codexB / agyy を普通に起動するだけで、自動的にtmux内で立ち上がります。")
+                    Text("「統合」タブの「自動でtmux内起動」を有効にすると、claude / codex / agy を普通に起動するだけで、自動的にtmux内で立ち上がります。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("tmux\ncodexA   # codexB / agyyも既存オプションを保持")
+                    Text("tmux\ncodex   # 既存のシェルエイリアスのオプションも保持されます")
                         .font(.system(size: 11, design: .monospaced))
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -737,7 +811,7 @@ private struct SetupDiagnosticsView: View {
                 DiagnosticRow(
                     title: "自動tmux起動",
                     detail: ShellIntegration.isInstalled()
-                        ? "claude / codexA / codexB / agyy を自動的にtmux内で起動します"
+                        ? "claude / codex / agy（カスタムエイリアス含む）を自動的にtmux内で起動します"
                         : "未設定です。統合画面から有効にできます",
                     health: ShellIntegration.isInstalled() ? .ready : .information
                 )

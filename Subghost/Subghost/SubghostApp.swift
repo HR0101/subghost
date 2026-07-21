@@ -23,12 +23,6 @@ struct SubghostApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppCoordinator.shared.start()
-
-        // DockやFinderから「ダブルクリックで起動できる普通のアプリ」として扱わせつつ、
-        // 起動が終わったらDockアイコン（実行中インジケータ含む）を消し、
-        // 常駐中は従来どおりノッチUIだけを操作の入口にする。
-        // (Info.plistのLSUIElementをNOにして常時 .regular 起動させ、ここで .accessory へ落とす)
-        NSApp.setActivationPolicy(.accessory)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

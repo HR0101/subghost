@@ -19,12 +19,12 @@ nonisolated enum AIState: String, Codable, Sendable {
 
     var displayName: String {
         switch self {
-        case .idle: return "待機"
-        case .thinking: return "生成中"
-        case .awaitingApproval: return "承認待ち"
-        case .awaitingAnswer: return "質問中"
-        case .completed: return "完了"
-        case .error: return "エラー"
+        case .idle: return "Stand-by"
+        case .thinking: return "Working"
+        case .awaitingApproval: return "Approval"
+        case .awaitingAnswer: return "Question"
+        case .completed: return "Done"
+        case .error: return "Error"
         }
     }
 
@@ -46,8 +46,9 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
     let id: String              // "claude" | "codex" | "antigravity"
     let displayName: String
     let launchCommand: String
-    /// psのcommに現れる実行ファイル名（この名前でプロセスを同定する）
-    let executableNames: [String]
+    /// psのcommに現れる実行ファイル名（この名前でプロセスを同定する）。
+    /// ビルトインの名前に加え、ユーザー登録のカスタムエイリアス名もここへ合成される。
+    var executableNames: [String]
     /// プロンプト待ち受け記号（応答完了の指標）の正規表現
     let promptPattern: String
     /// 除去対象のスピナー/装飾文字の正規表現
@@ -103,6 +104,42 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
     )
 
     static let builtins: [CLIProfile] = [.claude, .codex, .antigravity]
+
+    /// ビルトインのプロファイルに、ユーザー登録のカスタムエイリアス名を合成して返す。
+    /// (実行ファイル名が違うだけで実体は同じCLIを、独自の名前やラッパースクリプトで
+    /// 起動している場合に、そのCLIとして検出できるようにするため)
+    static func withCustomAliases(_ aliases: [CustomAlias]) -> [CLIProfile] {
+        var result = builtins
+        for alias in aliases {
+            // AgentDiscovery.matchProfile は実行ファイル名を小文字化してから比較するため、
+            // ここでも小文字化して揃えておかないと大文字混じりの登録が一致しなくなる。
+            let name = alias.name.lowercased()
+            guard !name.isEmpty,
+                  let index = result.firstIndex(where: { $0.id == alias.baseProfileID }),
+                  !result[index].executableNames.contains(name)
+            else { continue }
+            result[index].executableNames.append(name)
+        }
+        return result
+    }
+}
+
+// MARK: - カスタムエイリアス (設計書 追補: ユーザー独自のCLI起動名)
+
+/// ユーザーが登録した、既存CLIプロファイルに紐づく追加の実行ファイル名。
+/// 例: 独自のラッパースクリプト「codexA」をCodexとして検出させたい場合。
+nonisolated struct CustomAlias: Codable, Sendable, Identifiable, Hashable {
+    let id: UUID
+    /// psのcommに現れる実行ファイル名（大文字小文字は区別しない）
+    var name: String
+    /// 紐づける既存プロファイルのid（"claude" | "codex" | "antigravity"）
+    var baseProfileID: String
+
+    init(id: UUID = UUID(), name: String, baseProfileID: String) {
+        self.id = id
+        self.name = name
+        self.baseProfileID = baseProfileID
+    }
 }
 
 // MARK: - スニペット (設計書 4.4 / 8.1)

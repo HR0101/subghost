@@ -304,6 +304,7 @@ struct NotchView: View {
         case .choice: choiceContent
         case .sessions: sessionsContent
         case .activity: activityContent
+        case .onboarding: onboardingContent
         }
     }
 
@@ -315,6 +316,7 @@ struct NotchView: View {
         case .choice: return max(notchWidth + 320, 680)
         case .sessions: return max(notchWidth + 420, 760)
         case .activity: return max(notchWidth + 420, 760)
+        case .onboarding: return max(notchWidth + 320, 680)
         }
     }
 
@@ -527,7 +529,7 @@ struct NotchView: View {
             .padding(.bottom, 2)
 
             if coordinator.watcher.sessions.isEmpty {
-                Text("AI CLI が見つかりません。ターミナルで claude / codexA・B / agyy を起動してください")
+                Text("AI CLI が見つかりません。ターミナルで claude / codex / agy を起動してください")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.45))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -625,6 +627,145 @@ struct NotchView: View {
         .padding(.bottom, 12)
     }
 
+    // MARK: - 展開（初回案内）：ようこそ→フック連携→権限→完了
+
+    private var onboardingContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Color.clear.frame(height: topInset)
+
+            // 現在地が一目で分かるよう、段階をドットで示す
+            HStack(spacing: 6) {
+                ForEach(OnboardingStep.allCases, id: \.self) { step in
+                    Circle()
+                        .fill(.white.opacity(step == coordinator.onboardingStep ? 0.9 : 0.25))
+                        .frame(width: 5, height: 5)
+                }
+                Spacer()
+                if coordinator.onboardingStep != .done {
+                    Button("スキップ") { coordinator.skipOnboarding() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+
+            onboardingStepContent
+
+            HStack {
+                Spacer()
+                Button(coordinator.onboardingStep == .done ? "はじめる" : "次へ") {
+                    coordinator.advanceOnboarding()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(.white.opacity(0.9)))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private var onboardingStepContent: some View {
+        switch coordinator.onboardingStep {
+        case .welcome:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("👻 Subghostへようこそ")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("ノッチにAI CLIの状態を表示し、質問への回答や通知をまとめて扱えるようにします。"
+                     + "最初にいくつかだけ設定を確認しましょう。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+
+        case .hooks:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("フック連携（推奨）")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("有効にすると、画面の文字解析に頼らず正確に状態を検知できます。誤判定も無くなります。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.7))
+                ForEach(HookTarget.allCases) { target in
+                    onboardingHookRow(target)
+                }
+            }
+
+        case .permissions:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("アクセシビリティ権限")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("質問への回答をノッチから送るには、アクセシビリティの許可が必要です"
+                     + "（tmux経由のセッションでは不要です）。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.7))
+                HStack(spacing: 8) {
+                    Image(systemName: KeystrokeSender.isTrusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(KeystrokeSender.isTrusted ? .green : .orange)
+                    Text(KeystrokeSender.isTrusted ? "許可済みです" : "まだ許可されていません")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.8))
+                    Spacer()
+                    if !KeystrokeSender.isTrusted {
+                        Button("システム設定を開く") { KeystrokeSender.requestTrust() }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.12)))
+                    }
+                }
+            }
+
+        case .done:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("準備ができました")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("歯車アイコン（ノッチにカーソルを合わせると出てきます）からいつでも設定を開けます。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.7))
+                Text("\(HotkeyPreset.current.displayName) でプロンプト入力欄を開閉できます。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+        }
+    }
+
+    private func onboardingHookRow(_ target: HookTarget) -> some View {
+        let isOn = HookInstaller.isInstalled(target)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: isOn ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(isOn ? .green : .white.opacity(0.4))
+                Text(target.displayName)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.85))
+                Spacer()
+                if !isOn {
+                    Button("有効にする") { coordinator.enableHookFromOnboarding(target) }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.12)))
+                }
+            }
+            if let message = coordinator.onboardingHookMessage[target] {
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+        }
+    }
+
     /// tmux外で起動したことを検出した場合だけ、自動化を案内する。
     /// フック連携済みでも、ユーザーがtmux利用を望む場合に見落とさないよう表示する。
     private var shouldOfferAutoTmux: Bool {
@@ -656,7 +797,7 @@ struct NotchView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .help("claude / codexA・B / agyy を自動的にtmux内で起動します")
+                .help("claude / codex / agy（カスタムエイリアス含む）を自動的にtmux内で起動します")
             }
         }
         .padding(.horizontal, 10)
@@ -680,7 +821,7 @@ struct NotchView: View {
 
     private func enableAutoTmux() {
         do {
-            try ShellIntegration.install()
+            try ShellIntegration.install(extraCommands: coordinator.customAliasStore.aliases.map(\.name))
             autoTmuxInstalled = true
             autoTmuxMessage = nil
             autoTmuxMessageIsError = false
@@ -1019,7 +1160,7 @@ struct NotchView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
             } else if coordinator.watcher.sessions.isEmpty {
-                Text("AI CLI が見つかりません。ターミナルで claude / codexA・B / agyy を起動してください")
+                Text("AI CLI が見つかりません。ターミナルで claude / codex / agy を起動してください")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
             } else if coordinator.watcher.activeSession?.info.isMonitorable == false {

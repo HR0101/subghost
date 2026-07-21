@@ -38,9 +38,14 @@ nonisolated enum ShellIntegration {
 
     // MARK: - スクリプト本体
 
-    /// 対象コマンドを包むシェル関数を生成する
-    static func scriptBody() -> String {
-        let functions = wrappedCommands.map { command in
+    /// 対象コマンドを包むシェル関数を生成する。
+    /// - Parameter extraCommands: ユーザー登録のカスタムエイリアス名（実行ファイル名）。
+    ///   ビルトインと重複するもの（大文字小文字を区別しない）は無視する。
+    static func scriptBody(extraCommands: [String] = []) -> String {
+        var seen = Set<String>()
+        let allCommands = (wrappedCommands + extraCommands)
+            .filter { seen.insert($0.lowercased()).inserted }
+        let functions = allCommands.map { command in
             "\(command)() { _subghost_run \(command) \"$@\"; }"
         }.joined(separator: "\n")
 
@@ -78,8 +83,8 @@ nonisolated enum ShellIntegration {
 
     // MARK: - 導入 / 解除
 
-    static func install() throws {
-        try writeScript()
+    static func install(extraCommands: [String] = []) throws {
+        try writeScript(extraCommands: extraCommands)
 
         let current = (try? String(contentsOf: zshrcURL, encoding: .utf8)) ?? ""
         // 既に入っていれば二重に足さない
@@ -123,12 +128,12 @@ nonisolated enum ShellIntegration {
 
     // MARK: - ファイル入出力
 
-    private static func writeScript() throws {
+    private static func writeScript(extraCommands: [String] = []) throws {
         let dir = (scriptPath as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(
             atPath: dir, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        try scriptBody().write(toFile: scriptPath, atomically: true, encoding: .utf8)
+        try scriptBody(extraCommands: extraCommands).write(toFile: scriptPath, atomically: true, encoding: .utf8)
     }
 
     private static func backupZshrc() throws {
