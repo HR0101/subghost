@@ -273,14 +273,20 @@ nonisolated struct StateDetector: Sendable {
                 return s.trimmingCharacters(in: .whitespaces)
             }
 
+        // 入力ボックスのプロンプト行より下（ステータスバー・モード表示等）は対象外にする
+        let lastPromptIndex = lines.lastIndex {
+            !$0.isEmpty && matches(pattern: profile.promptPattern, in: $0)
+        }
+        let searchLines = lastPromptIndex.map { Array(lines[..<$0]) } ?? lines
+
         // 末尾から遡り、プロンプト行・ステータス行・空行をスキップして本文ブロックを集める
         var collected: [String] = []
         var inBody = false
-        for line in lines.reversed() {
+        for line in searchLines.reversed() {
             let isNoise = line.isEmpty
                 || matches(pattern: profile.promptPattern, in: line)
                 || matches(pattern: profile.busyPattern, in: line)
-                || matches(pattern: #"(?i)^\?? ?(for shortcuts|shift\+tab|tab to|auto-accept|bypass|plan mode|context left|tokens|/help|esc to)"#, in: line)
+                || matches(pattern: #"(?i)^\?? ?(for shortcuts|shift\+tab|tab to|auto-accept|bypass|plan mode|context left|tokens|/help|esc to|worked for)"#, in: line)
             if !inBody {
                 if isNoise { continue }
                 inBody = true

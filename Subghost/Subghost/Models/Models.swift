@@ -70,7 +70,8 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
         displayName: "Claude Code",
         launchCommand: "claude",
         executableNames: ["claude"],
-        promptPattern: #"(^|\n)\s*(│|>)\s*(>|❯)?\s*"#,
+        // 実機のClaude Codeは「横罫線＋❯」入力UI。単独の ❯ 行にもマッチさせる
+        promptPattern: #"(^|\n)\s*(│\s*)?(>|❯)"#,
         spinnerPattern: #"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✻✽✢·✳*]+"#,
         busyPattern: #"esc to interrupt|Thinking…|Compacting|Wrangling|Herding|Simmering"#,
         errorPattern: #"(?i)(^|\n)\s*(Error:|API Error|✗ |fatal:|Traceback \(most recent call last\))"#,

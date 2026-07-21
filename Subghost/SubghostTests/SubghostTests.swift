@@ -341,6 +341,41 @@ struct StateDetectorTests {
         #expect(detector.state == .idle)
     }
 
+    @Test func 新UIの山括弧プロンプトとステータスバーでも完了を検出する() {
+        var detector = makeDetector()
+        let t0 = Date(timeIntervalSince1970: 0)
+        _ = detector.ingest(rawText: "初期画面", at: t0)
+        _ = detector.ingest(
+            rawText: "初期画面\n✻ Baking… (esc to interrupt · 12s)",
+            at: t0.addingTimeInterval(0.8))
+        #expect(detector.state == .thinking)
+
+        // 実機のClaude Code画面: ❯プロンプト＋横罫線＋ステータスバー
+        let final = """
+        ⏺ 修正が完了しました。
+          テストも追加済みです。
+
+        ✢ Worked for 6m 23s
+
+        ──────────────────────────────
+        ❯
+        ──────────────────────────────
+          Sonnet 5 · effort xhigh in subghost │ 5h [██████░░░░] 27% → 15:40
+          ⏵⏵ auto mode on (shift+tab to cycle) · gh auth login for PR status
+        """
+        _ = detector.ingest(rawText: final, at: t0.addingTimeInterval(1.6))
+        let event = detector.ingest(rawText: final, at: t0.addingTimeInterval(3.5))
+        guard case .becameCompleted(let preview) = event else {
+            Issue.record("completedにならなかった: \(event)")
+            return
+        }
+        #expect(detector.state == .completed)
+        #expect(preview.contains { $0.contains("修正が完了しました") })
+        #expect(!preview.contains { $0.contains("Worked for") })
+        #expect(!preview.contains { $0.contains("Sonnet") })
+        #expect(!preview.contains { $0.contains("auto mode") })
+    }
+
     @Test func スピナーの変化だけではthinkingにならない() {
         var detector = makeDetector()
         let t0 = Date(timeIntervalSince1970: 0)
