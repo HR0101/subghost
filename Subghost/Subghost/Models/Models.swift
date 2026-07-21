@@ -189,6 +189,59 @@ nonisolated struct Snippet: Codable, Sendable, Identifiable, Hashable {
     ]
 }
 
+// MARK: - セッションに対してできること
+
+/// Subghostがそのセッションに対して何をできるかの区分。
+///
+/// tmux を使う構成と使わない構成で、できることがはっきり違う。
+/// 画面のあちこちで `tmuxTarget != nil` を個別に判定すると
+/// 「入力欄は出るのに送れない」といった食い違いが生まれるため、
+/// 判断はこの型に集約し、UIはこれを見て出し分ける。
+nonisolated enum SessionCapability: Int, Sendable, Comparable, CaseIterable {
+    /// 検出しただけ。状態は読めず、送信もできない。ターミナルのタブへ移動できるのみ。
+    case detectedOnly
+    /// 監視のみ（tmuxなしの簡易構成）。フックで状態・完了通知は届き、
+    /// 承認の「はい／いいえ」もフックの戻り値で答えられる。
+    /// ただし任意のテキストを送る経路が無いため、プロンプト入力は提供しない。
+    case monitorOnly
+    /// tmux経由で任意のテキストを送れる。すべての機能が使える。
+    case full
+
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    /// 一覧のバッジ用の短い名前
+    var label: String {
+        switch self {
+        case .detectedOnly: return "検出のみ"
+        case .monitorOnly: return "監視のみ"
+        case .full: return "送信可"
+        }
+    }
+
+    /// この段階に到達するために必要な構成（設定画面の一覧に出す）
+    var requirement: String {
+        switch self {
+        case .detectedOnly: return "設定不要"
+        case .monitorOnly: return "フック登録"
+        case .full: return "フック登録 ＋ tmux"
+        }
+    }
+
+    /// 何ができるのかを一文で説明する（支援技術の読み上げと補足文に使う）
+    var summary: String {
+        switch self {
+        case .detectedOnly:
+            return "起動は検出できていますが、状態の取得も送信もできません。"
+                + "フックを登録すると状態が分かるようになります。"
+        case .monitorOnly:
+            return "状態の監視と承認への回答ができます。"
+                + "プロンプトの送信には tmux が必要です。"
+        case .full:
+            return "状態の監視、プロンプトの送信、質問への回答がすべて行えます。"
+        }
+    }
+}
+
 // MARK: - セッション情報 (設計書 8.1、追補: ゼロコンフィグ検出)
 
 /// 検出したAI CLI 1つ分の識別情報。
@@ -216,9 +269,24 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
     /// フック方式で監視できているか（tmux不要）
     var isHookConnected: Bool { hookSessionID != nil }
 
-    /// 画面の読み取りとキー送信ができるか。
-    /// フックが届いていればtmuxは不要。どちらも無ければ検出とタブ移動のみ。
-    var isMonitorable: Bool { tmuxTarget != nil || isHookConnected }
+    /// このセッションに対してSubghostが何をできるか。
+    /// UIの出し分けは必ずここを見る（tmuxの有無を画面ごとに個別判定しない）。
+    var capability: SessionCapability {
+        if tmuxTarget != nil { return .full }
+        if isHookConnected { return .monitorOnly }
+        return .detectedOnly
+    }
+
+    /// 状態を読めるか。フックが届いていればtmuxは不要。
+    /// どちらも無ければ検出とタブ移動のみ。
+    var isMonitorable: Bool { capability >= .monitorOnly }
+
+    /// 任意のテキスト（プロンプト）を送れるか。
+    ///
+    /// 送信経路は tmux の pty 書き込みだけ。キー入力の合成（KeystrokeSender）は
+    /// 対象タブを前面に出す必要があり、「裏で動いているCLIへ送る」という
+    /// この機能の前提を満たせないため、送信経路には数えない。
+    var canSendPrompt: Bool { capability == .full }
 
     /// "ttys004" のような短い表示名
     var shortName: String {
@@ -244,6 +312,9 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
         if tmuxTarget != nil { return "tmux" }
         return "なし"
     }
+
+    /// 一覧のバッジに出す、できることの短い説明
+    var capabilityLabel: String { capability.label }
 
     init(agent: DiscoveredAgent) {
         self.tty = agent.tty

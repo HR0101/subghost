@@ -645,6 +645,175 @@ struct AgentDiscoveryTests {
         #expect(map.count == 3)
     }
 
+    @Test func tmuxのペイン活動時刻を解析する() {
+        let output = """
+        /dev/ttys006|1784624104
+        /dev/ttys012|1784621713
+        """
+        let map = TmuxClient.parsePaneActivity(output)
+        #expect(map["/dev/ttys006"] == Date(timeIntervalSince1970: 1_784_624_104))
+        #expect(map["/dev/ttys012"] == Date(timeIntervalSince1970: 1_784_621_713))
+        #expect(map.count == 2)
+    }
+
+    /// 時刻が読めない行を「1970年」として扱うと、すべて放置扱いになってしまう
+    @Test func 活動時刻が解釈できない行は捨てる() {
+        let output = """
+        /dev/ttys006|
+        /dev/ttys007|0
+        /dev/ttys008|なにか
+        /dev/ttys009|1784624104
+        """
+        let map = TmuxClient.parsePaneActivity(output)
+        #expect(map.count == 1)
+        #expect(map["/dev/ttys009"] != nil)
+    }
+
+    // MARK: - 一覧に出すかどうか
+
+    private func 表示判断入力(
+        needsUserResponse: Bool = false,
+        isActiveTarget: Bool = false,
+        isMonitorable: Bool = true,
+        activityAt: Date,
+        hiddenAtActivity: Date? = nil
+    ) -> SessionVisibility.Input {
+        SessionVisibility.Input(
+            needsUserResponse: needsUserResponse,
+            isActiveTarget: isActiveTarget,
+            isMonitorable: isMonitorable,
+            activityAt: activityAt,
+            hiddenAtActivity: hiddenAtActivity
+        )
+    }
+
+    private var 既定ルール: SessionVisibility.Rules {
+        SessionVisibility.Rules(
+            revealAll: false,
+            hideUnmonitorable: true,
+            hideInactive: true,
+            inactiveThreshold: 1_800
+        )
+    }
+
+    @Test func 長時間動きの無いセッションは一覧から外す() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        // 31分前が最終活動
+        let stale = 表示判断入力(activityAt: now.addingTimeInterval(-1_860))
+        let fresh = 表示判断入力(activityAt: now.addingTimeInterval(-60))
+        #expect(!SessionVisibility.isVisible(stale, rules: 既定ルール, at: now))
+        #expect(SessionVisibility.isVisible(fresh, rules: 既定ルール, at: now))
+    }
+
+    @Test func 監視できないセッションは一覧から外す() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        let input = 表示判断入力(isMonitorable: false, activityAt: now)
+        #expect(!SessionVisibility.isVisible(input, rules: 既定ルール, at: now))
+    }
+
+    /// 隠す設定より見逃し防止を優先する。答えるまでCLIが止まってしまうため。
+    @Test func 回答待ちのセッションは放置扱いでも必ず表示する() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        let input = 表示判断入力(
+            needsUserResponse: true,
+            isMonitorable: false,
+            activityAt: now.addingTimeInterval(-100_000),
+            hiddenAtActivity: now
+        )
+        #expect(SessionVisibility.isVisible(input, rules: 既定ルール, at: now))
+    }
+
+    @Test func 送信先に選んでいるセッションは必ず表示する() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        let input = 表示判断入力(
+            isActiveTarget: true,
+            activityAt: now.addingTimeInterval(-100_000)
+        )
+        #expect(SessionVisibility.isVisible(input, rules: 既定ルール, at: now))
+    }
+
+    @Test func 手動で隠したセッションは新しい動きがあれば戻る() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        let hiddenAt = now.addingTimeInterval(-600)
+
+        // 隠した時点から動きが無い → 隠れたまま
+        let quiet = 表示判断入力(activityAt: hiddenAt, hiddenAtActivity: hiddenAt)
+        #expect(!SessionVisibility.isVisible(quiet, rules: 既定ルール, at: now))
+
+        // 隠した後に動いた → また使い始めたとみなして表示
+        let resumed = 表示判断入力(
+            activityAt: now.addingTimeInterval(-10), hiddenAtActivity: hiddenAt)
+        #expect(SessionVisibility.isVisible(resumed, rules: 既定ルール, at: now))
+    }
+
+    @Test func すべて表示中は絞り込みを行わない() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        var rules = 既定ルール
+        rules.revealAll = true
+        let input = 表示判断入力(
+            isMonitorable: false,
+            activityAt: now.addingTimeInterval(-100_000),
+            hiddenAtActivity: now
+        )
+        #expect(SessionVisibility.isVisible(input, rules: rules, at: now))
+    }
+
+    @Test func 隠す設定を切れば放置セッションも表示する() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        var rules = 既定ルール
+        rules.hideInactive = false
+        rules.hideUnmonitorable = false
+        let input = 表示判断入力(
+            isMonitorable: false, activityAt: now.addingTimeInterval(-100_000))
+        #expect(SessionVisibility.isVisible(input, rules: rules, at: now))
+    }
+
+    // MARK: - できることの区分
+
+    private func セッション(tmux: String?, hookID: String?) -> SessionInfo {
+        var info = SessionInfo(agent: DiscoveredAgent(
+            pid: 1, tty: "/dev/ttys006", profile: .claude,
+            tmuxTarget: tmux, tmuxSession: tmux.map { _ in "work" }))
+        info.hookSessionID = hookID
+        return info
+    }
+
+    @Test func tmuxがあれば送信までできる() {
+        let info = セッション(tmux: "work:0.0", hookID: nil)
+        #expect(info.capability == .full)
+        #expect(info.canSendPrompt)
+        #expect(info.isMonitorable)
+    }
+
+    /// tmuxを使わない簡易構成。監視と承認への回答は動くが、プロンプトは送れない。
+    @Test func フックのみなら監視できるが送信はできない() {
+        let info = セッション(tmux: nil, hookID: "abc")
+        #expect(info.capability == .monitorOnly)
+        #expect(!info.canSendPrompt)
+        #expect(info.isMonitorable)
+    }
+
+    @Test func tmuxもフックも無ければ検出のみ() {
+        let info = セッション(tmux: nil, hookID: nil)
+        #expect(info.capability == .detectedOnly)
+        #expect(!info.canSendPrompt)
+        #expect(!info.isMonitorable)
+    }
+
+    /// フック接続済みでもtmuxが無ければ送信経路は無い。
+    /// ここが崩れると「入力欄は出るのに送信時に断られる」状態に戻る。
+    @Test func フック接続だけでは送信経路にならない() {
+        let hookOnly = セッション(tmux: nil, hookID: "abc")
+        let both = セッション(tmux: "work:0.0", hookID: "abc")
+        #expect(!hookOnly.canSendPrompt)
+        #expect(both.canSendPrompt)
+    }
+
+    @Test func できることの区分は段階順に並ぶ() {
+        #expect(SessionCapability.detectedOnly < SessionCapability.monitorOnly)
+        #expect(SessionCapability.monitorOnly < SessionCapability.full)
+    }
+
     @Test func tmux外のセッションは監視不可として扱う() {
         let inTmux = SessionInfo(agent: DiscoveredAgent(
             pid: 1, tty: "/dev/ttys006", profile: .claude,
