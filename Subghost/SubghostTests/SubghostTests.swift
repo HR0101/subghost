@@ -444,6 +444,35 @@ struct AgentDiscoveryTests {
         #expect(AgentDiscovery.matchProfile(commandPath: "/bin/zsh", profiles: profiles) == nil)
     }
 
+    @Test func カスタムエイリアスを登録すると独自の実行ファイル名でも検出できる() {
+        let alias = CustomAlias(name: "codexA", baseProfileID: "codex")
+        let merged = CLIProfile.withCustomAliases([alias])
+        #expect(AgentDiscovery.matchProfile(commandPath: "/usr/local/bin/codexA", profiles: merged)?.id == "codex")
+        // ビルトインの検出は壊れていないこと
+        #expect(AgentDiscovery.matchProfile(commandPath: "/usr/local/bin/claude", profiles: merged)?.id == "claude")
+    }
+
+    @Test func カスタムエイリアスは大文字小文字を無視して照合する() {
+        // psのcomm列は小文字化して比較するため、登録名も揃える必要がある
+        let alias = CustomAlias(name: "CodexA", baseProfileID: "codex")
+        let merged = CLIProfile.withCustomAliases([alias])
+        #expect(AgentDiscovery.matchProfile(commandPath: "/usr/local/bin/codexa", profiles: merged)?.id == "codex")
+    }
+
+    @Test func 存在しないプロファイルIDのカスタムエイリアスは無視する() {
+        let alias = CustomAlias(name: "mystery", baseProfileID: "no-such-profile")
+        let merged = CLIProfile.withCustomAliases([alias])
+        #expect(merged.count == CLIProfile.builtins.count)
+        #expect(AgentDiscovery.matchProfile(commandPath: "/usr/local/bin/mystery", profiles: merged) == nil)
+    }
+
+    @Test func 既存の実行ファイル名と重複するカスタムエイリアスは二重登録しない() {
+        let alias = CustomAlias(name: "codex", baseProfileID: "codex")
+        let merged = CLIProfile.withCustomAliases([alias])
+        let codexProfile = merged.first { $0.id == "codex" }
+        #expect(codexProfile?.executableNames.filter { $0 == "codex" }.count == 1)
+    }
+
     @Test func tmuxのペイン宛先を解析する() {
         let output = """
         /dev/ttys006|work:0.0
@@ -1385,6 +1414,18 @@ struct ShellIntegrationTests {
         // 非対話・tmux内・tmux未導入では素通しする条件が入っていること
         #expect(body.contains("[ -n \"$TMUX\" ]"))
         #expect(body.contains("[ ! -t 1 ]"))
+    }
+
+    @Test func カスタムエイリアス名も対象コマンドとして包む() {
+        // 設定画面で登録した独自の実行ファイル名（例: 独自のラッパースクリプト）
+        let body = ShellIntegration.scriptBody(extraCommands: ["codexA", "codexB"])
+        #expect(body.contains("codexA() { _subghost_run codexA"))
+        #expect(body.contains("codexB() { _subghost_run codexB"))
+    }
+
+    @Test func ビルトインと重複するカスタムエイリアス名は二重に包まない() {
+        let body = ShellIntegration.scriptBody(extraCommands: ["codex", "Codex"])
+        #expect(body.components(separatedBy: "codex() {").count - 1 == 1)
     }
 
     @Test func 目印で囲んだブロックだけを取り除く() {

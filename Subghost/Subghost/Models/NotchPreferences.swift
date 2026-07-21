@@ -17,6 +17,7 @@ nonisolated enum NotchPreferences {
     static let notificationDisplayDurationKey = "notificationDisplayDuration"
     static let collapseOnMouseExitKey = "collapseOnMouseExit"
     static let closeOnOutsideClickKey = "closeOnOutsideClick"
+    static let choiceAutoCloseIntervalKey = "choiceAutoCloseInterval"
 
     static var hoverExpansionEnabled: Bool {
         bool(forKey: hoverExpansionEnabledKey, default: true)
@@ -68,6 +69,12 @@ nonisolated enum NotchPreferences {
 
     static var closeOnOutsideClick: Bool {
         bool(forKey: closeOnOutsideClickKey, default: true)
+    }
+
+    /// 選択肢（承認/質問）を自動で閉じるまでの秒数。
+    /// 0以下なら自動で閉じない（回答するまで表示し続ける、既定の挙動）。
+    static var choiceAutoCloseInterval: TimeInterval {
+        number(forKey: choiceAutoCloseIntervalKey, default: 0)
     }
 
     static func bool(

@@ -19,6 +19,9 @@ nonisolated struct ToneStep: Sendable {
 }
 
 nonisolated enum AlertSound: String, CaseIterable, Sendable {
+    // アプリ
+    case appLaunched        // Subghost自体の起動
+
     // セッション
     case sessionStart       // 新しいCLIセッションを検出
     case completed          // AIがターンを完了
@@ -34,6 +37,7 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
 
     var displayName: String {
         switch self {
+        case .appLaunched: return "アプリ起動"
         case .sessionStart: return "セッション開始"
         case .completed: return "タスク完了"
         case .error: return "タスクエラー"
@@ -46,6 +50,7 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
 
     var detail: String {
         switch self {
+        case .appLaunched: return "Subghostが起動しました"
         case .sessionStart: return "新しい Claude / Codex / Antigravity セッション"
         case .completed: return "AI がターンを完了しました"
         case .error: return "ツールエラーまたは API エラー"
@@ -59,6 +64,7 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
     /// 設定画面での並び（参考にした分類に合わせる）
     var category: String {
         switch self {
+        case .appLaunched: return "アプリ"
         case .sessionStart, .completed, .error: return "セッション"
         case .approval, .question, .promptSent: return "インタラクション"
         case .contextLimit: return "システム"
@@ -78,6 +84,14 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
     ///   上行=良い知らせ / 下行=悪い知らせ / 反復=注意を引く / 単発=軽い確認
     var steps: [ToneStep] {
         switch self {
+        case .appLaunched:
+            // アプリ起動。ふわっと現れる印象の、緩やかな四和音アルペジオ。
+            // sessionStart（CLI検出）より一段長くして、区別しつつ起動完了の満足感を出す。
+            return [ToneStep(frequency: 392, duration: 0.06),     // G4
+                    ToneStep(frequency: 523, duration: 0.06),     // C5
+                    ToneStep(frequency: 659, duration: 0.06),     // E5
+                    ToneStep(frequency: 880, duration: 0.14)]     // A5
+
         case .sessionStart:
             // 起動音。低→高へ駆け上がる明るい和音進行
             return [ToneStep(frequency: 523, duration: 0.05),     // C5

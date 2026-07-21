@@ -202,19 +202,38 @@ final class SessionWatcher {
         pollTask = nil
     }
 
+    /// ユーザー登録のカスタムエイリアス（AppCoordinatorが変更のたびに同期する）
+    var customAliases: [CustomAlias] = []
+
+    /// フック未着イベント（stopが来ない等）で固着した .thinking を裏取りするまでの猶予。
+    /// 短すぎるとフックイベント到着直後の一瞬を誤って裏取りしかねないため、数秒は待つ。
+    private static let hookStaleCheckDelay: TimeInterval = 5.0
+    /// tmuxで裏取りできても busy/prompt のどちらとも判定できない画面が続いた場合の猶予
+    private static let hookStaleUnknownScreenInterval: TimeInterval = 30.0
+    /// tmuxが無く画面で裏取りできない場合、最後の手段として強制的にidleへ戻すまでの猶予
+    private static let hookStaleForceIdleInterval: TimeInterval = 600.0
+    /// completed のまま放置された場合にidleへ自動遷移するまでの秒数（tmux接続時のStateDetectorと揃える）
+    private static let completedHoldInterval: TimeInterval = 8.0
+
     func pollOnce() async {
         tmuxAvailable = TmuxClient.resolveTmuxPath() != nil
 
         // 1. 実行中プロセスからAI CLIを検出する（エイリアス・命名規則に依存しない）
-        let agents = await AgentDiscovery.discover()
+        let agents = await AgentDiscovery.discover(profiles: CLIProfile.withCustomAliases(customAliases))
         reconcile(agents: agents)
 
-        // 2. tmux配下のものだけcapture-paneして状態判定する
+        // 2. 状態判定。フック接続の有無で経路が異なる。
         let now = Date()
         let stable = UserDefaults.standard.object(forKey: "stableInterval") as? Double ?? 1.5
         for session in sessions {
-            // フックが届いているセッションはイベントが正確なので、画面解析は行わない
-            guard !session.info.isHookConnected else { continue }
+            if session.info.isHookConnected {
+                // フックイベント自体は正確だが、取りこぼし（フックサーバ再起動、CLIの
+                // クラッシュ、stopイベント未着等）が起きると自己修復する手段が無く
+                // Working等のまま永久に固着してしまう。ingestによる画面解析は
+                // フック接続後は行わないため、ここで独立した安全網をかける。
+                await reconcileStaleHookState(session: session, at: now)
+                continue
+            }
             guard let target = session.info.tmuxTarget,
                   let text = await TmuxClient.capturePane(target: target) else { continue }
             session.detector.stableInterval = stable
@@ -230,6 +249,49 @@ final class SessionWatcher {
         refreshCodexUsage()
         await refreshConversationTails()
         writeStateDumpIfEnabled()
+    }
+
+    /// フック接続セッションの状態が、実際のCLIの様子と食い違っていないか裏取りする（安全網）。
+    /// tmuxも繋がっていれば画面で確認し、無ければ長時間経過を根拠に強制的に戻す。
+    private func reconcileStaleHookState(session: MonitoredSession, at now: Date) async {
+        switch session.state {
+        case .thinking:
+            let elapsed = now.timeIntervalSince(session.lastActivityAt)
+            guard elapsed >= Self.hookStaleCheckDelay else { return }
+            let profile = session.info.profile
+
+            if let target = session.info.tmuxTarget,
+               let text = await TmuxClient.capturePane(target: target) {
+                let cleaned = StateDetector.clean(text, profile: profile)
+                if StateDetector.matches(pattern: profile.busyPattern, in: cleaned) {
+                    return   // 実際にまだ動作中
+                }
+                if StateDetector.matches(
+                    pattern: profile.promptPattern, in: StateDetector.tail(of: cleaned, lines: 12)) {
+                    session.state = .completed
+                    session.lastCompletedAt = now
+                    session.preview = StateDetector.extractPreview(from: text, profile: profile)
+                    return
+                }
+                // busyでもプロンプト待ちでもない画面（予期しない表示等）は判定を急がず、
+                // 猶予をおいてもなお変わらなければ安全側のidleへ倒す
+                if elapsed >= Self.hookStaleUnknownScreenInterval {
+                    session.state = .idle
+                }
+            } else if elapsed >= Self.hookStaleForceIdleInterval {
+                // 画面を確認する手段が無い場合の最後の保険
+                session.state = .idle
+            }
+
+        case .completed:
+            guard let completedAt = session.lastCompletedAt,
+                  now.timeIntervalSince(completedAt) >= Self.completedHoldInterval
+            else { return }
+            session.state = .idle
+
+        default:
+            return
+        }
     }
 
     /// 各セッションの直近のやり取りを記録から読み出す。
@@ -296,6 +358,7 @@ final class SessionWatcher {
                     "monitoringSource": session.info.monitoringSource,
                     "hookSessionID": session.info.hookSessionID ?? "(なし)",
                     "tmuxTarget": session.info.tmuxTarget ?? "(なし)",
+                    "lastActivitySecondsAgo": Date().timeIntervalSince(session.lastActivityAt),
                 ]
             },
         ]
@@ -427,6 +490,11 @@ final class SessionWatcher {
     // MARK: - プロンプト送信 (設計書 4.3 / PromptSender)
 
     func sendPrompt(_ text: String, to session: MonitoredSession) async throws {
+        // フック接続セッションの固着検知は「最後の活動時刻」からの経過時間を見るため、
+        // ここで動かさないと直前のフックイベントからの古い経過時間のまま安全網が
+        // 誤って発動しうる（プロンプト送信直後に stale 判定されてしまう）。
+        session.lastActivityAt = Date()
+
         guard let target = session.info.tmuxTarget else {
             // tmuxが無い場合はキー入力を合成して送る（要アクセシビリティ権限）
             try await KeystrokeSender.send(text: text, to: session.info, submit: true)
@@ -456,6 +524,9 @@ final class SessionWatcher {
     func respond(with options: [ChoiceOption], in session: MonitoredSession) async throws {
         guard let first = options.first else { return }
         let isMultiSelect = session.pendingChoice?.isMultiSelect ?? false
+        // sendPromptと同じ理由で、フック接続セッションの固着検知が誤発動しないよう
+        // ユーザー操作の瞬間に「最後の活動時刻」を更新しておく
+        session.lastActivityAt = Date()
 
         // フック経由の承認は、待たせている接続に判定を返すだけでよい（キー送信は不要）
         if session.pendingHookConnection != nil {
@@ -595,11 +666,24 @@ final class SessionWatcher {
         }
 
         // このセッションはフックで監視できていると記録する
+        let isFirstHookConnection = session.info.hookSessionID == nil
         var info = session.info
         info.hookSessionID = event.sessionID
         info.projectName = event.projectName
         session.replaceInfoPreservingState(info)
         session.lastActivityAt = Date()
+
+        // フックが今回初めて繋がったセッションで、直前の状態が「画面解析由来かもしれない
+        // thinking」だった場合、それを信用しない。フック接続後は画面解析(ingest)が
+        // 二度と行われず、フックイベントだけが状態を動かす頼りになるため、ここで
+        // リセットしておかないと、対応するフックイベントが来ない限り Working のまま
+        // 永久に固着してしまう。
+        // (実機で確認した不具合: 開発中に何度も再起動する過程で、起動直後の一瞬に
+        //  画面上のスピナー等の残骸を busyPattern と誤判定し、フック接続後もずっと
+        //  そのまま残り続けていた)
+        if isFirstHookConnection, session.state == .thinking {
+            session.state = .idle
+        }
         // 一覧に出すため、直近のユーザー発言を記録から拾う
         if let path = event.transcriptPath,
            let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
@@ -619,8 +703,11 @@ final class SessionWatcher {
             // 0.3秒間隔で最大2秒ほど待つ
             for _ in 0..<6 {
                 try? await Task.sleep(for: .milliseconds(300))
-                // 既に別の状態へ移っていたら打ち切る（回答済み・完了など）
-                guard session.state == .awaitingAnswer else { return }
+                // 既に選択肢が表示されていたら打ち切る（別経路で先に見つかった等）。
+                // 状態そのものは呼び出し元で変えていないため、質問と無関係な
+                // 催促Notificationのポーリング中に completed/idle へ進んでいても
+                // 問題なく空振りできる。
+                guard session.pendingChoice == nil else { return }
                 let questions = TranscriptReader.latestQuestions(transcriptPath: path)
                 if !questions.isEmpty {
                     enqueue(questions: questions, in: session)
@@ -666,6 +753,20 @@ final class SessionWatcher {
         // 直前の承認待ちが未解決なら解放しておく（取りこぼし防止）
         if event.kind != .permissionRequest {
             session.releasePendingHook(with: .passthrough)
+
+            // フック接続済みセッションは画面解析(ingest)を行わないため、ターミナル側で
+            // 直接選択肢に回答された場合、それを検知して pendingChoice を解消する手段が
+            // 他に無い。ここで拾わないと、ノッチに古い選択肢が居座り続けてしまう。
+            // (permissionRequest は .becameAwaitingChoice で確実に上書きされるので対象外)
+            //
+            // notification は対象から除く。Claude Codeは無回答が続くと催促のため
+            // notification を繰り返し送ってくることがあり、それを「解消された」と
+            // 誤判定してノッチを閉じてしまっていた（実機で確認した不具合）。
+            // notification 自体は直後の分岐で記録を読み直し、本当に解消したかを
+            // 正しく判定する。
+            if session.pendingChoice != nil, event.kind != .notification {
+                apply(event: .choiceResolved, to: session)
+            }
         }
 
         switch event.kind {
@@ -707,18 +808,17 @@ final class SessionWatcher {
             //
             // 重要: Claude Codeは質問を記録へ書き込む前にNotificationを発火する（実測）。
             // 発火直後は記録に未回答の質問が無いため、少し待ってから読み直す。
+            //
+            // また、Claude Codeは無回答が続くと催促のためにも Notification を送ってくる。
+            // 質問と無関係なNotificationまで「質問中」として表示すると、実際には
+            // 何も聞かれていないのに状態が変わってしまう（実機で確認した不具合）。
+            // そのため、質問が実際に見つかるまでは状態を変えずポーリングだけ行う。
             let questions = event.transcriptPath
                 .map { TranscriptReader.latestQuestions(transcriptPath: $0) } ?? []
             if !questions.isEmpty {
                 enqueue(questions: questions, in: session)
-            } else {
-                // まず質問中として表示し、記録が書かれ次第、選択肢へ差し替える
-                session.state = .awaitingAnswer
-                session.preview = [event.title]
-                onEvent?(session, .none)
-                if let path = event.transcriptPath {
-                    pollForQuestion(path: path, in: session)
-                }
+            } else if let path = event.transcriptPath {
+                pollForQuestion(path: path, in: session)
             }
 
         case .stop:

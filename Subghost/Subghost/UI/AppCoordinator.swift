@@ -16,6 +16,15 @@ enum NotchMode: Equatable {
     case choice         // 承認リクエスト／質問への回答
     case sessions       // 複数CLIの一覧
     case activity       // 完了・エラー・回答待ちの履歴
+    case onboarding      // 初回起動時の案内
+}
+
+/// 初回起動時の案内（ようこそ→フック連携→権限確認→完了）の各段階
+enum OnboardingStep: Int, CaseIterable {
+    case welcome
+    case hooks
+    case permissions
+    case done
 }
 
 /// セッションを切り替えても入力途中の内容を混ぜないための下書き置き場。
@@ -40,6 +49,7 @@ final class AppCoordinator {
     let snippets = SnippetStore()
     let activity = ActivityStore()
     let hotkey = HotkeyManager()
+    let customAliasStore = CustomAliasStore()
     @ObservationIgnored private var panelController: NotchPanelController?
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
@@ -79,11 +89,21 @@ final class AppCoordinator {
     private(set) var isMuted: Bool = !SoundAlerts.isEnabled
     @ObservationIgnored private var soundDefaultsObserver: NSObjectProtocol?
 
+    // MARK: - 初回起動の案内
+
+    @ObservationIgnored private static let hasCompletedOnboardingKey = "hasCompletedOnboarding"
+    private(set) var onboardingStep: OnboardingStep = .welcome
+    /// フック有効化ボタンを押した結果（成功メッセージ／エラー）。ステップごとに保持する。
+    var onboardingHookMessage: [HookTarget: String] = [:]
+
     /// 実際に画面へ出す表示モード（ホバー時は軽く展開してプレビュー: 設計書 6.4）
     var displayMode: NotchMode {
         if mode == .input { return .input }
         // 送信中／送信完了表示のあいだは一覧へ切り替えない
         if mode == .choice { return .choice }
+        // 初回案内は、本当に急ぎの選択肢対応の次に優先する。
+        // 通知や一覧に割り込まれて案内が埋もれないようにするため。
+        if mode == .onboarding { return .onboarding }
         if mode == .notification { return .notification }
         // 入力画面の戻るボタンから開いた一覧は、ホバーが外れても表示を維持する。
         if mode == .sessions { return .sessions }
@@ -101,6 +121,7 @@ final class AppCoordinator {
 
     func start() {
         NotificationManager.shared.setup()
+        SoundAlerts.shared.play(.appLaunched)
 
         // 監視より先にパネルを用意する。
         // 起動直後の1回目のポーリングで承認待ちを見つけた場合、
@@ -116,6 +137,7 @@ final class AppCoordinator {
         watcher.onEvent = { [weak self] session, event in
             self?.handle(event: event, session: session)
         }
+        watcher.customAliases = customAliasStore.aliases
         watcher.startHookServer()
         watcher.start()
 
@@ -128,6 +150,46 @@ final class AppCoordinator {
             guard let self else { return }
             let current = !SoundAlerts.isEnabled
             if self.isMuted != current { self.isMuted = current }
+        }
+
+        // 初回起動時だけ、案内をノッチへ自動で出す。
+        // メニューバー・Dockに何も置かない設計のため、フック連携や権限といった
+        // 重要な設定に自分から気づいてもらう手段がノッチの外に無い。
+        if !UserDefaults.standard.bool(forKey: Self.hasCompletedOnboardingKey) {
+            setMode(.onboarding)
+        }
+    }
+
+    // MARK: - 初回起動の案内
+
+    /// 次のステップへ進む
+    func advanceOnboarding() {
+        guard let next = OnboardingStep(rawValue: onboardingStep.rawValue + 1) else {
+            finishOnboarding()
+            return
+        }
+        onboardingStep = next
+    }
+
+    /// 案内をスキップして終える（後からいつでも「セットアップ」タブで同じ操作ができる）
+    func skipOnboarding() {
+        finishOnboarding()
+    }
+
+    private func finishOnboarding() {
+        UserDefaults.standard.set(true, forKey: Self.hasCompletedOnboardingKey)
+        onboardingStep = .welcome
+        if mode == .onboarding { collapse() }
+    }
+
+    /// フック連携をワンクリックで有効化する（案内内の「有効にする」ボタンから呼ぶ）。
+    /// 既存の「統合」タブと同じ HookInstaller を使うため、動作・安全性は同一。
+    func enableHookFromOnboarding(_ target: HookTarget) {
+        do {
+            try HookInstaller.install(target)
+            onboardingHookMessage[target] = "登録しました。実行中の\(target.displayName)は再起動すると反映されます。"
+        } catch {
+            onboardingHookMessage[target] = "登録に失敗しました: \(error.localizedDescription)"
         }
     }
 
@@ -217,6 +279,26 @@ final class AppCoordinator {
         // 既に承認モードでも選択肢の数で高さが変わるため、必ずフレームを取り直す
         panelController?.modeChanged()
         panelController?.focusInput()   // 数字キーで回答できるようキーフォーカスを取る
+
+        // 既定では自動で閉じない（回答するまで表示し続ける）。設定で秒数が
+        // 指定されている場合のみ、その時間が経過し、かつホバー中でなければ畳む。
+        // (実機で確認: 無回答のまま勝手に閉じるのはバグとして修正済みだが、
+        // 自動で閉じたい人向けに設定でだけ選べるようにする)
+        let autoCloseSeconds = NotchPreferences.choiceAutoCloseInterval
+        guard autoCloseSeconds > 0 else { return }
+        collapseTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(autoCloseSeconds))
+            while let self, self.isHovering, !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard let self, !Task.isCancelled,
+                  self.mode == .choice, self.choiceSession === session
+            else { return }
+            // collapse() だけだと、まだ未回答という理由で resumePendingChoiceIfNeeded() が
+            // 即座に再展開してしまう。dismissChoice() 経由にして「閉じた」記録を残し、
+            // 同じ問いを再展開しないようにする（Escキーで閉じた場合と同じ扱い）。
+            self.dismissChoice()
+        }
     }
 
     /// 選択肢へ回答する（ノッチのボタン／数字キーから呼ばれる）
@@ -316,7 +398,7 @@ final class AppCoordinator {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard let session = watcher.activeSession else {
-            lastSendError = "AI CLI が見つかりません。ターミナルで claude / codexA・B / agyy を起動してください。"
+            lastSendError = "AI CLI が見つかりません。ターミナルで claude / codex / agy を起動してください。"
             return
         }
         let submittedDraftKey = promptDraftKey
@@ -427,6 +509,21 @@ final class AppCoordinator {
     func toggleMute() {
         isMuted.toggle()
         UserDefaults.standard.set(!isMuted, forKey: "soundEnabled")
+    }
+
+    // MARK: - カスタムエイリアス
+
+    /// 追加後、watcherの参照済みリストも同期する（次回ポーリングから反映）。
+    @discardableResult
+    func addCustomAlias(name: String, baseProfileID: String) -> Bool {
+        let added = customAliasStore.add(name: name, baseProfileID: baseProfileID)
+        if added { watcher.customAliases = customAliasStore.aliases }
+        return added
+    }
+
+    func removeCustomAlias(_ alias: CustomAlias) {
+        customAliasStore.remove(alias)
+        watcher.customAliases = customAliasStore.aliases
     }
 
     /// ビューが実際に描画した高さを伝える。
