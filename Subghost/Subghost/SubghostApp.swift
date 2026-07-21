@@ -12,7 +12,8 @@ struct SubghostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     // メニューバーには何も置かない。操作の入口はノッチUIに集約する。
-    // Settings シーンだけを持つことで、SettingsLink から設定を開ける。
+    // App は最低1つ Scene を要求するため Settings を置いているが、
+    // 設定ウインドウは SettingsWindowController が自前で開く（このシーン経由ではない）。
     var body: some Scene {
         Settings {
             SettingsView()
