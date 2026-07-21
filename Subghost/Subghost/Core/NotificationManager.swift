@@ -121,7 +121,10 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     // MARK: - 完了・エラー通知
 
     func notify(session: SessionInfo, state: AIState, preview: [String]) {
-        guard Self.notificationsEnabled else { return }
+        guard let event = NotificationEvent.from(state: state),
+              event == .completed || event == .error,
+              AlertGate.allowsNotification(event, session: session)
+        else { return }
 
         let content = UNMutableNotificationContent()
         switch state {
@@ -133,7 +136,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             return
         }
         content.subtitle = session.displayName
-        content.body = preview.joined(separator: "\n")
+        content.body = AppearancePreferences.maskedPreview(preview).joined(separator: "\n")
         content.sound = Self.notificationSound
         content.userInfo = NotificationSessionReference(session: session).userInfo
 
@@ -143,15 +146,19 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     // MARK: - 承認リクエスト／質問の通知 (Approve / Ask)
 
     func notifyChoice(session: SessionInfo, choice: PendingChoice) {
-        guard Self.notificationsEnabled else { return }
+        let event: NotificationEvent = choice.kind == .approval ? .approval : .question
+        guard AlertGate.allowsNotification(event, session: session) else { return }
 
         let content = UNMutableNotificationContent()
         content.title = "\(session.profile.displayName) \(choice.kind.displayName)"
         content.subtitle = session.displayName
-        content.body = choice.title
+        content.body = AppearancePreferences.maskedPreview(choice.title)
         content.sound = Self.notificationSound
-        // 回答しないと処理が止まるため、集中モード中でも届くようにする
-        content.interruptionLevel = .timeSensitive
+        // 回答しないと処理が止まるため、既定では集中モード中でも届かせる。
+        // 集中モードを尊重したい人は設定で通常の割り込みへ落とせる。
+        if NotificationPreferences.timeSensitiveEnabled {
+            content.interruptionLevel = .timeSensitive
+        }
 
         let reference = NotificationSessionReference(session: session)
         let choiceToken = choiceRegistry.issue(for: reference)
@@ -187,10 +194,6 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     private func notificationIdentifier(prefix: String, session: SessionInfo) -> String {
         "\(prefix)-\(session.pid)-\(session.tty)"
-    }
-
-    private static var notificationsEnabled: Bool {
-        UserDefaults.standard.object(forKey: "notificationsEnabled") as? Bool ?? true
     }
 
     /// 独自のアラート音が有効なときは、通知音と二重に鳴らさない

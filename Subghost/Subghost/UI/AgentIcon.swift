@@ -54,15 +54,19 @@ struct AgentBadgeIcon: View {
     var size: CGFloat = 14
 
     var body: some View {
-        if let icon = AgentAppIcon.image(for: agentID) {
-            Image(nsImage: icon)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: size, height: size)
-                .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
-        } else {
-            // 未インストールのCLI向けのフォールバック
-            AgentIconView(agentID: agentID, pixelSize: max(2, size / 6))
+        Group {
+            if let icon = AgentAppIcon.image(for: agentID) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+            } else {
+                // 未インストールのCLI向けのフォールバック
+                AgentIconView(agentID: agentID, pixelSize: max(2, size / 6))
+            }
         }
+        // CLI名は隣接するテキストが伝えるため、装飾として扱う。
+        .accessibilityHidden(true)
     }
 }

@@ -82,6 +82,26 @@ Ordered by capability, and the reason several error messages exist:
 
 `NotchLayout` holds geometry constants shared between the panel and the SwiftUI view; `canvasWidth(for:)` accounts for the top shoulder curve, so panel sizing and shape drawing must both go through it or they desync.
 
+### Anything written into the user's shell or CLI config must fail open
+
+Subghost edits two things that live outside the app and outlive it: `~/.zshrc` (via `ShellIntegration`) and `~/.claude/settings.json` / `~/.codex/hooks.json` (via `HookInstaller`). A mistake here does not surface as a Subghost bug — it surfaces as **the user's `claude` no longer starting**, on a machine where Subghost may not even be running. This has already shipped once and broken users.
+
+The invariant: **no code path installed by Subghost may prevent the CLI from running.** Concretely, in `ShellIntegration.scriptBody`:
+
+- The tmux preconditions are checked *before* delegating, and every one of them falls through to `command "$cmd" "$@"`. `[ -t 0 ] && [ -t 1 ] && [ -t 2 ]` is required, not just stdout — tmux needs all three or it dies with `open terminal failed` and the CLI never runs (`claude < /dev/null`, editor terminals, CI). `TERM` in `dumb`/`unknown`/`emacs` fails the same way.
+- Non-interactive invocations (`--version`, `-p`, `doctor`, `mcp`, …) are never wrapped — tmux restores the screen on exit and the output vanishes.
+- The session is created with `new-session -d` and attached separately. Creation failing means the CLI has **not** run, so falling back cannot double-execute it. Do not collapse this back into a single attached `tmux new-session`.
+
+The same "fail open" rule shapes `HookInstaller`: the hook command is `[ -x "$1" ] && …; exit 0` so a missing bridge is a no-op, paths are passed as `sh -c` arguments rather than interpolated (a `'` in the home directory would otherwise break the command), and the bridge always applies a `curl -m` bound so a wedged Subghost cannot hang the CLI.
+
+The `statusLine` entry follows the same shape: `statuslineCommand` embeds the user's original command as a `sh -c` argument, so deleting `~/.subghost` degrades to the original statusline instead of leaving a dead command, and `uninstallStatusline` can recover the original from `settings.json` alone when the saved copy is gone. Detection is by `marker`, not by comparing against `statuslineScriptPath` — the stored command is a wrapper, not a bare path.
+
+Config files may be symlinks into a dotfiles repo, so writes go through `zshrcWriteURL` / `writeURL(for:)`, which resolve the link — an atomic write to the link path would replace it with a regular file. `addHooks` skips any event whose existing value is not the expected shape rather than overwriting it, because that value is the user's own hooks. `writeSettings` encodes through `encodedSettings` (which re-parses before returning) and rolls the file back if the post-write read fails.
+
+`encodedSettings` must keep its `JSONSerialization.isValidJSONObject` guard: `JSONSerialization.data(withJSONObject:)` raises an **NSException** on a non-JSON value, which Swift `do`/`catch` cannot catch — it terminates the app rather than surfacing an error.
+
+When touching any of this, verify against a real pty (`pty.fork()`), not just the unit tests — the failures are all tty-conditional and invisible to a piped test harness.
+
 ## Gotchas
 
 - **SourceKit diagnostics like `Cannot find type 'X' in scope` in this project are noise** from single-file indexing across an Xcode target with no module boundaries. Trust `xcodebuild`, not the editor diagnostics.

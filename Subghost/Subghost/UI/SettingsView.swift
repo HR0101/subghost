@@ -7,6 +7,7 @@
 
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import UserNotifications
 
 struct SettingsView: View {
@@ -17,11 +18,14 @@ struct SettingsView: View {
             List(selection: $selection) {
                 Section {
                     settingsLink(.general, "一般", "gearshape.fill")
+                    settingsLink(.alerts, "通知とサウンド", "bell.badge.fill")
+                    settingsLink(.appearance, "外観", "paintbrush.fill")
                     settingsLink(.integration, "統合", "puzzlepiece.extension.fill")
                     settingsLink(.snippets, "スニペット", "text.badge.plus")
                 }
                 Section("詳細設定") {
                     settingsLink(.shortcuts, "ショートカット", "keyboard.fill")
+                    settingsLink(.data, "履歴とデータ", "clock.arrow.circlepath")
                     settingsLink(.diagnostics, "診断", "stethoscope")
                     settingsLink(.setup, "セットアップ", "wrench.and.screwdriver.fill")
                 }
@@ -37,9 +41,12 @@ struct SettingsView: View {
             Group {
                 switch selection {
                 case .general: GeneralSettingsView()
+                case .alerts: AlertSettingsView()
+                case .appearance: AppearanceSettingsView()
                 case .integration: HookSettingsView()
                 case .snippets: SnippetSettingsView()
                 case .shortcuts: ShortcutSettingsView()
+                case .data: DataSettingsView()
                 case .diagnostics: SetupDiagnosticsView()
                 case .setup: SetupGuideView()
                 case .information: InformationSettingsView()
@@ -47,7 +54,12 @@ struct SettingsView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 860, height: 680)
+        // 固定サイズだと、システムの文字サイズを大きくした環境で内容が見切れる。
+        // 既定の大きさは保ちつつ、ユーザーがリサイズできるようにする。
+        .frame(
+            minWidth: 640, idealWidth: 860, maxWidth: .infinity,
+            minHeight: 480, idealHeight: 680, maxHeight: .infinity
+        )
     }
 
     private func settingsLink(
@@ -62,9 +74,12 @@ struct SettingsView: View {
 
 private enum SettingsPage: Hashable {
     case general
+    case alerts
+    case appearance
     case integration
     case snippets
     case shortcuts
+    case data
     case diagnostics
     case setup
     case information
@@ -73,9 +88,6 @@ private enum SettingsPage: Hashable {
 private struct GeneralSettingsView: View {
     @AppStorage("pollInterval") private var pollInterval = 0.8
     @AppStorage("stableInterval") private var stableInterval = 1.5
-    @AppStorage("notificationsEnabled") private var notificationsEnabled = true
-    @AppStorage("soundEnabled") private var soundEnabled = true
-    @AppStorage("soundVolume") private var soundVolume = Double(SoundAlerts.defaultVolume)
     @AppStorage(DisplayPreference.userDefaultsKey) private var notchDisplay = ""
     @AppStorage("preferredTerminal") private var preferredTerminal = ""
     @AppStorage("tmuxPath") private var tmuxPath = ""
@@ -90,6 +102,7 @@ private struct GeneralSettingsView: View {
     @AppStorage(NotchPreferences.collapseOnMouseExitKey) private var collapseOnMouseExit = true
     @AppStorage(NotchPreferences.closeOnOutsideClickKey) private var closeOnOutsideClick = true
     @AppStorage(NotchPreferences.choiceAutoCloseIntervalKey) private var choiceAutoCloseInterval = 0.0
+    @AppStorage(NotchPreferences.focusChoiceOnAppearKey) private var focusChoiceOnAppear = true
     @State private var launchAtLogin = false
     @State private var isChangingLoginItem = false
     @State private var loginItemError: String?
@@ -181,6 +194,14 @@ private struct GeneralSettingsView: View {
                      + "ノッチにカーソルを合わせると一覧からいつでも選び直せます。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Toggle("回答待ちのときキーボードを受け取る", isOn: $focusChoiceOnAppear)
+                Text("有効だと数字キーだけですぐ回答できますが、他のアプリで入力中に割り込むと"
+                     + "打鍵がノッチへ移ってしまいます。無効にすると、パネルを表示するだけに留め、"
+                     + "ノッチをクリックしてから回答します。対象のターミナルを前面で見ている間は"
+                     + "設定に関係なくキーボードを奪いません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("監視") {
@@ -201,35 +222,6 @@ private struct GeneralSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Section("通知") {
-                Toggle("応答完了/エラー/承認リクエストを通知する", isOn: $notificationsEnabled)
-                Text("承認リクエストの通知からは「承認」「拒否」を直接選べます")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Section("サウンド") {
-                Toggle("サウンドエフェクトを有効にする", isOn: $soundEnabled)
-                VStack(alignment: .leading) {
-                    Slider(value: $soundVolume, in: 0.0...1.0, step: 0.05) {
-                        Text("音量: \(Int(soundVolume * 100))%")
-                    }
-                    .disabled(!soundEnabled)
-                }
-                Text("すべてコードで合成した8bit風の音です。音源ファイルは含んでいません。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            // 参考にしたアプリと同じ粒度で、イベントごとに鳴らし分ける
-            ForEach(SoundSettingsSection.all, id: \.name) { section in
-                Section(section.name) {
-                    ForEach(section.sounds, id: \.self) { sound in
-                        SoundRow(sound: sound)
-                            .disabled(!soundEnabled)
-                    }
-                }
-            }
-
             Section("表示先ディスプレイ") {
                 Picker("ノッチを表示する画面", selection: $notchDisplay) {
                     Text("自動（ノッチ搭載画面を優先）").tag("")
@@ -322,10 +314,504 @@ private struct GeneralSettingsView: View {
     }
 }
 
+// MARK: - 外観
+
+private struct AppearanceSettingsView: View {
+    @AppStorage(AppearancePreferences.panelOpacityKey)
+    private var panelOpacity = AppearancePreferences.defaultPanelOpacity
+    @AppStorage(AppearancePreferences.expandedCornerRadiusKey)
+    private var cornerRadius = AppearancePreferences.defaultExpandedCornerRadius
+    @AppStorage(AppearancePreferences.sessionListMaxRowsKey)
+    private var listRows = Double(AppearancePreferences.defaultSessionListMaxRows)
+    @AppStorage(AppearancePreferences.ghostAnimationEnabledKey)
+    private var ghostAnimation = true
+    @AppStorage(AppearancePreferences.hidePreviewTextKey)
+    private var hidePreview = false
+
+    /// Slider は Double の範囲を要求するので、Int の設定範囲を変換して持っておく
+    private static let listRowsRange: ClosedRange<Double> = {
+        let range = AppearancePreferences.sessionListMaxRowsRange
+        return Double(range.lowerBound)...Double(range.upperBound)
+    }()
+
+    var body: some View {
+        Form {
+            Section("パネル") {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("背景の不透明度")
+                        Spacer()
+                        Text("\(Int(panelOpacity * 100))%")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $panelOpacity, in: AppearancePreferences.panelOpacityRange, step: 0.05)
+                }
+                Text("下げると展開部分から背後のウインドウが透けます。コンパクト時の見た目は変わりません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("展開時の角丸")
+                        Spacer()
+                        Text("\(Int(cornerRadius))pt")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: $cornerRadius,
+                        in: AppearancePreferences.expandedCornerRadiusRange,
+                        step: 1
+                    )
+                }
+            }
+
+            Section("セッション一覧") {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("一度に表示する件数")
+                        Spacer()
+                        Text("\(Int(listRows))件")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $listRows, in: Self.listRowsRange, step: 1)
+                }
+                Text("これを超えたぶんはスクロールで見ます。増やすとノッチが画面下へ長く伸びます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("キャラクター") {
+                Toggle("ゴーストをアニメーションさせる", isOn: $ghostAnimation)
+                Text("生成中の裾揺れ、待機中のまばたき、完了時の弾みとエラー時の震えを再生します。"
+                     + "画面の動きを減らしたいときはオフにしてください。状態ごとの色と表情は変わりません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("プライバシー") {
+                Toggle("応答の本文を表示しない", isOn: $hidePreview)
+                Text("ノッチのプレビュー・通知の本文・アクティビティ履歴から、会話の中身を伏せます。"
+                     + "画面共有や録画のときに使ってください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("既に記録済みの履歴には遡って適用されません。消すには「履歴とデータ」から削除してください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .onChange(of: panelOpacity) { _, _ in preferencesChanged() }
+        .onChange(of: cornerRadius) { _, _ in preferencesChanged() }
+        .onChange(of: listRows) { _, _ in preferencesChanged() }
+    }
+
+    private func preferencesChanged() {
+        AppCoordinator.shared.preferencesChanged()
+    }
+}
+
+// MARK: - 履歴とデータ
+
+private struct DataSettingsView: View {
+    @AppStorage(ActivityPreferences.recordingEnabledKey) private var activityEnabled = true
+    @AppStorage(ActivityPreferences.limitKey)
+    private var activityLimit = Double(ActivityPreferences.defaultLimit)
+    @AppStorage(PromptHistoryPreferences.enabledKey) private var historyEnabled = true
+    @AppStorage(PromptHistoryPreferences.limitKey)
+    private var historyLimit = Double(PromptHistoryPreferences.defaultLimit)
+
+    @State private var activityKindRevision = 0
+    @State private var message: String?
+    @State private var isError = false
+    @State private var confirmingReset = false
+
+    private var activity: ActivityStore { AppCoordinator.shared.activity }
+    private var snippets: SnippetStore { AppCoordinator.shared.snippets }
+
+    /// Stepper は Double の範囲を要求するので、Int の設定範囲を変換して持っておく
+    private static let activityLimitRange: ClosedRange<Double> = {
+        let range = ActivityPreferences.limitRange
+        return Double(range.lowerBound)...Double(range.upperBound)
+    }()
+
+    private static let historyLimitRange: ClosedRange<Double> = {
+        let range = PromptHistoryPreferences.limitRange
+        return Double(range.lowerBound)...Double(range.upperBound)
+    }()
+
+    var body: some View {
+        Form {
+            Section("アクティビティ履歴") {
+                Toggle("履歴を記録する", isOn: $activityEnabled)
+                Stepper(value: $activityLimit, in: Self.activityLimitRange, step: 10) {
+                    LabeledContent("保持する件数") {
+                        Text("\(Int(activityLimit))件")
+                            .monospacedDigit()
+                    }
+                }
+                .disabled(!activityEnabled)
+                .onChange(of: activityLimit) { _, _ in activity.applyRetentionLimit() }
+
+                LabeledContent("現在の保存件数") {
+                    Text("\(activity.entries.count)件").monospacedDigit()
+                }
+
+                Button("履歴を消去", role: .destructive) {
+                    activity.clear()
+                    message = "アクティビティ履歴を消去しました。"
+                    isError = false
+                }
+                .disabled(activity.entries.isEmpty)
+            }
+
+            Section("記録するイベント") {
+                ForEach(ActivityKind.allCases, id: \.self) { kind in
+                    ActivityKindRow(kind: kind)
+                        .disabled(!activityEnabled)
+                }
+                .id(activityKindRevision)
+            }
+
+            Section("送信履歴") {
+                Toggle("送信したプロンプトを保存する", isOn: $historyEnabled)
+                Stepper(value: $historyLimit, in: Self.historyLimitRange, step: 5) {
+                    LabeledContent("保持する件数") {
+                        Text("\(Int(historyLimit))件")
+                            .monospacedDigit()
+                    }
+                }
+                .disabled(!historyEnabled)
+                .onChange(of: historyLimit) { _, _ in snippets.applyHistoryLimit() }
+
+                LabeledContent("現在の保存件数") {
+                    Text("\(snippets.history.count)件").monospacedDigit()
+                }
+
+                Button("送信履歴を消去", role: .destructive) {
+                    snippets.clearHistory()
+                    message = "送信履歴を消去しました。"
+                    isError = false
+                }
+                .disabled(snippets.history.isEmpty)
+
+                Text("ノッチの入力欄で ⌥↑ / ⌥↓ を押すと呼び出せる履歴です。"
+                     + "アプリケーションサポート内に平文で保存されるため、残したくない場合はオフにしてください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("設定の書き出しと読み込み") {
+                HStack {
+                    Button("書き出す…") { exportSettings() }
+                    Button("読み込む…") { importSettings() }
+                }
+                Text("別のMacへ移すときや、不具合の報告に設定を添えたいときに使います。"
+                     + "初回案内の完了状態とアクティビティ履歴は含みません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("設定の初期化") {
+                Button("すべての設定を初期状態に戻す", role: .destructive) {
+                    confirmingReset = true
+                }
+                Text("フック連携の登録や ~/.zshrc の変更といったアプリ外への変更はそのまま残ります。"
+                     + "必要なら「統合」画面から個別に解除してください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let message {
+                Section {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(isError ? Color.red : Color.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .confirmationDialog(
+            "すべての設定を初期状態に戻します",
+            isPresented: $confirmingReset,
+            titleVisibility: .visible
+        ) {
+            Button("初期化する", role: .destructive) { resetSettings() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("ショートカット、通知、外観、スニペットの設定がすべて既定へ戻ります。この操作は取り消せません。")
+        }
+    }
+
+    private func exportSettings() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = SettingsStore.suggestedFileName
+        panel.allowedContentTypes = [.propertyList]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try SettingsStore.export(to: url)
+            message = "設定を書き出しました: \(url.lastPathComponent)"
+            isError = false
+        } catch {
+            message = "書き出しに失敗しました: \(error.localizedDescription)"
+            isError = true
+        }
+    }
+
+    private func importSettings() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.propertyList]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let count = try SettingsStore.importSettings(from: url)
+            AppCoordinator.shared.hotkey.reload()
+            AppCoordinator.shared.preferencesChanged()
+            AppCoordinator.shared.reloadDisplayPlacement()
+            message = "\(count)件の設定を読み込みました。"
+            isError = false
+        } catch {
+            message = "読み込みに失敗しました: \(error.localizedDescription)"
+            isError = true
+        }
+    }
+
+    private func resetSettings() {
+        do {
+            try SettingsStore.resetAll()
+            AppCoordinator.shared.hotkey.reload()
+            AppCoordinator.shared.preferencesChanged()
+            AppCoordinator.shared.reloadDisplayPlacement()
+            message = "設定を初期化しました。表示に反映されない項目は、アプリを再起動すると揃います。"
+            isError = false
+        } catch {
+            message = "初期化に失敗しました: \(error.localizedDescription)"
+            isError = true
+        }
+    }
+}
+
+/// アクティビティの種類ごとの記録トグル
+private struct ActivityKindRow: View {
+    let kind: ActivityKind
+    @State private var isEnabled: Bool
+
+    init(kind: ActivityKind) {
+        self.kind = kind
+        _isEnabled = State(initialValue: ActivityPreferences.records(kind))
+    }
+
+    var body: some View {
+        Toggle(kind.displayName, isOn: $isEnabled)
+            .onChange(of: isEnabled) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: ActivityPreferences.kindKey(kind))
+            }
+    }
+}
+
+// MARK: - 通知とサウンド
+
+private struct AlertSettingsView: View {
+    @AppStorage(NotificationPreferences.masterKey) private var notificationsEnabled = true
+    @AppStorage(NotificationPreferences.timeSensitiveKey) private var timeSensitive = true
+    @AppStorage("soundEnabled") private var soundEnabled = true
+    @AppStorage("soundVolume") private var soundVolume = Double(SoundAlerts.defaultVolume)
+
+    @AppStorage(QuietHours.enabledKey) private var quietEnabled = false
+    @AppStorage(QuietHours.startKey) private var quietStart = Double(QuietHours.defaultStartMinutes)
+    @AppStorage(QuietHours.endKey) private var quietEnd = Double(QuietHours.defaultEndMinutes)
+    @AppStorage(QuietHours.allowBlockingKey) private var quietAllowsBlocking = true
+
+    @AppStorage(UsagePreferences.warningKey) private var usageWarning = UsagePreferences.defaultWarning
+    @AppStorage(UsagePreferences.criticalKey) private var usageCritical = UsagePreferences.defaultCritical
+
+    /// エージェント別ミュートは動的なキーなので @AppStorage を使えない。
+    /// トグルするたびにこの値を進めて、行を作り直させる。
+    @State private var agentMuteRevision = 0
+
+    var body: some View {
+        Form {
+            Section("通知") {
+                Toggle("通知を表示する", isOn: $notificationsEnabled)
+                Text("ここをオフにすると、下のイベント別の設定に関係なくすべての通知を止めます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("通知するイベント") {
+                ForEach(NotificationEvent.allCases, id: \.self) { event in
+                    NotificationEventRow(event: event)
+                        .disabled(!notificationsEnabled)
+                }
+                Text("承認リクエストの通知からは「承認」「拒否」を直接選べます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("集中モード") {
+                Toggle("承認・質問は集中モード中でも割り込む", isOn: $timeSensitive)
+                    .disabled(!notificationsEnabled)
+                Text("回答しないとCLIが止まってしまうため、既定では割り込みます。"
+                     + "オフにすると、macOSの集中モードの設定に従って抑制されます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("静穏時間") {
+                Toggle("指定した時間帯は知らせない", isOn: $quietEnabled)
+                if quietEnabled {
+                    MinutePicker(title: "開始", minutes: $quietStart)
+                    MinutePicker(title: "終了", minutes: $quietEnd)
+                    Toggle("承認・質問だけは通す", isOn: $quietAllowsBlocking)
+                    Text(quietSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("通知・サウンド・ノッチの自動展開をまとめて控えます。回答待ちは消えず、一覧には残ります。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("エージェント別") {
+                ForEach(CLIProfile.builtins) { profile in
+                    Toggle(profile.displayName, isOn: Binding(
+                        get: { !AgentMutePreferences.isMuted(profileID: profile.id) },
+                        set: {
+                            AgentMutePreferences.setMuted(!$0, profileID: profile.id)
+                            agentMuteRevision += 1
+                        }
+                    ))
+                }
+                .id(agentMuteRevision)
+                Text("オフにしたCLIは、通知もサウンドもノッチの自動展開も行いません。"
+                     + "常に画面で見ているCLIを静かにさせたいときに使います。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("個別のセッションだけを黙らせたいときは、ノッチの一覧にあるスピーカーボタンを使ってください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("使用量の警告") {
+                VStack(alignment: .leading) {
+                    Slider(value: $usageWarning, in: UsagePreferences.thresholdRange, step: 1) {
+                        Text("注意を促す使用率: \(Int(usageWarning))%")
+                    }
+                }
+                VStack(alignment: .leading) {
+                    Slider(value: $usageCritical, in: UsagePreferences.thresholdRange, step: 1) {
+                        Text("強く警告する使用率: \(Int(usageCritical))%")
+                    }
+                }
+                if usageCritical < usageWarning {
+                    Text("強く警告する値が注意より低いため、注意の値（\(Int(usageWarning))%）まで引き上げて扱います。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("5時間枠・7日枠の消費率がこの割合を超えると、ノッチの表示色が変わります。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("サウンド") {
+                Toggle("サウンドエフェクトを有効にする", isOn: $soundEnabled)
+                VStack(alignment: .leading) {
+                    Slider(value: $soundVolume, in: 0.0...1.0, step: 0.05) {
+                        Text("音量: \(Int(soundVolume * 100))%")
+                    }
+                    .disabled(!soundEnabled)
+                }
+                Text("すべてコードで合成した8bit風の音です。音源ファイルは含んでいません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // 参考にしたアプリと同じ粒度で、イベントごとに鳴らし分ける
+            ForEach(SoundSettingsSection.all, id: \.name) { section in
+                Section(section.name) {
+                    ForEach(section.sounds, id: \.self) { sound in
+                        SoundRow(sound: sound)
+                            .disabled(!soundEnabled)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var quietSummary: String {
+        let start = QuietHours.text(forMinutes: Int(quietStart))
+        let end = QuietHours.text(forMinutes: Int(quietEnd))
+        if Int(quietStart) == Int(quietEnd) {
+            return "開始と終了が同じため、静穏時間は適用されません。"
+        }
+        let crossesMidnight = Int(quietStart) > Int(quietEnd)
+        return crossesMidnight
+            ? "毎日 \(start) から翌 \(end) まで控えます。"
+            : "毎日 \(start) から \(end) まで控えます。"
+    }
+}
+
+/// 通知イベント1件ぶんの行
+private struct NotificationEventRow: View {
+    let event: NotificationEvent
+    @State private var isEnabled: Bool
+
+    init(event: NotificationEvent) {
+        self.event = event
+        _isEnabled = State(initialValue: event.isEnabled)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(event.displayName)
+                Text(event.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Toggle("", isOn: $isEnabled)
+                .labelsHidden()
+                .onChange(of: isEnabled) { _, newValue in
+                    UserDefaults.standard.set(newValue, forKey: event.enabledKey)
+                }
+        }
+    }
+}
+
+/// 0時からの分数を時刻として選ばせる
+private struct MinutePicker: View {
+    let title: String
+    @Binding var minutes: Double
+
+    private static let choices: [Int] = stride(from: 0, to: 24 * 60, by: 30).map { $0 }
+
+    var body: some View {
+        Picker(title, selection: Binding(
+            get: { nearestChoice(Int(minutes)) },
+            set: { minutes = Double($0) }
+        )) {
+            ForEach(Self.choices, id: \.self) { value in
+                Text(QuietHours.text(forMinutes: value)).tag(value)
+            }
+        }
+    }
+
+    /// 30分刻みの選択肢に無い値が保存されていても、最も近いものを選んで表示する
+    private func nearestChoice(_ value: Int) -> Int {
+        Self.choices.min { abs($0 - value) < abs($1 - value) } ?? 0
+    }
+}
+
 private struct SnippetSettingsView: View {
     @State private var store = AppCoordinator.shared.snippets
     @State private var newTitle = ""
     @State private var newBody = ""
+    @State private var editing: Snippet?
+    @State private var confirmingDefaults = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -340,6 +826,14 @@ private struct SnippetSettingsView: View {
                                 .lineLimit(1)
                         }
                         Spacer()
+                        Button {
+                            editing = snippet
+                        } label: {
+                            Image(systemName: "pencil")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("編集する")
+
                         Button(role: .destructive) {
                             store.remove(snippet)
                         } label: {
@@ -348,23 +842,108 @@ private struct SnippetSettingsView: View {
                         .buttonStyle(.borderless)
                     }
                 }
+                .onMove { source, destination in
+                    store.move(fromOffsets: source, toOffset: destination)
+                }
             }
 
             Divider()
 
-            HStack {
-                TextField("タイトル", text: $newTitle)
-                    .frame(width: 120)
-                TextField("本文", text: $newBody)
-                Button("追加") {
-                    store.add(title: newTitle, body: newBody)
-                    newTitle = ""
-                    newBody = ""
+            VStack(spacing: 8) {
+                HStack {
+                    TextField("タイトル", text: $newTitle)
+                        .frame(width: 120)
+                    TextField("本文", text: $newBody)
+                    Button("追加") {
+                        store.add(title: newTitle, body: newBody)
+                        newTitle = ""
+                        newBody = ""
+                    }
+                    .disabled(newBody.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
-                .disabled(newBody.trimmingCharacters(in: .whitespaces).isEmpty)
+                HStack {
+                    Text("ドラッグで並べ替えられます。上にあるものほどノッチで早く選べます。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("既定に戻す") { confirmingDefaults = true }
+                        .buttonStyle(.borderless)
+                }
             }
             .padding(10)
         }
+        .sheet(item: $editing) { snippet in
+            SnippetEditor(snippet: snippet) { updated in
+                store.update(updated)
+                editing = nil
+            } onCancel: {
+                editing = nil
+            }
+        }
+        .confirmationDialog(
+            "スニペットを既定の内容に戻します",
+            isPresented: $confirmingDefaults,
+            titleVisibility: .visible
+        ) {
+            Button("戻す", role: .destructive) { store.restoreDefaults() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("追加・編集したスニペットはすべて失われます。")
+        }
+    }
+}
+
+/// スニペット1件の編集シート
+private struct SnippetEditor: View {
+    let snippet: Snippet
+    let onSave: (Snippet) -> Void
+    let onCancel: () -> Void
+
+    @State private var title: String
+    /// SwiftUI の body と名前がぶつからないよう text で持つ
+    @State private var text: String
+
+    init(snippet: Snippet, onSave: @escaping (Snippet) -> Void, onCancel: @escaping () -> Void) {
+        self.snippet = snippet
+        self.onSave = onSave
+        self.onCancel = onCancel
+        _title = State(initialValue: snippet.title)
+        _text = State(initialValue: snippet.body)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("スニペットを編集")
+                .font(.headline)
+            TextField("タイトル", text: $title)
+            TextEditor(text: $text)
+                .font(.body)
+                .frame(minHeight: 120)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(.quaternary)
+                )
+            HStack {
+                Spacer()
+                Button("キャンセル", role: .cancel) { onCancel() }
+                Button("保存") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private func save() {
+        var updated = snippet
+        updated.title = title.trimmingCharacters(in: .whitespaces)
+        updated.body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // タイトルを空のまま保存したら、本文の先頭を見出しに使う
+        if updated.title.isEmpty {
+            updated.title = String(updated.body.prefix(10))
+        }
+        onSave(updated)
     }
 }
 
@@ -643,7 +1222,7 @@ private struct SetupGuideView: View {
                 }
             }
 
-            Text("\(HotkeyPreset.current.displayName)：ノッチのプロンプト入力欄を開く／閉じる")
+            Text("\(HotkeyAction.toggleInput.shortcutOrName)：ノッチのプロンプト入力欄を開く／閉じる")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -653,32 +1232,163 @@ private struct SetupGuideView: View {
 }
 
 private struct ShortcutSettingsView: View {
-    @AppStorage(HotkeyPreset.userDefaultsKey) private var preset = HotkeyPreset.optionSpace.rawValue
+    /// 記録し直すたびに各行を作り直して、表示を保存内容へ追従させる
+    @State private var revision = 0
+
+    private var categories: [(name: String, actions: [HotkeyAction])] {
+        var order: [String] = []
+        var grouped: [String: [HotkeyAction]] = [:]
+        for action in HotkeyAction.allCases {
+            if grouped[action.category] == nil { order.append(action.category) }
+            grouped[action.category, default: []].append(action)
+        }
+        return order.map { ($0, grouped[$0] ?? []) }
+    }
 
     var body: some View {
         Form {
-            Section("グローバルショートカット") {
-                Picker("プロンプト入力を開く／閉じる", selection: $preset) {
-                    ForEach(HotkeyPreset.allCases) { option in
-                        Text(option.displayName).tag(option.rawValue)
-                    }
-                }
-                Text("他のアプリを操作中でも使えます。Carbonのホットキーを使うため、アクセシビリティ権限は不要です。")
+            Section {
+                Text("どのアプリを操作中でも使えます。Carbonのホットキーを使うため、アクセシビリティ権限は不要です。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("「記録」を押してから、割り当てたいキーの組み合わせを押してください。"
+                     + "修飾キー（⌘⌥⌃⇧）を1つ以上含める必要があります。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
+            ForEach(categories, id: \.name) { category in
+                Section(category.name) {
+                    ForEach(category.actions) { action in
+                        HotkeyRow(action: action, revision: $revision)
+                    }
+                }
+            }
+
+            Section {
+                Button("すべて既定に戻す") {
+                    for action in HotkeyAction.allCases { action.resetBinding() }
+                    AppCoordinator.shared.hotkey.reload()
+                    revision += 1
+                }
+            }
+
             Section("ノッチ内の操作") {
-                LabeledContent("送信", value: "Return")
+                LabeledContent("プロンプトを送信", value: "⌘Return")
                 LabeledContent("閉じる", value: "Esc")
-                LabeledContent("送信履歴", value: "↑")
+                LabeledContent("送信履歴をたどる", value: "⌥↑ / ⌥↓")
                 LabeledContent("送信先を切り替える", value: "Tab")
-                LabeledContent("質問の選択肢", value: "1〜9")
+                LabeledContent("質問の選択肢を選ぶ", value: "1〜9")
+                LabeledContent("質問の先頭を選ぶ", value: "Return")
+                Text("承認リクエストではReturnに既定を割り当てていません。"
+                     + "誤ってキーを叩いても許可が送られないよう、番号キーかクリックでの明示的な選択だけを受け付けます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .onChange(of: preset) { _, _ in
-            AppCoordinator.shared.hotkey.reload()
+    }
+}
+
+// MARK: - ショートカット1件ぶんの行
+
+private struct HotkeyRow: View {
+    let action: HotkeyAction
+    @Binding var revision: Int
+
+    @State private var isRecording = false
+    @State private var monitor: Any?
+    @State private var conflict: String?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(action.displayName)
+                Text(action.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let conflict {
+                    Text(conflict)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+
+            Button {
+                isRecording ? stopRecording() : startRecording()
+            } label: {
+                Text(buttonTitle)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minWidth: 92)
+            }
+            .buttonStyle(.bordered)
+            .tint(isRecording ? .accentColor : nil)
+
+            Button {
+                assign(nil)
+            } label: {
+                Image(systemName: "xmark.circle")
+            }
+            .buttonStyle(.borderless)
+            .disabled(action.binding == nil)
+            .help("割り当てを解除する")
+        }
+        .padding(.vertical, 2)
+        .id(revision)
+        .onDisappear(perform: stopRecording)
+    }
+
+    private var buttonTitle: String {
+        if isRecording { return "キーを押す…" }
+        return action.binding?.displayText ?? "未割り当て"
+    }
+
+    private func startRecording() {
+        isRecording = true
+        conflict = nil
+        // 記録中は設定ウインドウ内のキー入力を横取りする。
+        // nil を返してイベントを消費し、押したキーが他の操作へ流れないようにする。
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Escは「取り消し」に割り当てる。記録欄から抜けられなくならないように。
+            if event.keyCode == HotkeyBinding.escapeKeyCode {
+                stopRecording()
+                return nil
+            }
+            guard let binding = HotkeyBinding.from(event: event) else { return nil }
+            guard binding.hasModifier else {
+                conflict = "⌘⌥⌃⇧ のいずれかと組み合わせてください。"
+                return nil
+            }
+            assign(binding)
+            stopRecording()
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        isRecording = false
+    }
+
+    private func assign(_ binding: HotkeyBinding?) {
+        if let binding, let owner = conflictingAction(for: binding) {
+            conflict = "\(owner.displayName) と重複しています。"
+            return
+        }
+        conflict = nil
+        action.setBinding(binding)
+        AppCoordinator.shared.hotkey.reload()
+        revision += 1
+    }
+
+    /// 同じ組み合わせを既に使っている別の操作を探す
+    private func conflictingAction(for binding: HotkeyBinding) -> HotkeyAction? {
+        HotkeyAction.allCases.first {
+            $0 != action
+                && $0.binding?.keyCode == binding.keyCode
+                && $0.binding?.carbonModifiers == binding.carbonModifiers
         }
     }
 }
@@ -711,6 +1421,8 @@ private struct SetupDiagnosticsView: View {
     @State private var notificationHealth: DiagnosticHealth = .checking
     @State private var notificationDetail = "確認中…"
     @State private var refreshedAt = Date()
+    @AppStorage(DiagnosticsPreferences.writeStateDumpKey) private var writeStateDump = false
+    @AppStorage(DiagnosticsPreferences.logDisplaySelectionKey) private var logDisplaySelection = false
 
     private var watcher: SessionWatcher { AppCoordinator.shared.watcher }
 
@@ -830,6 +1542,23 @@ private struct SetupDiagnosticsView: View {
                         )
                     }
                 }
+            }
+
+            Section("記録") {
+                Toggle("画面解析の内容をファイルへ書き出す", isOn: $writeStateDump)
+                Text("状態の誤判定を調べるための記録です。取り込んだ画面の文字と判定結果を保存します。"
+                     + "会話の内容がそのまま含まれるため、普段はオフのままにしてください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("保存先をFinderで開く") {
+                    NSWorkspace.shared.open(DiagnosticsPreferences.stateDumpDirectory)
+                }
+                .disabled(!writeStateDump)
+
+                Toggle("表示先ディスプレイの判断をコンソールへ記録", isOn: $logDisplaySelection)
+                Text("ノッチが意図しない画面に出るときの調査に使います。Console.appで「Subghost」を検索してください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -1008,15 +1737,17 @@ private struct SoundRow: View {
                 .onChange(of: isEnabled) { _, newValue in
                     UserDefaults.standard.set(newValue, forKey: sound.enabledKey)
                 }
+                .accessibilityLabel("\(sound.displayName) のサウンド")
 
             Button {
-                SoundAlerts.shared.play(sound)
+                SoundAlerts.shared.preview(sound)
             } label: {
                 Image(systemName: "play.circle")
             }
             .buttonStyle(.borderless)
             .disabled(!isEnabled)
             .help("試聴する")
+            .accessibilityLabel("\(sound.displayName) を試聴する")
         }
     }
 }

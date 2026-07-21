@@ -18,6 +18,7 @@ nonisolated enum NotchPreferences {
     static let collapseOnMouseExitKey = "collapseOnMouseExit"
     static let closeOnOutsideClickKey = "closeOnOutsideClick"
     static let choiceAutoCloseIntervalKey = "choiceAutoCloseInterval"
+    static let focusChoiceOnAppearKey = "focusChoiceOnAppear"
 
     static var hoverExpansionEnabled: Bool {
         bool(forKey: hoverExpansionEnabledKey, default: true)
@@ -75,6 +76,15 @@ nonisolated enum NotchPreferences {
     /// 0以下なら自動で閉じない（回答するまで表示し続ける、既定の挙動）。
     static var choiceAutoCloseInterval: TimeInterval {
         number(forKey: choiceAutoCloseIntervalKey, default: 0)
+    }
+
+    /// 選択肢が届いたとき、Subghostがキーボードフォーカスを奪ってよいか。
+    ///
+    /// 有効だと数字キーだけで即座に回答できるが、他アプリで文章を書いている
+    /// 最中に割り込むと打鍵を横取りしてしまう。無効にした場合はパネルを出すだけに留め、
+    /// ノッチをクリックしてから数字キーで回答する。
+    static var focusChoiceOnAppear: Bool {
+        bool(forKey: focusChoiceOnAppearKey, default: true)
     }
 
     static func bool(
