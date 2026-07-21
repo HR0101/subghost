@@ -50,6 +50,8 @@ final class AppCoordinator {
     let activity = ActivityStore()
     let hotkey = HotkeyManager()
     let customAliasStore = CustomAliasStore()
+    /// セッション個別のミュート（実行中のみ保持。AlertGate から参照される）
+    let sessionMutes = SessionMuteStore()
     @ObservationIgnored private var panelController: NotchPanelController?
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
@@ -129,8 +131,8 @@ final class AppCoordinator {
         panelController = NotchPanelController(coordinator: self)
         panelController?.show()
 
-        hotkey.onHotkey = { [weak self] in
-            self?.toggleInput()
+        hotkey.onAction = { [weak self] action in
+            self?.perform(action)
         }
         hotkey.register()
 
@@ -158,6 +160,43 @@ final class AppCoordinator {
         if !UserDefaults.standard.bool(forKey: Self.hasCompletedOnboardingKey) {
             setMode(.onboarding)
         }
+    }
+
+    // MARK: - グローバルショートカット (設計書 4.3)
+
+    /// 割り当てられた操作を実行する。
+    /// 回答系は、回答待ちのセッションが無ければ何もしない（押し間違いで誤送信しないため）。
+    func perform(_ action: HotkeyAction) {
+        switch action {
+        case .toggleInput:
+            toggleInput()
+        case .showSessions:
+            showSessions()
+        case .showActivity:
+            showActivity()
+        case .jumpToTerminal:
+            jumpToTerminal()
+        case .approveChoice:
+            respondToPendingChoice(affirmative: true)
+        case .denyChoice:
+            respondToPendingChoice(affirmative: false)
+        case .toggleMute:
+            toggleMute()
+        }
+    }
+
+    /// ショートカットから「はい／いいえ」で答える。
+    /// ノッチを開いていなくても、回答待ちのセッションがあればそれを対象にする。
+    private func respondToPendingChoice(affirmative: Bool) {
+        let target = choiceSession ?? watcher.sessionAwaitingResponse
+        guard let session = target, let choice = session.pendingChoice else { return }
+        guard let option = affirmative ? choice.affirmativeOption : choice.negativeOption else {
+            // はい／いいえが揃っていない問いは、選択肢を見せて選んでもらう
+            showChoice(for: session)
+            return
+        }
+        if choiceSession !== session { choiceSession = session }
+        respond(with: option)
     }
 
     // MARK: - 初回起動の案内
@@ -200,24 +239,33 @@ final class AppCoordinator {
         case .becameCompleted(let preview):
             NotificationManager.shared.invalidateChoice(for: session.info)
             activity.record(kind: .completed, session: session.info, preview: preview)
-            SoundAlerts.shared.play(for: .completed)
+            SoundAlerts.shared.play(for: .completed, session: session.info)
             NotificationManager.shared.notify(session: session.info, state: .completed, preview: preview)
-            showNotification(for: session)
+            if AlertGate.allowsAutoExpand(.completed, session: session.info) {
+                showNotification(for: session)
+            }
         case .becameError(let preview):
             NotificationManager.shared.invalidateChoice(for: session.info)
             activity.record(kind: .error, session: session.info, preview: preview)
-            SoundAlerts.shared.play(for: .error)
+            SoundAlerts.shared.play(for: .error, session: session.info)
             NotificationManager.shared.notify(session: session.info, state: .error, preview: preview)
-            showNotification(for: session)
+            if AlertGate.allowsAutoExpand(.error, session: session.info) {
+                showNotification(for: session)
+            }
         case .becameAwaitingChoice(let choice):
+            let event: NotificationEvent = choice.kind == .approval ? .approval : .question
             activity.record(
                 kind: choice.kind == .approval ? .approval : .question,
                 session: session.info,
                 preview: [choice.title]
             )
-            SoundAlerts.shared.play(for: session.state)
+            SoundAlerts.shared.play(for: session.state, session: session.info)
             NotificationManager.shared.notifyChoice(session: session.info, choice: choice)
-            showChoice(for: session)
+            // ミュート中でも、回答しないとCLIが止まる問いは黙って捨てない。
+            // ノッチを自動で開かないだけで、一覧には回答待ちとして残り続ける。
+            if AlertGate.allowsAutoExpand(event, session: session.info) {
+                showChoice(for: session)
+            }
         case .choiceResolved:
             NotificationManager.shared.invalidateChoice(for: session.info)
             dismissedChoices[session.info.tty] = nil
@@ -278,7 +326,7 @@ final class AppCoordinator {
         setMode(.choice)
         // 既に承認モードでも選択肢の数で高さが変わるため、必ずフレームを取り直す
         panelController?.modeChanged()
-        panelController?.focusInput()   // 数字キーで回答できるようキーフォーカスを取る
+        takeChoiceFocusIfAppropriate(for: session)
 
         // 既定では自動で閉じない（回答するまで表示し続ける）。設定で秒数が
         // 指定されている場合のみ、その時間が経過し、かつホバー中でなければ畳む。
@@ -298,6 +346,21 @@ final class AppCoordinator {
             // 即座に再展開してしまう。dismissChoice() 経由にして「閉じた」記録を残し、
             // 同じ問いを再展開しないようにする（Escキーで閉じた場合と同じ扱い）。
             self.dismissChoice()
+        }
+    }
+
+    /// 選択肢が出たときにキーボードフォーカスを取るか判断する。
+    ///
+    /// 無条件に `NSApp.activate()` すると、ユーザーが他アプリで文章を書いている最中でも
+    /// 打鍵を横取りし、数字キーが意図しない回答として送信されてしまう。
+    /// - 設定で無効にされていれば取らない
+    /// - 対象セッションのターミナルが既に前面なら、そちらで直接答えられるので取らない
+    private func takeChoiceFocusIfAppropriate(for session: MonitoredSession) {
+        guard NotchPreferences.focusChoiceOnAppear else { return }
+        Task { [weak self] in
+            guard await !TerminalActivator.isSessionFrontmost(session.info) else { return }
+            guard let self, self.mode == .choice, self.choiceSession === session else { return }
+            self.panelController?.focusInput()
         }
     }
 
@@ -373,6 +436,9 @@ final class AppCoordinator {
     func showSessions() {
         notificationPresentationTask?.cancel()
         collapseTask?.cancel()
+        // 終了済みセッションのミュート記録を捨てる。
+        // ttyは使い回されるため、残しておくと無関係なセッションが黙ってしまう。
+        sessionMutes.prune(livingSessions: watcher.sessions.map(\.info))
         setMode(.sessions)
         panelController?.resignInput()
     }

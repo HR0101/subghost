@@ -75,17 +75,42 @@ nonisolated enum GhostSprite {
         "#.##.#",
     ])
 
+    /// 完了。目を細めた満足げな表情。
+    /// 色（緑）だけに頼らず、形の違いだけでも待機中と区別できるようにする。
+    static let happy = PixelSprite(rows: [
+        ".####.",
+        "######",
+        "oo##oo",
+        "######",
+        "######",
+        "#.##.#",
+    ])
+
+    /// エラー。口を開けた表情。
+    /// 以前は待機中と同じ絵で色（赤）だけが差分だったため、色覚特性によっては
+    /// 区別できなかった。口の有無という形の差を付けている。
+    static let upset = PixelSprite(rows: [
+        ".####.",
+        "######",
+        "#o##o#",
+        "######",
+        "##oo##",
+        "#.##.#",
+    ])
+
     /// 状態ごとの2コマ。交互に描いて簡単なアニメーションにする。
     static func frames(for state: AIState) -> (PixelSprite, PixelSprite) {
         switch state {
-        case .idle, .completed:
+        case .idle:
             return (idle, blink)
+        case .completed:
+            return (happy, happy)
         case .thinking:
             return (idle, wave)
         case .awaitingApproval, .awaitingAnswer:
             return (alert, idle)
         case .error:
-            return (idle, idle)
+            return (upset, upset)
         }
     }
 
@@ -113,6 +138,16 @@ struct PixelGhostView: View {
     var pixelSize: CGFloat = 3
     /// 外部（ホバーなど）から「覗き込み」を促す合図。値が変わるたびに一度だけ再生する。
     var peekTrigger: Int = 0
+
+    /// 「視差効果を減らす」が有効なら、揺れ・弾み・震え・まばたきをすべて止める。
+    /// 画面最上部に常駐するため、小さな動きでも動きに敏感なユーザーの負担になる。
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    /// Subghost側の設定でも同じように止められる。
+    /// システム全体の設定を変えずにゴーストだけ静止させたい場合があるため、
+    /// どちらか一方でも「止める」ならアニメーションしない。
+    @AppStorage(AppearancePreferences.ghostAnimationEnabledKey) private var ghostAnimation = true
+
+    private var reduceMotion: Bool { systemReduceMotion || !ghostAnimation }
 
     /// 完了・エラーへ遷移した瞬間だけ再生するワンショット演出のトリガー。
     /// (値そのものに意味はなく、変化したことだけをPhaseAnimatorへの合図として使う)
@@ -150,19 +185,20 @@ struct PixelGhostView: View {
             .easeInOut(duration: 0.045)
         }
         .onChange(of: state) { _, newValue in
+            guard !reduceMotion else { return }
             if newValue == .completed { completionPulse += 1 }
             if newValue == .error { errorShake += 1 }
         }
         .onChange(of: peekTrigger) { _, _ in
             // 生成中は既にwaveアニメが動いているため、覗き込みで割り込まない。
-            guard state != .thinking else { return }
+            guard !reduceMotion, state != .thinking else { return }
             microExpressionSprite = GhostSprite.alert
             microExpressionTrigger += 1
         }
         // アイドルのあいだだけ、低頻度でまばたきを挟む。
         // state が変わると .task(id:) が自動的にキャンセル・再起動する。
         .task(id: state) {
-            guard state == .idle else { return }
+            guard !reduceMotion, state == .idle else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(.random(in: Self.idleBlinkIntervalRange)))
                 guard !Task.isCancelled else { return }
@@ -170,6 +206,8 @@ struct PixelGhostView: View {
                 microExpressionTrigger += 1
             }
         }
+        // 状態は囲んでいるコンテナ側がまとめて読み上げる（二重読み上げを避ける）。
+        .accessibilityHidden(true)
     }
 
     /// エラー時の震え: 素早く左右へ数回振れて中央へ戻る
@@ -187,7 +225,7 @@ struct PixelGhostView: View {
         let duration = GhostSprite.frameDuration(for: state)
 
         return Group {
-            if GhostSprite.shouldAnimate(for: state) {
+            if GhostSprite.shouldAnimate(for: state), !reduceMotion {
                 // 生成中だけ裾を揺らす。動いているキャラクター＝生成中に統一する。
                 PhaseAnimatorFrames(first: first, second: second, duration: duration) { frame in
                     spriteView(frame)
@@ -319,5 +357,7 @@ struct AgentIconView: View {
             }
         }
         .shadow(color: tint.opacity(0.5), radius: 2)
+        // CLI名は隣接するテキストが伝えるため、装飾として扱う。
+        .accessibilityHidden(true)
     }
 }

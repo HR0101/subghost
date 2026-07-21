@@ -119,6 +119,11 @@ nonisolated enum HookInstaller {
         SOCK="\(socketPath)"
         [ -S "$SOCK" ] || exit 0
 
+        # 待ち時間の上限はフック側から渡される（承認だけ長い）。
+        # ここで必ず上限を設けることで、Subghostが応答不能でもCLIを止め続けない。
+        TIMEOUT="${2:-\(normalTimeoutSeconds)}"
+        case "$TIMEOUT" in *[!0-9]* | "") TIMEOUT=\(normalTimeoutSeconds) ;; esac
+
         # どのセッションのイベントかを特定するため、CLI本体のpidとttyを探す。
         #
         # フックはCLIから "/bin/sh -c ..." 経由で起動され、この中間シェルは
@@ -142,7 +147,7 @@ nonisolated enum HookInstaller {
             depth=$((depth + 1))
         done
 
-        curl -s -m \(permissionTimeoutSeconds) --unix-socket "$SOCK" \\
+        curl -s -m "$TIMEOUT" --unix-socket "$SOCK" \\
              -H 'Content-Type: application/json' \\
              -H "X-Subghost-Tty: ${AGENT_TTY:-unknown}" \\
              -H "X-Subghost-Pid: ${AGENT_PID:-0}" \\
@@ -209,12 +214,67 @@ nonisolated enum HookInstaller {
         """
     }
 
+    /// settings.json に書き込む statusLine コマンド。
+    ///
+    /// スクリプトのパスをそのまま書くと、`~/.subghost` を手で消したときに
+    /// 存在しないコマンドが残り、ユーザーのstatuslineが戻らなくなる。
+    /// 元のコマンドをここへ持たせておくことで、Subghost側の資産が全て消えても
+    /// 自動的に元のstatuslineへ戻る。
+    static func statuslineCommand(scriptPath: String, previous: String?) -> String {
+        let body = """
+            [ -x "$1" ] && exec "$1"; [ -n "$2" ] && exec /bin/sh -c "$2"; exit 0
+            """
+        let args = [scriptPath, previous ?? ""].map(shellQuoted).joined(separator: " ")
+        return "/bin/sh -c \(shellQuoted(body)) subghost \(args) # \(marker)"
+    }
+
+    /// 自分が書いたコマンド文字列から、包む前の元コマンドを読み戻す。
+    /// 保存ファイル（previousStatuslinePath）が失われていても解除できるようにするための経路。
+    static func embeddedPreviousStatusline(in command: String) -> String? {
+        guard command.contains(marker) else { return nil }
+        // [本文, スクリプトのパス, 元コマンド] の順に並んでいる
+        let arguments = singleQuotedArguments(in: command)
+        guard arguments.count >= 3, !arguments[2].isEmpty else { return nil }
+        return arguments[2]
+    }
+
+    /// シェルの単一引用符で包まれた引数を取り出す。
+    /// 自分で組み立てた文字列を読み戻すためのもので、一般のシェル構文の解釈ではない。
+    static func singleQuotedArguments(in text: String) -> [String] {
+        let characters = Array(text)
+        var result: [String] = []
+        var index = 0
+        while index < characters.count {
+            guard characters[index] == "'" else { index += 1; continue }
+            index += 1
+            var current = ""
+            while index < characters.count {
+                if characters[index] == "'" {
+                    // shellQuoted が引用符そのものを表すために使う '\'' の並び
+                    let isEscapedQuote = index + 3 < characters.count
+                        && characters[index + 1] == "\\"
+                        && characters[index + 2] == "'"
+                        && characters[index + 3] == "'"
+                    guard isEscapedQuote else { break }
+                    current.append("'")
+                    index += 4
+                    continue
+                }
+                current.append(characters[index])
+                index += 1
+            }
+            index += 1
+            result.append(current)
+        }
+        return result
+    }
+
     static func isStatuslineInstalled() -> Bool {
         guard let root = try? loadSettings(.claude),
               let statusLine = root["statusLine"] as? [String: Any],
               let command = statusLine["command"] as? String
         else { return false }
-        return command == statuslineScriptPath
+        return command.contains(marker)
     }
 
     /// statuslineの横取りを開始する
@@ -223,10 +283,13 @@ nonisolated enum HookInstaller {
         let statusLine = root["statusLine"] as? [String: Any]
         let current = statusLine?["command"] as? String
 
-        // 既に自分が入っている場合は元コマンドを上書きしない
+        // 既に自分が入っている場合は元コマンドを上書きしない。
+        // 保存ファイルが消えていても、コマンド文字列の中から読み戻せる。
         let previous: String?
-        if current == statuslineScriptPath {
-            previous = try? String(contentsOf: previousStatuslinePath, encoding: .utf8)
+        if let current, current.contains(marker) {
+            previous = embeddedPreviousStatusline(in: current)
+                ?? (try? String(contentsOf: previousStatuslinePath, encoding: .utf8))
+                    .flatMap { $0.isEmpty ? nil : $0 }
         } else {
             previous = current
             if let current {
@@ -247,7 +310,8 @@ nonisolated enum HookInstaller {
 
         try backupSettings(.claude)
         var updated = statusLine ?? ["type": "command"]
-        updated["command"] = statuslineScriptPath
+        updated["command"] = statuslineCommand(
+            scriptPath: statuslineScriptPath, previous: previous)
         if updated["type"] == nil { updated["type"] = "command" }
         root["statusLine"] = updated
         try writeSettings(root, target: .claude)
@@ -257,12 +321,16 @@ nonisolated enum HookInstaller {
     static func uninstallStatusline() throws {
         var root = try loadSettings(.claude)
         guard var statusLine = root["statusLine"] as? [String: Any],
-              statusLine["command"] as? String == statuslineScriptPath
+              let command = statusLine["command"] as? String,
+              command.contains(marker)
         else { return }
 
         try backupSettings(.claude)
-        if let previous = try? String(contentsOf: previousStatuslinePath, encoding: .utf8),
-           !previous.isEmpty {
+        // コマンド文字列に埋め込んだ元コマンドを優先し、保存ファイルは予備に使う。
+        // どちらも失われていれば、元は無かったものとして設定ごと取り除く。
+        let saved = (try? String(contentsOf: previousStatuslinePath, encoding: .utf8))
+            .flatMap { $0.isEmpty ? nil : $0 }
+        if let previous = embeddedPreviousStatusline(in: command) ?? saved {
             statusLine["command"] = previous
             root["statusLine"] = statusLine
         } else {
@@ -276,12 +344,28 @@ nonisolated enum HookInstaller {
 
     // MARK: - settings.json への登録
 
+    /// 文字列をシェルの単一引用符で安全に包む。
+    /// ホームディレクトリ名に ' や " や空白が含まれていても、
+    /// 生成したコマンドがシェル構文エラーにならないようにする。
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     /// フックのコマンド文字列。スクリプトが無い場合は何もせず成功で抜ける。
+    ///
+    /// パスは本文へ埋め込まず `sh -c` の引数として渡す。埋め込むと、パスに含まれる
+    /// 引用符・空白・`$` が本文の構文を壊し、CLIが毎イベントでエラーを出すことになる。
     ///
     /// 末尾のシェルコメントは、設置先のパスに関わらずSubghostの項目を identify するための目印。
     /// パス文字列に目印が含まれることに依存すると、設置先を変えた際に解除できなくなる。
-    static func hookCommand(scriptPath: String, source: String = "claude") -> String {
-        "/bin/sh -c '[ -x \"\(scriptPath)\" ] && \"\(scriptPath)\" \(source); exit 0' # \(marker)"
+    static func hookCommand(
+        scriptPath: String,
+        source: String = "claude",
+        timeout: Int = normalTimeoutSeconds
+    ) -> String {
+        let body = "[ -x \"$1\" ] && \"$1\" \"$2\" \"$3\"; exit 0"
+        let args = [scriptPath, source, String(timeout)].map(shellQuoted).joined(separator: " ")
+        return "/bin/sh -c \(shellQuoted(body)) subghost \(args) # \(marker)"
     }
 
     /// 現在フックが登録されているか
@@ -334,19 +418,26 @@ nonisolated enum HookInstaller {
         var hooks = (root["hooks"] as? [String: Any]) ?? [:]
 
         for event in target.events {
-            var matchers = (hooks[event] as? [[String: Any]]) ?? []
+            // 既存の値が想定した形でなければ、そのイベントには一切触れない。
+            // 空配列で置き換えるとユーザーが自分で書いたフックを消してしまう。
+            let existing = hooks[event]
+            guard var matchers = existing as? [[String: Any]] ?? (existing == nil ? [] : nil)
+            else { continue }
+
             // 同じ目印を持つ既存エントリは入れ替える（重複登録の防止）
             matchers.removeAll { matcher in
                 guard let inner = matcher["hooks"] as? [[String: Any]] else { return false }
                 return inner.contains { ($0["command"] as? String)?.contains(marker) == true }
             }
 
+            // 承認待ちは応答があるまで接続を保持するため、長めの上限を指定する
             let isPermission = event == "PermissionRequest"
+            let timeout = isPermission ? permissionTimeoutSeconds : normalTimeoutSeconds
             let hookEntry: [String: Any] = [
                 "type": "command",
-                "command": hookCommand(scriptPath: scriptPath, source: target.rawValue),
-                // 承認待ちは応答があるまで接続を保持するため、長めの上限を指定する
-                "timeout": isPermission ? permissionTimeoutSeconds : normalTimeoutSeconds,
+                "command": hookCommand(
+                    scriptPath: scriptPath, source: target.rawValue, timeout: timeout),
+                "timeout": timeout,
             ]
 
             var matcherEntry: [String: Any] = ["hooks": [hookEntry]]
@@ -403,21 +494,64 @@ nonisolated enum HookInstaller {
         return root
     }
 
-    /// 書き換え前に日時付きのバックアップを残す
+    /// 残しておくバックアップの数。導入・解除のたびに増え続けると
+    /// 設定ディレクトリが実体の分からないファイルで埋まる。
+    static let backupsToKeep = 3
+
+    static func backupFileName(for url: URL) -> String {
+        "\(url.lastPathComponent).subghost-backup-"
+    }
+
+    /// 書き換え前に日時付きのバックアップを残し、古いものは間引く
     static func backupSettings(_ target: HookTarget) throws {
         let url = target.settingsURL
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let backup = url
-            .deletingLastPathComponent()
-            .appendingPathComponent(
-                "\(url.lastPathComponent).subghost-backup-\(formatter.string(from: Date()))")
+        let directory = url.deletingLastPathComponent()
+        let prefix = backupFileName(for: url)
+        let backup = directory.appendingPathComponent("\(prefix)\(formatter.string(from: Date()))")
+        guard !FileManager.default.fileExists(atPath: backup.path) else { return }
         try FileManager.default.copyItem(at: url, to: backup)
+
+        // 名前に日時が入っているので、名前順に並べれば新しいものが後ろに来る
+        let existing = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        let ours = existing.filter { $0.hasPrefix(prefix) }.sorted()
+        for stale in ours.dropLast(backupsToKeep) {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(stale))
+        }
+    }
+
+    /// 実際に書き込む先。
+    /// 設定ファイルをdotfilesリポジトリへのシンボリックリンクにしている人がいるため、
+    /// 原子的書き込みでリンクを実ファイルに置き換えてしまわないよう実体を解決する。
+    static func writeURL(for target: HookTarget) -> URL {
+        let url = target.settingsURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return url }
+        return url.resolvingSymlinksInPath()
+    }
+
+    /// 設定をファイルへ書ける形にして返す。
+    /// 書いてから壊れていたと気づいてはCLIの起動を妨げてしまうため、
+    /// ここで必ず「読み返せること」まで確かめてから返す。
+    static func encodedSettings(_ root: [String: Any], fileName: String) throws -> Data {
+        // JSONにできない値が混じっていると JSONSerialization.data は Swift の error ではなく
+        // NSException を投げる。do/catch では捕まえられずアプリが落ちるため、
+        // 必ずこの判定を先に通す。
+        guard JSONSerialization.isValidJSONObject(root) else {
+            throw HookInstallError.wouldWriteInvalidSettings(fileName)
+        }
+        let data = try JSONSerialization.data(
+            withJSONObject: root,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        guard (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] != nil else {
+            throw HookInstallError.wouldWriteInvalidSettings(fileName)
+        }
+        return data
     }
 
     static func writeSettings(_ root: [String: Any], target: HookTarget) throws {
-        let url = target.settingsURL
+        let url = writeURL(for: target)
         // 専用ファイルで中身が空になったらファイルごと消す（元が無かった状態に戻す）
         if target.isDedicatedFile, root.isEmpty {
             try? FileManager.default.removeItem(at: url)
@@ -425,19 +559,34 @@ nonisolated enum HookInstaller {
         }
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let data = try JSONSerialization.data(
-            withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        let data = try encodedSettings(root, fileName: url.lastPathComponent)
+        let previousContents = try? Data(contentsOf: url)
         try data.write(to: url, options: .atomic)
+
+        // 書き込み後も読み返して確認し、駄目なら直前の内容へ戻す。
+        // ここで戻せなければユーザーはCLIを起動できなくなる。
+        if (try? Data(contentsOf: url)).flatMap({ try? JSONSerialization.jsonObject(with: $0) })
+            == nil {
+            if let previousContents {
+                try? previousContents.write(to: url, options: .atomic)
+            } else {
+                try? FileManager.default.removeItem(at: url)
+            }
+            throw HookInstallError.wouldWriteInvalidSettings(url.lastPathComponent)
+        }
     }
 }
 
 nonisolated enum HookInstallError: Error, LocalizedError {
     case settingsNotAnObject(String)
+    case wouldWriteInvalidSettings(String)
 
     var errorDescription: String? {
         switch self {
         case .settingsNotAnObject(let fileName):
             return "\(fileName) の形式を認識できませんでした。手動で確認してください。"
+        case .wouldWriteInvalidSettings(let fileName):
+            return "\(fileName) を安全に書き換えられなかったため、変更を取り消しました。"
         }
     }
 }

@@ -130,6 +130,14 @@ struct NotchView: View {
     /// ゴーストへの「覗き込み」合図（コンパクト表示にマウスが乗るたびに+1）
     @State private var ghostPeekTrigger = 0
 
+    /// 黒い面の濃さ。
+    /// コンパクト時は必ず不透明にする（物理ノッチと地続きに見せる必要があるため）。
+    /// 展開するにつれて設定した不透明度へ寄せる。
+    private var surfaceOpacity: Double {
+        let target = AppearancePreferences.panelOpacity
+        return 1 - (1 - target) * Double(morphProgress)
+    }
+
     private var metrics: NotchMetrics? { coordinator.notchMetrics }
     private var topInset: CGFloat { metrics?.topInset ?? 34 }
     private var notchWidth: CGFloat { metrics?.notchWidth ?? 190 }
@@ -146,7 +154,7 @@ struct NotchView: View {
                 compactHeight: topInset,
                 canvasShoulderInset: NotchLayout.topShoulderWidth
             )
-            .fill(.black)
+            .fill(.black.opacity(surfaceOpacity))
             .shadow(
                 color: .black.opacity(morphProgress * 0.45),
                 radius: 10 * morphProgress,
@@ -357,6 +365,31 @@ struct NotchView: View {
         .frame(height: topInset)
         .contentShape(Rectangle())
         .onTapGesture { coordinator.jumpToTerminal() }
+        // ゴーストもドットも図形を描いているだけで、支援技術には何も伝わらない。
+        // このアプリの中核情報（どのセッションがどの状態か）が無音にならないよう、
+        // まとめて1つの要素にして読み上げ内容を明示する。
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(compactAccessibilityLabel)
+        .accessibilityHint("該当するターミナルのタブへ移動します")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { coordinator.jumpToTerminal() }
+    }
+
+    /// コンパクト表示の読み上げ文。状態は色と絵でしか出していないため、言葉で補う。
+    private var compactAccessibilityLabel: String {
+        let sessions = coordinator.watcher.sessions
+        guard let active = coordinator.watcher.activeSession else {
+            return sessions.isEmpty
+                ? "Subghost。AI CLIは実行されていません"
+                : "Subghost。\(sessions.count)件のセッションを監視中"
+        }
+
+        var text = "Subghost。\(active.info.profile.displayName) "
+            + "\(active.info.displayName) は\(active.state.accessibilityDescription)"
+        let waiting = sessions.filter { $0.state.needsUserResponse }.count
+        if waiting > 0 { text += "。\(waiting)件が応答待ちです" }
+        if sessions.count > 1 { text += "。ほかに\(sessions.count - 1)件を監視中" }
+        return text
     }
 
     // MARK: - 展開（通知）：応答チラ見せ (設計書 4.2 / 6.2)
@@ -386,7 +419,9 @@ struct NotchView: View {
                     .foregroundStyle(.white.opacity(0.6))
             }
 
-            if let preview = session?.preview, !preview.isEmpty {
+            if let rawPreview = session?.preview, !rawPreview.isEmpty {
+                // 画面共有向けに本文を伏せる設定があるため、描画の直前で差し替える
+                let preview = AppearancePreferences.maskedPreview(rawPreview)
                 // 応答は長くなるため、折り返して読めるようにし、スクロールできるようにする
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 3) {
@@ -420,13 +455,19 @@ struct NotchView: View {
             }
 
             HStack {
-                Text("クリックで該当タブへ移動")
+                // 以前は「クリックで移動」という説明文だけで、実際の操作は
+                // 領域全体の onTapGesture だった。キーボードとVoiceOverから
+                // 到達できるよう、本物のボタンにしている。
+                Button("該当タブへ移動") { coordinator.jumpToTerminal() }
+                    .buttonStyle(.plain)
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .accessibilityHint("このセッションが動いているターミナルのタブを前面に出します")
                 Spacer()
-                Text("⌥Space で入力")
+                // ホットキーは設定で変更できるため、固定文字列にしない。
+                Text("\(HotkeyAction.toggleInput.shortcutOrName) で入力")
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(.white.opacity(0.6))
             }
         }
         .padding(.horizontal, 16)
@@ -459,13 +500,14 @@ struct NotchView: View {
                     }
                     .buttonStyle(.plain)
                     .help(others.count > 1 ? "他のAIの使用量も表示" : "レート制限の消費率")
+                    .accessibilityLabel(others.count > 1 ? "使用量。他のAIの使用量も表示" : "レート制限の消費率")
                     .popover(isPresented: $showAllUsage, arrowEdge: .bottom) {
                         UsagePopover(items: others)
                     }
                 } else {
                     Text("実行中のAI CLI \(coordinator.watcher.sessions.count)")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(.white.opacity(0.6))
                 }
                 Spacer()
                 Button {
@@ -482,38 +524,46 @@ struct NotchView: View {
                                 .background(Capsule().fill(Color.red.opacity(0.85)))
                         }
                     }
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.white.opacity(0.75))
                 }
                 .buttonStyle(.plain)
                 .help("アクティビティ履歴")
+                .accessibilityLabel(coordinator.activity.unreadCount > 0
+                                    ? "アクティビティ履歴。未読\(coordinator.activity.unreadCount)件"
+                                    : "アクティビティ履歴")
 
                 Button {
                     coordinator.dismissExpandedPanel()
                 } label: {
                     Image(systemName: "chevron.up")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(.white.opacity(0.6))
                 }
                 .buttonStyle(.plain)
                 .help("折りたたむ")
+                .accessibilityLabel("折りたたむ")
 
                 Button {
                     coordinator.toggleMute()
                 } label: {
                     Image(systemName: coordinator.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(coordinator.isMuted ? 0.4 : 0.75))
+                        .foregroundStyle(.white.opacity(coordinator.isMuted ? 0.55 : 0.8))
                 }
                 .buttonStyle(.plain)
                 .help(coordinator.isMuted ? "サウンドを有効にする" : "サウンドを消音する")
+                .accessibilityLabel("サウンド")
+                .accessibilityValue(coordinator.isMuted ? "消音中" : "オン")
+                .accessibilityHint(coordinator.isMuted ? "サウンドを有効にします" : "サウンドを消音します")
 
                 SettingsLink {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.white.opacity(0.8))
                 }
                 .buttonStyle(.plain)
                 .help("設定を開く")
+                .accessibilityLabel("設定を開く")
 
                 // メニューバー項目を置かないため、終了もここから行えるようにする
                 Button {
@@ -521,17 +571,18 @@ struct NotchView: View {
                 } label: {
                     Image(systemName: "power")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(.white.opacity(0.6))
                 }
                 .buttonStyle(.plain)
                 .help("Subghostを終了")
+                .accessibilityLabel("Subghostを終了")
             }
             .padding(.bottom, 2)
 
             if coordinator.watcher.sessions.isEmpty {
                 Text("AI CLI が見つかりません。ターミナルで claude / codex / agy を起動してください")
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.45))
+                    .foregroundStyle(.white.opacity(0.6))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 6)
             }
@@ -576,13 +627,15 @@ struct NotchView: View {
                 } label: {
                     Label("一覧", systemImage: "chevron.left")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.white.opacity(0.8))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("セッション一覧へ戻る")
 
                 Text("アクティビティ")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 if !coordinator.activity.entries.isEmpty {
                     Button("すべて消去") {
@@ -590,7 +643,7 @@ struct NotchView: View {
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(.white.opacity(0.65))
                 }
             }
 
@@ -637,7 +690,7 @@ struct NotchView: View {
             HStack(spacing: 6) {
                 ForEach(OnboardingStep.allCases, id: \.self) { step in
                     Circle()
-                        .fill(.white.opacity(step == coordinator.onboardingStep ? 0.9 : 0.25))
+                        .fill(.white.opacity(step == coordinator.onboardingStep ? 0.9 : 0.35))
                         .frame(width: 5, height: 5)
                 }
                 Spacer()
@@ -645,9 +698,14 @@ struct NotchView: View {
                     Button("スキップ") { coordinator.skipOnboarding() }
                         .buttonStyle(.plain)
                         .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(.white.opacity(0.65))
                 }
             }
+            // 進捗はドットの濃淡でしか示していないため、言葉でも伝える。
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(
+                "セットアップ \(coordinator.onboardingStep.rawValue + 1) / \(OnboardingStep.allCases.count)"
+            )
 
             onboardingStepContent
 
@@ -731,7 +789,7 @@ struct NotchView: View {
                 Text("歯車アイコン（ノッチにカーソルを合わせると出てきます）からいつでも設定を開けます。")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.7))
-                Text("\(HotkeyPreset.current.displayName) でプロンプト入力欄を開閉できます。")
+                Text("\(HotkeyAction.toggleInput.shortcutOrName) でプロンプト入力欄を開閉できます。")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.7))
             }
@@ -892,8 +950,7 @@ struct NotchView: View {
                     ForEach(choice.options) { option in
                         ChoiceOptionRow(
                             option: option,
-                            // 複数選択に既定の選択肢は無い（⏎は決定に割り当てる）
-                            isDefault: !choice.isMultiSelect && option == choice.options.first,
+                            isDefault: isEnterDefault(option, in: choice),
                             isMultiSelect: choice.isMultiSelect,
                             isSelected: multiSelection.contains(option.number)
                         ) {
@@ -916,10 +973,10 @@ struct NotchView: View {
                                  : "\(multiSelection.count)件を決定")
                             Spacer()
                             Text("⏎")
-                                .foregroundStyle(.white.opacity(0.45))
+                                .foregroundStyle(.white.opacity(0.6))
                         }
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(multiSelection.isEmpty ? .white.opacity(0.4) : .white)
+                        .foregroundStyle(multiSelection.isEmpty ? .white.opacity(0.55) : .white)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 7)
                         .background(
@@ -962,19 +1019,17 @@ struct NotchView: View {
                     .lineLimit(2)
             } else {
                 HStack {
-                    Text(choice?.isMultiSelect == true
-                         ? "数字キーで選択・解除 / ⏎ で決定"
-                         : "数字キーで回答 / ⏎ で先頭を選択")
+                    Text(choiceKeyHint(for: choice))
                         .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(.white.opacity(0.65))
                     Spacer()
                     Button("ターミナルで開く") { coordinator.jumpToTerminal() }
                         .buttonStyle(.plain)
                         .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(.white.opacity(0.75))
                     Text("Esc で閉じる")
                         .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(.white.opacity(0.65))
                 }
             }
         }
@@ -982,11 +1037,37 @@ struct NotchView: View {
         .padding(.bottom, 12)
         .focusable()
         .focused($choiceFocused)
-        .focusEffectDisabled()
         .onKeyPress { press in handleChoiceKey(press) }
         .onExitCommand { coordinator.dismissChoice() }
         // 次の問いへ移ったらチェックを持ち越さない
         .onChange(of: choice) { multiSelection = [] }
+        // 選択肢はキーボード操作が主なので、パネル全体を1つの通知として読み上げる。
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(choiceAccessibilityLabel(for: choice))
+    }
+
+    /// ⏎ で選ばれる既定の選択肢か。
+    ///
+    /// 承認リクエストの先頭は通常「はい／許可」で、⏎ を既定に割り当てると
+    /// 誤打鍵がそのまま許可になってしまう。承認では既定を置かず、
+    /// 数字キーかクリックによる明示的な選択だけを受け付ける。
+    private func isEnterDefault(_ option: ChoiceOption, in choice: PendingChoice) -> Bool {
+        guard !choice.isMultiSelect, choice.kind != .approval else { return false }
+        return option == choice.options.first
+    }
+
+    /// 画面下のキー操作ヒント。実装している操作だけを出す。
+    private func choiceKeyHint(for choice: PendingChoice?) -> String {
+        guard let choice else { return "" }
+        if choice.isMultiSelect { return "数字キーで選択・解除 / ⏎ で決定" }
+        if choice.kind == .approval { return "数字キーで回答（誤操作防止のため ⏎ の既定はありません）" }
+        return "数字キーで回答 / ⏎ で先頭を選択"
+    }
+
+    private func choiceAccessibilityLabel(for choice: PendingChoice?) -> String {
+        guard let choice else { return "回答待ちの問い合わせはありません" }
+        return "\(choice.kind.displayName)。\(choice.title)。"
+            + "選択肢\(choice.options.count)件。数字キーで回答できます"
     }
 
     /// 数字キー・y/n・Enterで選択肢へ回答する
@@ -999,7 +1080,10 @@ struct NotchView: View {
                 submitMultiSelection(choice)
                 return .handled
             }
-            guard let first = choice.options.first else { return .ignored }
+            // 承認リクエストでは⏎に既定を割り当てない（isEnterDefault と同じ理由）。
+            guard let first = choice.options.first,
+                  isEnterDefault(first, in: choice)
+            else { return .ignored }
             coordinator.respond(with: first)
             return .handled
         }
@@ -1049,13 +1133,16 @@ struct NotchView: View {
                 }
                 .buttonStyle(.plain)
                 .help("セッション一覧へ戻る")
+                .accessibilityLabel("セッション一覧へ戻る")
 
                 Image(systemName: "terminal")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.7))
+                    .accessibilityHidden(true)
 
                 // 送信先セッション選択 (設計書 4.3: 複数ある場合はドロップダウン)
                 if let active = coordinator.watcher.activeSession {
+                    // ドット自体は装飾。状態は下の送信先ラベルが読み上げる。
                     StateDot(state: active.state, pulsing: active.state.shouldPulse, size: 7)
                 }
                 if coordinator.watcher.sessions.count > 1 {
@@ -1069,28 +1156,32 @@ struct NotchView: View {
                     .labelsHidden()
                     .environment(\.colorScheme, .dark)
                     .frame(maxWidth: 220)
+                    .accessibilityLabel("送信先セッション")
                 } else {
                     Text(coordinator.watcher.activeSession?.info.displayName ?? "セッションなし")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.7))
+                        .accessibilityLabel("送信先")
+                        .accessibilityValue(activeSessionAccessibilityValue)
                 }
                 Spacer()
                 Text("⌘↩ 送信")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(.white.opacity(0.65))
                 Text("Esc で閉じる")
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(.white.opacity(0.65))
             }
 
             ZStack(alignment: .topLeading) {
                 if coordinator.inputText.isEmpty {
                     Text("プロンプトを入力…")
                         .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.35))
+                        .foregroundStyle(.white.opacity(0.55))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 13)
                         .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                 }
 
                 TextEditor(text: $coordinator.inputText)
@@ -1099,6 +1190,8 @@ struct NotchView: View {
                     .foregroundStyle(.white)
                     .padding(8)
                     .focused($inputFocused)
+                    .accessibilityLabel("プロンプト")
+                    .accessibilityHint("コマンド・リターンで送信します")
             }
             .frame(minHeight: 88, maxHeight: 140)
             .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.1)))
@@ -1121,6 +1214,13 @@ struct NotchView: View {
                 .onKeyPress(.downArrow, phases: .down) { press in
                     guard press.modifiers.contains(.option) else { return .ignored }
                     historyDown()
+                    return .handled
+                }
+                // 設定画面に「Tabで送信先を切り替える」と書かれていたが、
+                // SessionWatcher.cycleActiveSession() に呼び出し元が無く未実装だった。
+                .onKeyPress(.tab, phases: .down) { _ in
+                    guard coordinator.watcher.sessions.count > 1 else { return .ignored }
+                    coordinator.watcher.cycleActiveSession()
                     return .handled
                 }
 
@@ -1146,13 +1246,15 @@ struct NotchView: View {
             }
 
             HStack {
-                Text("⌥↑ / ⌥↓ で送信履歴")
+                Text(coordinator.watcher.sessions.count > 1
+                     ? "⌥↑ / ⌥↓ で送信履歴 ・ Tab で送信先切替"
+                     : "⌥↑ / ⌥↓ で送信履歴")
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .foregroundStyle(.white.opacity(0.6))
                 Spacer()
                 Text("下書きは送信先ごとに保存されます")
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .foregroundStyle(.white.opacity(0.6))
             }
 
             if let error = coordinator.lastSendError {
@@ -1173,6 +1275,12 @@ struct NotchView: View {
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 12)
+    }
+
+    /// 送信先が1件のときの読み上げ内容。状態ドットは装飾なので、状態もここに含める。
+    private var activeSessionAccessibilityValue: String {
+        guard let active = coordinator.watcher.activeSession else { return "セッションなし" }
+        return "\(active.info.displayName)、\(active.state.accessibilityDescription)"
     }
 
     /// watcherはletプロパティのため@Bindable経由でBindingを作れず、手動で用意する
@@ -1218,6 +1326,16 @@ struct SessionRow: View {
 
     @State private var isHovering = false
     @State private var isPromptHovering = false
+    @State private var isMuteHovering = false
+    /// このセッションを黙らせているか。
+    /// SessionMuteStore は実行中のみの保持で @Observable の変更通知が
+    /// このビューまで届かないため、押した結果をここへ写して表示に反映する。
+    @State private var isMuted = false
+
+    private var mutedIconOpacity: Double {
+        if isMuted { return isMuteHovering ? 0.9 : 0.55 }
+        return isMuteHovering ? 0.95 : 0.35
+    }
 
     /// 先頭に出す見出し。CLIが起動しているフォルダ名と直近の用件を並べる。
     private var title: String {
@@ -1249,7 +1367,7 @@ struct SessionRow: View {
                             }
                             Text(elapsedText)
                                 .font(.system(size: 10))
-                                .foregroundStyle(.white.opacity(0.35))
+                                .foregroundStyle(.white.opacity(0.6))
                         }
 
                         // 2行目: 直近のユーザー発言
@@ -1257,7 +1375,7 @@ struct SessionRow: View {
                             HStack(spacing: 4) {
                                 Text("あなた：")
                                     .font(.system(size: 11))
-                                    .foregroundStyle(.white.opacity(0.4))
+                                    .foregroundStyle(.white.opacity(0.6))
                                 Text(prompt)
                                     .font(.system(size: 11))
                                     .foregroundStyle(.white.opacity(0.65))
@@ -1277,11 +1395,15 @@ struct SessionRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            // 状態はバッジの文字とゴーストの色で示しているが、行全体を1つのボタンとして
+            // 読み上げるため、状態・エージェント・経過時間を明示的に組み立てる。
+            .accessibilityLabel(rowAccessibilityLabel)
+            .accessibilityHint("このセッションのターミナルのタブへ移動します")
 
             Button(action: onPrompt) {
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(isPromptHovering ? 0.95 : 0.5))
+                    .foregroundStyle(.white.opacity(isPromptHovering ? 0.95 : 0.6))
                     .frame(width: 24, height: 22)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
@@ -1291,6 +1413,30 @@ struct SessionRow: View {
             .buttonStyle(.plain)
             .onHover { isPromptHovering = $0 }
             .help("このセッションへプロンプトを送る")
+            .accessibilityLabel("\(session.info.displayName) へプロンプトを送る")
+
+            // このセッションだけを黙らせる。設定を開かずに、うるさい1本を素早く止められる。
+            Button {
+                AppCoordinator.shared.sessionMutes.toggle(session.info)
+                isMuted = AppCoordinator.shared.sessionMutes.isMuted(session.info)
+            } label: {
+                Image(systemName: isMuted ? "bell.slash.fill" : "bell.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(mutedIconOpacity))
+                    .frame(width: 24, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(.white.opacity(isMuteHovering ? 0.2 : 0.07))
+                    )
+            }
+            .buttonStyle(.plain)
+            .onHover { isMuteHovering = $0 }
+            .help(isMuted ? "このセッションの知らせを再開する" : "このセッションだけ知らせを止める")
+            .accessibilityLabel(
+                isMuted
+                    ? "\(session.info.displayName) の知らせを再開する"
+                    : "\(session.info.displayName) の知らせを止める"
+            )
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -1303,6 +1449,24 @@ struct SessionRow: View {
                 .stroke(.white.opacity(isActive ? 0.2 : 0), lineWidth: 1)
         )
         .onHover { isHovering = $0 }
+        // 一覧を開き直すたびに、実際のミュート状態へ表示を合わせる
+        .onAppear { isMuted = AppCoordinator.shared.sessionMutes.isMuted(session.info) }
+    }
+
+    /// 行全体をひとまとまりで読み上げるための文言
+    private var rowAccessibilityLabel: String {
+        var parts = [
+            session.info.profile.displayName,
+            session.info.displayName,
+            session.state.accessibilityDescription,
+        ]
+        if isActive { parts.append("現在の送信先") }
+        if let prompt = session.lastUserPrompt, !prompt.isEmpty {
+            parts.append("直近の指示 \(prompt)")
+        }
+        if let reply = secondaryText, !reply.isEmpty { parts.append("応答 \(reply)") }
+        parts.append("最終更新 \(elapsedText)")
+        return parts.joined(separator: "、")
     }
 
     /// CLIごとに色を変えて見分けやすくする
@@ -1327,8 +1491,12 @@ struct SessionRow: View {
 
     /// 3行目: 直近のAIの返信。状態が読めなくても記録から出す。
     private var secondaryText: String? {
-        if let line = session.preview.first(where: { !$0.isEmpty }) { return line }
-        if let reply = session.lastReply, !reply.isEmpty { return reply }
+        if let line = session.preview.first(where: { !$0.isEmpty }) {
+            return AppearancePreferences.maskedPreview(line)
+        }
+        if let reply = session.lastReply, !reply.isEmpty {
+            return AppearancePreferences.maskedPreview(reply)
+        }
         // 返信がまだ無いときだけ、監視できていれば状態を出す
         return session.info.isMonitorable ? session.state.displayName : nil
     }
@@ -1380,18 +1548,20 @@ private struct ActivityRow: View {
                         Spacer()
                         Text(entry.createdAt, style: .relative)
                             .font(.system(size: 10))
-                            .foregroundStyle(.white.opacity(0.4))
+                            .foregroundStyle(.white.opacity(0.6))
                     }
                     Text(entry.summary.isEmpty ? entry.agentName : entry.summary)
                         .font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.78))
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        // 終了済みでも内容は読めるべきなので、選択とコピーを許可する。
+                        .textSelection(.enabled)
                 }
 
                 Text(hasLiveSession ? "開く" : "終了済み")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(hasLiveSession ? 0.7 : 0.3))
+                    .foregroundStyle(.white.opacity(hasLiveSession ? 0.75 : 0.55))
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -1401,7 +1571,22 @@ private struct ActivityRow: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(!hasLiveSession)
+        // 以前は .disabled(!hasLiveSession) で行全体を無効化しており、
+        // 終了済みセッションの本文を読むことも選択することもできなかった。
+        // 移動できないことは「終了済み」表示とヒントで伝え、閲覧は妨げない。
+        .allowsHitTesting(hasLiveSession)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint(hasLiveSession
+                           ? "ターミナルのタブへ移動します"
+                           : "このセッションは終了しているため移動できません")
+    }
+
+    private var accessibilityLabel: String {
+        var parts = [entry.kind.displayName, entry.agentName, entry.sessionName]
+        if !entry.summary.isEmpty { parts.append(entry.summary) }
+        if !entry.isRead { parts.append("未読") }
+        if !hasLiveSession { parts.append("終了済み") }
+        return parts.joined(separator: "、")
     }
 
     private var iconName: String {
@@ -1478,7 +1663,7 @@ struct ChoiceOptionRow: View {
                 if isDefault {
                     Text("⏎")
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.45))
+                        .foregroundStyle(.white.opacity(0.6))
                 }
             }
             .padding(.horizontal, 10)
@@ -1495,6 +1680,19 @@ struct ChoiceOptionRow: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
+        // 肯定/否定を緑・赤で塗り分けているが、色だけでは伝わらないため言葉でも示す。
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint("キー \(option.keystroke.uppercased()) でも選べます")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private var accessibilityLabel: String {
+        var parts = ["\(option.number > 0 ? "選択肢\(option.number)、" : "")\(option.label)"]
+        if option.isAffirmative { parts.append("肯定の選択肢") }
+        if option.isNegative { parts.append("否定の選択肢") }
+        if isMultiSelect { parts.append(isSelected ? "チェック済み" : "未チェック") }
+        if isDefault { parts.append("リターンキーの既定") }
+        return parts.joined(separator: "、")
     }
 
     /// 背景の濃さ。選択中とホバー中を段階的に示す。
@@ -1511,6 +1709,9 @@ struct StateDot: View {
     var pulsing = false
     var size: CGFloat = 9
 
+    /// 「視差効果を減らす」が有効なら点滅させない。
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var color: Color {
         switch state {
         case .idle: return .gray
@@ -1522,16 +1723,29 @@ struct StateDot: View {
         }
     }
 
+    /// 点滅を止めている間も「注意が必要」と分かるよう、リングで強調する。
+    private var shouldPulse: Bool { pulsing && !reduceMotion }
+
     var body: some View {
         Circle()
             .fill(color)
             .frame(width: size, height: size)
             .phaseAnimator([1.0, 0.35]) { view, phase in
-                view.opacity(pulsing ? phase : 1)
+                view.opacity(shouldPulse ? phase : 1)
             } animation: { _ in
                 .easeInOut(duration: 0.7)
             }
-            .shadow(color: color.opacity(0.7), radius: pulsing ? 4 : 2)
+            .overlay {
+                if pulsing, reduceMotion {
+                    Circle()
+                        .stroke(color, lineWidth: max(1, size * 0.18))
+                        .padding(-max(1.5, size * 0.28))
+                }
+            }
+            .shadow(color: color.opacity(0.7), radius: shouldPulse ? 4 : 2)
+            // 単独では意味を持たないため、既定では装飾扱い。
+            // 状態を伝える必要がある箇所では呼び出し側がラベルを付ける。
+            .accessibilityHidden(true)
     }
 }
 
@@ -1541,6 +1755,19 @@ struct StateDot: View {
 /// レート制限の消費率を "5h 68% 48m | 7d 40% 6h48m" の形で出す
 struct UsageBadge: View {
     let usage: UsageStats
+    /// 黒いノッチ面の上に置く場合は true。
+    /// ポップオーバーのような明るい背景では、白のハードコードでは読めなくなるため
+    /// システム色へ切り替える。（以前は colorScheme を切り替えていたが、
+    /// `.white` は colorScheme に反応しないため明背景でほぼ不可視だった）
+    var onDarkBackground = true
+
+    private var labelColor: Color {
+        onDarkBackground ? .white.opacity(0.7) : .secondary
+    }
+
+    private var mutedColor: Color {
+        onDarkBackground ? .white.opacity(0.6) : .secondary
+    }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1550,27 +1777,49 @@ struct UsageBadge: View {
                 windowView(label: "5h", window: window)
             }
             if usage.fiveHour != nil, usage.sevenDay != nil {
-                Text("|").font(.system(size: 10)).foregroundStyle(.white.opacity(0.25))
+                Text("|")
+                    .font(.system(size: 10))
+                    .foregroundStyle(onDarkBackground ? .white.opacity(0.45) : .secondary)
+                    .accessibilityHidden(true)
             }
             if let window = usage.sevenDay {
                 windowView(label: "7d", window: window)
             }
         }
         .help("\(agentLabel) のレート制限の消費率と、リセットまでの残り時間")
+        // 「5h 68% 48m」は目で拾う前提の圧縮表記なので、読み上げは言葉に開く。
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(agentLabel) の使用量")
+        .accessibilityValue(usageAccessibilityValue)
+    }
+
+    private var usageAccessibilityValue: String {
+        var parts: [String] = []
+        if let window = usage.fiveHour { parts.append(describe("5時間枠", window)) }
+        if let window = usage.sevenDay { parts.append(describe("7日枠", window)) }
+        return parts.isEmpty ? "取得できていません" : parts.joined(separator: "、")
+    }
+
+    private func describe(_ name: String, _ window: UsageWindow) -> String {
+        var text = "\(name) \(Int(window.usedPercent.rounded()))パーセント使用"
+        if window.isCritical { text += "、残りわずか" }
+        else if window.isWarning { text += "、警告" }
+        if let remaining = window.remainingText() { text += "、リセットまで \(remaining)" }
+        return text
     }
 
     private func windowView(label: String, window: UsageWindow) -> some View {
         HStack(spacing: 3) {
             Text(label)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(labelColor)
             Text("\(Int(window.usedPercent.rounded()))%")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(color(for: window))
             if let remaining = window.remainingText() {
                 Text(remaining)
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(mutedColor)
             }
         }
     }
@@ -1608,8 +1857,7 @@ struct UsagePopover: View {
                     Text(agentLabel(usage.agentID))
                         .font(.system(size: 12, weight: .medium))
                         .frame(width: 84, alignment: .leading)
-                    UsageBadge(usage: usage)
-                        .environment(\.colorScheme, .light)
+                    UsageBadge(usage: usage, onDarkBackground: false)
                 }
             }
             Text("最後に使ったAIの使用量をノッチに表示しています")

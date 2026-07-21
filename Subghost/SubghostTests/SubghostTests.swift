@@ -39,10 +39,19 @@ struct NotchPreferencesTests {
             forKey: "delay", default: 0.15, defaults: defaults) == 0.35)
     }
 
-    @Test func ショートカットの未設定と不正値は既定値へ戻る() {
-        #expect(HotkeyPreset.resolve(storedValue: nil) == .optionSpace)
-        #expect(HotkeyPreset.resolve(storedValue: "unknown") == .optionSpace)
-        #expect(HotkeyPreset.resolve(storedValue: "controlSpace") == .controlSpace)
+    /// ショートカットは3択のプリセットから任意のキー割り当てへ変わった。
+    /// 未設定時に既定へ戻る性質と、不正な保存値を無視する性質は
+    /// HotkeyBindingTests（SettingsPreferencesTests.swift）で引き続き担保している。
+    @Test func ショートカットの未設定は既定値へ戻る() {
+        let suiteName = "SubghostTests.Hotkey.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(HotkeyAction.toggleInput.binding(in: defaults)?.displayText == "⌥Space")
+
+        // 壊れた値が入っていても既定へ倒れる（クラッシュしない）
+        defaults.set(Data("not a binding".utf8), forKey: HotkeyAction.toggleInput.userDefaultsKey)
+        #expect(HotkeyAction.toggleInput.binding(in: defaults) == nil)
     }
 
     @Test func 展開アニメーション時間を安全な範囲へ補正する() {
@@ -374,6 +383,65 @@ struct StateDetectorTests {
         #expect(!preview.contains { $0.contains("Worked for") })
         #expect(!preview.contains { $0.contains("Sonnet") })
         #expect(!preview.contains { $0.contains("auto mode") })
+    }
+
+    /// 実機のClaude Codeの作業中画面（capture-paneの実出力）。
+    /// 動詞はランダムで "esc to interrupt" は出ない。経過時間とトークン数だけが動くが、
+    /// それらは clean() で除去されるため画面は静止して見える。
+    private func 作業中画面(経過: String, トークン: String) -> String {
+        """
+        ⏺ Reading 1 file, running 2 shell commands · 2s…
+          ⎿  $ for s in 0 1 2; do echo hi; done
+
+        ✢ Drizzling… (\(経過) · ↓ \(トークン) tokens)
+          ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
+                                                                 ◉ xhigh · /effort
+        ─────────────────────────────────────────────
+        ❯
+        ─────────────────────────────────────────────
+          Opus 4.8 · effort xhigh in subghost  │  5h [█░░░░░░░░░]  14% → 18:00
+          ⏵⏵ auto mode on (shift+tab to cycle) · gh auth login for PR status
+        """
+    }
+
+    @Test func ランダムな動詞の作業中表示でも完了と誤判定しない() {
+        var detector = makeDetector()
+        let t0 = Date(timeIntervalSince1970: 0)
+        _ = detector.ingest(rawText: "初期画面", at: t0)
+        _ = detector.ingest(rawText: 作業中画面(経過: "35s", トークン: "1.3k"), at: t0.addingTimeInterval(0.8))
+        #expect(detector.state == .thinking)
+
+        // ツール実行の待ち時間中は経過秒数しか動かず、cleanすると前回と同一のテキストになる。
+        // ❯プロンプトは常時表示されているため、busyを取りこぼすと completed へ倒れてしまう。
+        let 静止 = 作業中画面(経過: "58s", トークン: "1.3k")
+        #expect(StateDetector.clean(静止, profile: .claude)
+            == StateDetector.clean(作業中画面(経過: "35s", トークン: "1.3k"), profile: .claude))
+
+        #expect(detector.ingest(rawText: 静止, at: t0.addingTimeInterval(3.0)) == .none)
+        #expect(detector.ingest(rawText: 静止, at: t0.addingTimeInterval(8.0)) == .none)
+        #expect(detector.state == .thinking)
+    }
+
+    @Test func 誤ってcompletedになっても作業中表示で生成中へ戻る() {
+        var detector = makeDetector()
+        let t0 = Date(timeIntervalSince1970: 0)
+        _ = detector.ingest(rawText: "初期画面", at: t0)
+        _ = detector.ingest(rawText: "初期画面\n応答本文です\n❯", at: t0.addingTimeInterval(0.8))
+        _ = detector.ingest(rawText: "初期画面\n応答本文です\n❯", at: t0.addingTimeInterval(3.0))
+        #expect(detector.state == .completed)
+
+        let event = detector.ingest(
+            rawText: 作業中画面(経過: "5s", トークン: "0.2k"), at: t0.addingTimeInterval(4.0))
+        #expect(event == .becameThinking)
+        #expect(detector.state == .thinking)
+    }
+
+    @Test func 作業中の状態表示行はチラ見せに含めない() {
+        let preview = StateDetector.extractPreview(
+            from: 作業中画面(経過: "35s", トークン: "1.3k"), profile: .claude)
+        #expect(!preview.contains { $0.contains("Drizzling") })
+        #expect(!preview.contains { $0.contains("Tip:") })
+        #expect(!preview.contains { $0.contains("/effort") })
     }
 
     @Test func スピナーの変化だけではthinkingにならない() {
@@ -1062,16 +1130,68 @@ struct HookInstallerTests {
 
     @Test func CLIごとにsourceを渡し分ける() {
         // ブリッジは第1引数でどのCLI由来かを判別するため、渡し分けが必須
-        #expect(HookInstaller.hookCommand(scriptPath: "/tmp/b", source: "claude").hasSuffix(
-            "[ -x \"/tmp/b\" ] && \"/tmp/b\" claude; exit 0' # subghost-bridge"))
-        #expect(HookInstaller.hookCommand(scriptPath: "/tmp/b", source: "codex").hasSuffix(
-            "[ -x \"/tmp/b\" ] && \"/tmp/b\" codex; exit 0' # subghost-bridge"))
+        #expect(HookInstaller.hookCommand(scriptPath: "/tmp/b", source: "claude")
+            .hasSuffix("subghost '/tmp/b' 'claude' '5' # subghost-bridge"))
+        #expect(HookInstaller.hookCommand(scriptPath: "/tmp/b", source: "codex")
+            .hasSuffix("subghost '/tmp/b' 'codex' '5' # subghost-bridge"))
 
         // 実際に登録されるコマンドにも反映されていること
         let codex = HookInstaller.addHooks(to: [:], scriptPath: "/tmp/b", target: .codex)
         let hooks = codex["hooks"] as? [String: Any]
         let inner = (hooks?["Stop"] as? [[String: Any]])?.first?["hooks"] as? [[String: Any]]
-        #expect((inner?.first?["command"] as? String)?.contains("\" codex;") == true)
+        #expect((inner?.first?["command"] as? String)?.contains("'codex'") == true)
+    }
+
+    @Test func パスに引用符が含まれてもコマンドが壊れない() {
+        // ホームディレクトリ名にアポストロフィが入りうる。埋め込むと構文が壊れ、
+        // 毎イベントでCLIがフックエラーを出すことになる。
+        let command = HookInstaller.hookCommand(scriptPath: "/Users/o'brien/b", source: "claude")
+        #expect(command.contains("'/Users/o'\\''brien/b'"))
+        // 本文へは埋め込まず、引数として渡していること
+        #expect(command.contains("[ -x \"$1\" ]"))
+        #expect(!command.contains("[ -x \"/Users/"))
+    }
+
+    @Test func ブリッジへ渡す待ち時間はイベントの種類に合わせる() {
+        // 承認以外が長時間ぶら下がると、Subghostが応答不能なときCLIが待たされる
+        let root = HookInstaller.addHooks(to: [:], scriptPath: "/tmp/b", target: .claude)
+        let hooks = root["hooks"] as? [String: Any]
+
+        func command(_ event: String) -> String? {
+            let matchers = hooks?[event] as? [[String: Any]]
+            let inner = matchers?.first?["hooks"] as? [[String: Any]]
+            return inner?.first?["command"] as? String
+        }
+        #expect(command("PermissionRequest")?
+            .contains("'\(HookInstaller.permissionTimeoutSeconds)'") == true)
+        #expect(command("SessionStart")?
+            .contains("'\(HookInstaller.normalTimeoutSeconds)'") == true)
+    }
+
+    @Test func 形が違う既存フックは書き換えず残す() {
+        // 想定外の形を空配列で置き換えると、ユーザーが自分で書いたフックを消してしまう
+        let root: [String: Any] = ["hooks": ["SessionStart": "ユーザーが書いた想定外の値"]]
+        let patched = HookInstaller.addHooks(to: root, scriptPath: "/tmp/b", target: .claude)
+        let hooks = patched["hooks"] as? [String: Any]
+        #expect(hooks?["SessionStart"] as? String == "ユーザーが書いた想定外の値")
+        // 他のイベントには通常どおり追加されること
+        #expect(hooks?["Stop"] != nil)
+    }
+
+    @Test func 既存のフックを残したまま追加する() {
+        let root: [String: Any] = ["hooks": [
+            "SessionStart": [["hooks": [["type": "command", "command": "echo ユーザーのフック"]]]],
+        ]]
+        let patched = HookInstaller.addHooks(to: root, scriptPath: "/tmp/b", target: .claude)
+        let matchers = (patched["hooks"] as? [String: Any])?["SessionStart"] as? [[String: Any]]
+        #expect(matchers?.count == 2)
+
+        // 解除するとユーザーのフックだけが残る
+        let cleaned = HookInstaller.removeHooks(from: patched)
+        let remaining = (cleaned["hooks"] as? [String: Any])?["SessionStart"] as? [[String: Any]]
+        let inner = remaining?.first?["hooks"] as? [[String: Any]]
+        #expect(remaining?.count == 1)
+        #expect(inner?.first?["command"] as? String == "echo ユーザーのフック")
     }
 
     @Test func 承認だけ長いタイムアウトを設定する() {
@@ -1446,13 +1566,45 @@ struct ShellIntegrationTests {
         // agyy="agy --dangerously-skip-permissions" は既存のまま残し、
         // 展開先のagyだけを包むことでオプションを失わない。
         #expect(!body.contains("agyy()"))
-        // 非対話・tmux内・tmux未導入では素通しする条件が入っていること
-        #expect(body.contains("[ -n \"$TMUX\" ]"))
-        #expect(body.contains("[ ! -t 1 ]"))
+        // tmux内・tmux未導入では素通しする条件が入っていること
+        #expect(body.contains("[ -z \"$TMUX\" ] || return 1"))
+        #expect(body.contains("command -v tmux"))
         // Subghost未起動（監視ソケットが無い）ときも素通しすること。
         // これがないとアプリを終了・削除しても claude が tmux 起動に化けたまま残る。
-        #expect(body.contains("[ ! -S \"$_subghost_sock\" ]"))
+        #expect(body.contains("[ -S \"$_subghost_sock\" ] || return 1"))
         #expect(body.contains(HookInstaller.socketPath))
+    }
+
+    @Test func 端末が揃っていなければtmuxを経由しない() {
+        // 入力・出力・エラーのどれかが端末でないと tmux は
+        // "open terminal failed" で失敗し、CLIごと起動できなくなる。
+        // 例: `claude < /dev/null`、エディタ組み込み端末、CI。
+        let body = ShellIntegration.scriptBody()
+        #expect(body.contains("[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || return 1"))
+    }
+
+    @Test func 画面制御できない端末ではtmuxを経由しない() {
+        // TERM=dumb では tmux が "terminal does not support clear" で失敗する
+        let body = ShellIntegration.scriptBody()
+        #expect(body.contains("\"\" | dumb | unknown | emacs) return 1"))
+    }
+
+    @Test func 対話セッションを開かない使い方は包まない() {
+        // 包むと tmux 終了時に画面が復元され、出力が消えてしまう
+        let body = ShellIntegration.scriptBody()
+        #expect(body.contains("-p | --print | -v | --version | -h | --help"))
+        #expect(body.contains("_subghost_is_interactive_use"))
+    }
+
+    @Test func tmuxが失敗しても必ず素の実行へ戻す() {
+        // ここが最重要。tmux 側の失敗でCLIが起動しなくなることは許されない。
+        let body = ShellIntegration.scriptBody()
+        // 切り離しで作る = 失敗時点ではCLIは未実行なので二重実行にならない
+        #expect(body.contains("tmux new-session -d -s \"$_sg_sess\""))
+        // 繋げなかったときはセッションを畳んでから素の実行へ落ちる
+        #expect(body.contains("tmux kill-session -t \"$_sg_sess\""))
+        // 判定を通らなかった場合も含め、最後は必ず素の実行に到達する
+        #expect(body.contains("command \"$_sg_cmd\" \"$@\""))
     }
 
     @Test func カスタムエイリアス名も対象コマンドとして包む() {
@@ -1576,6 +1728,22 @@ struct UsageParserTests {
         #expect(UsageParser.parse(Data("壊れている".utf8)) == nil)
     }
 
+    @Test func 一日以上残っていれば日で表す() {
+        // 7日枠は「150h」のような表示になりやすく、日に直さないと読み取れない
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let window = UsageWindow(
+            usedPercent: 6,
+            resetsAt: now.addingTimeInterval(TimeInterval(6 * 86_400 + 6 * 3600 + 30 * 60)))
+        #expect(window.remainingText(now: now) == "6d6h")
+    }
+
+    @Test func 一日未満なら時分のまま表す() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let window = UsageWindow(
+            usedPercent: 6, resetsAt: now.addingTimeInterval(TimeInterval(23 * 3600 + 59 * 60)))
+        #expect(window.remainingText(now: now) == "23h59m")
+    }
+
     @Test func リセット済みなら残り時間を出さない() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let window = UsageWindow(usedPercent: 5, resetsAt: Date(timeIntervalSince1970: 999_000))
@@ -1607,6 +1775,63 @@ struct UsageParserTests {
         let script = HookInstaller.statuslineScript(
             socketPath: "/tmp/s.sock", next: "echo 'hello world'")
         #expect(script.contains("'\\''"))
+    }
+
+    @Test func statuslineは包みが消えても元のコマンドへ落ちる() {
+        // ~/.subghost を手で消されても、settings.json だけで元へ戻れること。
+        // パスをそのまま書くと、存在しないコマンドが残りstatuslineが死んだままになる。
+        let command = HookInstaller.statuslineCommand(
+            scriptPath: "/tmp/subghost-statusline", previous: "bash ~/.claude/statusline.sh")
+        #expect(command.contains("[ -x \"$1\" ] && exec \"$1\""))
+        #expect(command.contains("[ -n \"$2\" ] && exec /bin/sh -c \"$2\""))
+        #expect(command.contains("exit 0"))
+        #expect(command.hasSuffix("# \(HookInstaller.marker)"))
+    }
+
+    @Test func 元のstatuslineが無ければフォールバックも何もしない() {
+        let command = HookInstaller.statuslineCommand(
+            scriptPath: "/tmp/subghost-statusline", previous: nil)
+        // 空文字なので [ -n "$2" ] が偽になり、そのまま exit 0 する
+        #expect(command.contains("subghost '/tmp/subghost-statusline' ''"))
+    }
+
+    @Test func 埋め込んだ元コマンドを読み戻せる() {
+        // 解除時に保存ファイルが失われていても、これがあれば元へ戻せる
+        for original in ["bash ~/.claude/statusline.sh", "echo 'hello world'", "a\"b$c"] {
+            let command = HookInstaller.statuslineCommand(
+                scriptPath: "/tmp/s", previous: original)
+            #expect(HookInstaller.embeddedPreviousStatusline(in: command) == original)
+        }
+    }
+
+    @Test func 元コマンドが無い場合は読み戻しもnilになる() {
+        let command = HookInstaller.statuslineCommand(scriptPath: "/tmp/s", previous: nil)
+        #expect(HookInstaller.embeddedPreviousStatusline(in: command) == nil)
+        // 目印の無い（ユーザー自身の）コマンドは対象外
+        #expect(HookInstaller.embeddedPreviousStatusline(in: "bash statusline.sh") == nil)
+    }
+
+    @Test func 読み返せない設定は書き込まずに弾く() {
+        // 壊れた settings.json はCLIの起動そのものを妨げる。書く前に必ず確かめる。
+        // JSONSerialization.data はこの入力に対して Swift の error ではなく NSException を
+        // 投げるため、事前に isValidJSONObject で弾かないとアプリごと落ちる。
+        #expect(throws: HookInstallError.self) {
+            // JSONにできない値（Date）が混じった設定
+            try HookInstaller.encodedSettings(["statusLine": Date()], fileName: "settings.json")
+        }
+        // 正常な設定はそのまま読み返せること
+        let data = try? HookInstaller.encodedSettings(
+            HookInstaller.addHooks(to: ["model": "opus"], scriptPath: "/tmp/b"),
+            fileName: "settings.json")
+        let root = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        #expect(root?["model"] as? String == "opus")
+        #expect(root?["hooks"] != nil)
+    }
+
+    @Test func 引用符を含む引数列を読み戻せる() {
+        let quoted = ["a", "o'brien", "", "空白 と \"引用符\""]
+            .map(HookInstaller.shellQuoted).joined(separator: " ")
+        #expect(HookInstaller.singleQuotedArguments(in: quoted) == ["a", "o'brien", "", "空白 と \"引用符\""])
     }
 }
 

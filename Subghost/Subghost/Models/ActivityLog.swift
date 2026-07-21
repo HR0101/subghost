@@ -8,7 +8,7 @@
 import Foundation
 import Observation
 
-nonisolated enum ActivityKind: String, Codable, Sendable {
+nonisolated enum ActivityKind: String, Codable, Sendable, CaseIterable {
     case completed
     case error
     case approval
@@ -21,6 +21,36 @@ nonisolated enum ActivityKind: String, Codable, Sendable {
         case .approval: return "承認待ち"
         case .question: return "質問"
         }
+    }
+}
+
+// MARK: - 履歴の設定
+
+nonisolated enum ActivityPreferences {
+    static let limitKey = "activityHistoryLimit"
+    static let recordingEnabledKey = "activityRecordingEnabled"
+
+    static let defaultLimit = 100
+    static let limitRange: ClosedRange<Int> = 20...500
+
+    /// 保持する件数。古いものから捨てる。
+    static var limit: Int {
+        let stored = Int(NotchPreferences.number(forKey: limitKey, default: Double(defaultLimit)))
+        return min(max(stored, limitRange.lowerBound), limitRange.upperBound)
+    }
+
+    /// 履歴を残すかどうか（オフにすると以後の記録を止める）
+    static var isRecordingEnabled: Bool {
+        NotchPreferences.bool(forKey: recordingEnabledKey, default: true)
+    }
+
+    /// 種類ごとに記録するかどうかの設定キー
+    static func kindKey(_ kind: ActivityKind) -> String {
+        "activityHistory.\(kind.rawValue).enabled"
+    }
+
+    static func records(_ kind: ActivityKind) -> Bool {
+        NotchPreferences.bool(forKey: kindKey(kind), default: true)
     }
 }
 
@@ -67,28 +97,37 @@ final class ActivityStore {
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let storageKey: String
-    @ObservationIgnored private let maximumCount: Int
+    /// テストから固定値を渡すための上書き。通常は設定値（ActivityPreferences.limit）を使う。
+    @ObservationIgnored private let fixedMaximumCount: Int?
+
+    /// 実際に適用する保持件数。設定画面で変えた値が次の記録から効くよう、都度読む。
+    private var maximumCount: Int {
+        max(fixedMaximumCount ?? ActivityPreferences.limit, 1)
+    }
 
     init(
         defaults: UserDefaults = .standard,
         storageKey: String = "activityHistory",
-        maximumCount: Int = 100
+        maximumCount: Int? = nil
     ) {
         self.defaults = defaults
         self.storageKey = storageKey
-        self.maximumCount = max(maximumCount, 1)
+        self.fixedMaximumCount = maximumCount.map { max($0, 1) }
         if let data = defaults.data(forKey: storageKey),
            let decoded = try? JSONDecoder().decode([ActivityEntry].self, from: data) {
-            self.entries = Array(decoded.prefix(self.maximumCount))
+            self.entries = decoded
         } else {
             self.entries = []
         }
+        trimIfNeeded()
     }
 
     var unreadCount: Int { entries.lazy.filter { !$0.isRead }.count }
 
     func record(kind: ActivityKind, session: SessionInfo, preview: [String]) {
-        let summary = preview
+        // 記録そのものを止めている場合と、この種類だけ除外している場合
+        guard ActivityPreferences.isRecordingEnabled, ActivityPreferences.records(kind) else { return }
+        let summary = AppearancePreferences.maskedPreview(preview)
             .prefix(3)
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -105,10 +144,23 @@ final class ActivityStore {
 
     func append(_ entry: ActivityEntry) {
         entries.insert(entry, at: 0)
-        if entries.count > maximumCount {
-            entries.removeLast(entries.count - maximumCount)
-        }
+        trimIfNeeded()
         persist()
+    }
+
+    /// 保持件数を超えたぶんを古い側から捨てる。
+    /// 設定で件数を減らしたときにも、次の記録を待たずに縮むよう独立させている。
+    func trimIfNeeded() {
+        let limit = maximumCount
+        guard entries.count > limit else { return }
+        entries.removeLast(entries.count - limit)
+    }
+
+    /// 設定画面で保持件数を変えたときに呼ぶ
+    func applyRetentionLimit() {
+        let before = entries.count
+        trimIfNeeded()
+        if entries.count != before { persist() }
     }
 
     func markRead(_ id: UUID) {

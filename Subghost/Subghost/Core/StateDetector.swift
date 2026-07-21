@@ -78,7 +78,8 @@ nonisolated struct StateDetector: Sendable {
         }
 
         // 実行中を示す表示が出ていれば生成中とみなす
-        if Self.matches(pattern: profile.busyPattern, in: lastCleanedText) {
+        if Self.matches(
+            pattern: profile.busyPattern, in: Self.stripDecoration(rawText, profile: profile)) {
             state = .thinking
             return .becameThinking
         }
@@ -90,6 +91,9 @@ nonisolated struct StateDetector: Sendable {
     /// capture-paneの生テキストを取り込み、状態遷移イベントを返す。
     mutating func ingest(rawText: String, at now: Date) -> DetectorEvent {
         let cleaned = Self.clean(rawText, profile: profile)
+        // 作業中表示の判定には、経過時間やトークン数を残したテキストを使う（stripDecoration参照）
+        let isBusy = Self.matches(
+            pattern: profile.busyPattern, in: Self.stripDecoration(rawText, profile: profile))
 
         // 初回は基準値として保存するだけ（起動時に thinking と誤判定しない）
         guard hasBaseline else {
@@ -147,8 +151,11 @@ nonisolated struct StateDetector: Sendable {
 
         switch state {
         case .idle, .error, .completed, .awaitingApproval, .awaitingAnswer:
-            // 出力が伸長 → thinking (設計書 5.2)
-            if changed {
+            // 出力が伸長、または作業中表示が出ている → thinking (設計書 5.2)
+            //
+            // 変化が無くても busy を見るのは、経過時間だけが動く画面（ツール実行の待ち等）で
+            // 一度 completed と誤判定してしまった場合に、自力で生成中へ戻れるようにするため。
+            if changed || isBusy {
                 state = .thinking
                 completedAt = nil
                 return .becameThinking
@@ -169,9 +176,7 @@ nonisolated struct StateDetector: Sendable {
                 return .becameError(preview: Self.extractPreview(from: rawText, profile: profile))
             }
             // busy表示が残っている間は thinking を維持
-            if Self.matches(pattern: profile.busyPattern, in: cleaned) {
-                return .none
-            }
+            if isBusy { return .none }
             // N秒変化なし＋プロンプト記号 → completed
             if !changed,
                let lastChange = lastChangeAt,
@@ -224,28 +229,41 @@ nonisolated struct StateDetector: Sendable {
 
     // MARK: - テキスト処理 (設計書 5.3)
 
-    /// スピナー・制御文字を除去し、比較用に正規化する
-    static func clean(_ text: String, profile: CLIProfile) -> String {
-        var result = text
+    /// ANSIエスケープとスピナー装飾だけを落とす。
+    ///
+    /// `clean` と違い、経過秒数やトークン数は残す。実機のClaude Codeの作業中表示は
+    /// `✢ Drizzling… (2m 35s · ↓ 10.5k tokens)` のように動詞がランダムに変わるため、
+    /// 文言ではなく「…(経過時間" や "↓ トークン数" という形そのものが目印になる。
+    /// これを `clean` で消したテキストに対して busyPattern を当てると拾えない。
+    static func stripDecoration(_ text: String, profile: CLIProfile) -> String {
         // 残存ANSIエスケープの除去（capture-pane -p でも念のため）
-        result = result.replacingOccurrences(
+        var result = text.replacingOccurrences(
             of: #"\x{1B}\[[0-9;?]*[a-zA-Z]"#, with: "", options: .regularExpression)
         // プロファイル定義のスピナー除去
         if !profile.spinnerPattern.isEmpty {
             result = result.replacingOccurrences(
                 of: profile.spinnerPattern, with: "", options: .regularExpression)
         }
+        return trimTrailing(result)
+    }
+
+    /// スピナー・制御文字を除去し、比較用に正規化する
+    static func clean(_ text: String, profile: CLIProfile) -> String {
+        var result = stripDecoration(text, profile: profile)
         // 経過秒数など時々刻々変わる表示を無視（例: "(12s"、"3.2s)"）
         result = result.replacingOccurrences(
             of: #"\(?\d+(\.\d+)?s\)?"#, with: "", options: .regularExpression)
         result = result.replacingOccurrences(
             of: #"\d+(\.\d+)?k? tokens"#, with: "", options: .regularExpression)
-        // 各行の末尾空白を落とし、末尾の空行を除去
-        let lines = result.split(separator: "\n", omittingEmptySubsequences: false)
+        return trimTrailing(result)
+    }
+
+    /// 各行の末尾空白を落とし、末尾の空行を除去する
+    private static func trimTrailing(_ text: String) -> String {
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-        var trimmed = lines
-        while let last = trimmed.last, last.isEmpty { trimmed.removeLast() }
-        return trimmed.joined(separator: "\n")
+        while let last = lines.last, last.isEmpty { lines.removeLast() }
+        return lines.joined(separator: "\n")
     }
 
     static func matches(pattern: String, in text: String) -> Bool {
@@ -258,10 +276,18 @@ nonisolated struct StateDetector: Sendable {
         return lines.suffix(count).joined(separator: "\n")
     }
 
+    /// 本文ではなく、CLIが常設しているヒント・モード表示の行。
+    /// 応答のチラ見せに混ぜると「途中の状態表示」が答えとして出てしまう。
+    static let statusNoisePattern =
+        #"(?i)^\?? ?(for shortcuts|shift\+tab|tab to|auto-accept|bypass|plan mode"#
+        // 所要時間の行は完了後も残るが本文ではない。動詞はランダムなので形で弾く
+        // （実機: "Worked for 6m 23s" / "Sautéed for 9s"）
+        + #"|context left|tokens|/help|esc to|tip:)|^\S+ for \d|/effort\s*$"#
+
     /// 最終応答のチラ見せ用テキストを抽出する (設計書 4.2)
     /// 入力ボックス/プロンプト行より上の、直近の本文ブロックを最大4行返す。
     static func extractPreview(from rawText: String, profile: CLIProfile, maxLines: Int = 4) -> [String] {
-        let boxChars = CharacterSet(charactersIn: "╭╮╰╯│─┌┐└┘├┤┬┴┼═║╔╗╚╝▔▁")
+        let boxChars = CharacterSet(charactersIn: "╭╮╰╯│─┌┐└┘├┤┬┴┼═║╔╗╚╝▔▁⎿◉")
         let lines = rawText.split(separator: "\n", omittingEmptySubsequences: false)
             .map { line -> String in
                 // 枠線・スピナーを除去
@@ -286,7 +312,7 @@ nonisolated struct StateDetector: Sendable {
             let isNoise = line.isEmpty
                 || matches(pattern: profile.promptPattern, in: line)
                 || matches(pattern: profile.busyPattern, in: line)
-                || matches(pattern: #"(?i)^\?? ?(for shortcuts|shift\+tab|tab to|auto-accept|bypass|plan mode|context left|tokens|/help|esc to|worked for)"#, in: line)
+                || matches(pattern: statusNoisePattern, in: line)
             if !inBody {
                 if isNoise { continue }
                 inBody = true

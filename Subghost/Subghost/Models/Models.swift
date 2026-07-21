@@ -28,6 +28,20 @@ nonisolated enum AIState: String, Codable, Sendable {
         }
     }
 
+    /// VoiceOverへ読み上げる状態名。
+    /// 画面上のバッジは短さを優先して英語のままだが、日本語UIの読み上げに英単語が
+    /// 混ざると意味が伝わらないため、支援技術にはこちらを渡す。
+    var accessibilityDescription: String {
+        switch self {
+        case .idle: return "待機中"
+        case .thinking: return "生成中"
+        case .awaitingApproval: return "承認待ち"
+        case .awaitingAnswer: return "質問への回答待ち"
+        case .completed: return "完了"
+        case .error: return "エラー"
+        }
+    }
+
     /// ユーザーの応答がないと先に進まない状態か
     var needsUserResponse: Bool {
         self == .awaitingApproval || self == .awaitingAnswer
@@ -73,7 +87,12 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
         // 実機のClaude Codeは「横罫線＋❯」入力UI。単独の ❯ 行にもマッチさせる
         promptPattern: #"(^|\n)\s*(│\s*)?(>|❯)"#,
         spinnerPattern: #"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✻✽✢·✳*]+"#,
-        busyPattern: #"esc to interrupt|Thinking…|Compacting|Wrangling|Herding|Simmering"#,
+        // 実機の作業中表示は `✢ Drizzling… (2m 35s · ↓ 10.5k tokens)` で、
+        // 動詞は毎回ランダムに変わり "esc to interrupt" も出ない。文言を並べても追随できないため、
+        // 「…（経過時間」「経過秒数…」「↓ トークン数」という形そのものを目印にする。
+        // (StateDetector.stripDecoration のテキストに対して当てること。cleanでは数字が消える)
+        busyPattern: #"esc to interrupt|…\s*\(\d|\d+(\.\d+)?s…|↓\s*\d+(\.\d+)?k?\s*tokens"#
+            + #"|Thinking…|Compacting"#,
         errorPattern: #"(?i)(^|\n)\s*(Error:|API Error|✗ |fatal:|Traceback \(most recent call last\))"#,
         approvalPattern: commonApprovalPattern
     )
@@ -85,7 +104,7 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
         executableNames: ["codex"],
         promptPattern: #"(^|\n)\s*(▌|›|❯|>)\s*"#,
         spinnerPattern: #"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+"#,
-        busyPattern: #"Esc to interrupt|Working|Thinking"#,
+        busyPattern: #"Esc to interrupt|Working|Thinking|…\s*\(\d|\d+(\.\d+)?s…"#,
         errorPattern: #"(?i)(^|\n)\s*(error:|✗ |stream error|fatal:)"#,
         approvalPattern: commonApprovalPattern
     )

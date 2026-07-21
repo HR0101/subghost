@@ -11,12 +11,17 @@
 //  展開後に同じ関数を通るため、エイリアス側のオプションを保持できる。
 //
 //  安全設計:
-//  - ~/.zshrc は書き換え前にバックアップする
+//  最優先の要件は「どんな状況でも元のCLIが必ず起動すること」。
+//  ここはユーザーのシェルに常駐し、失敗するとCLIごと起動できなくなるため、
+//  機能が働かないことより壊れないことを優先する。
+//
+//  - ~/.zshrc は書き換え前にバックアップする。シンボリックリンク（dotfiles管理）
+//    の場合は実体へ書き、リンクを壊さない
 //  - Subghostが追加した行は目印で囲み、解除時にその範囲だけを取り除く
-//  - 包む処理は「Subghost未起動・非対話・tmux内・tmux未導入」のときは何もせず
-//    素通しする（claude --version などが壊れない）。Subghostの起動判定は
-//    監視ソケットの有無で行い、フック(subghost-bridge)と同じ基準に揃える。
-//    これによりアプリを終了・削除しても claude 等の起動は元のまま壊れない。
+//  - tmuxへ入れる条件は事前に厳しく判定する。判定を1つでも満たさなければ素通しする
+//  - 判定を通ってもtmuxが失敗しうるので、必ず素の実行へ戻す経路を用意する。
+//    セッションは切り離し(-d)で作ってから繋ぐ。作成に失敗した時点では
+//    CLIは一度も実行されていないため、二重実行の心配なく戻せる
 //
 
 import Foundation
@@ -38,6 +43,15 @@ nonisolated enum ShellIntegration {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".zshrc")
     }
 
+    /// 実際に書き込む先。
+    /// ~/.zshrc をdotfilesリポジトリへのシンボリックリンクにしている人は多く、
+    /// 原子的書き込み（一時ファイル＋rename）はリンクを実ファイルで置き換えてしまう。
+    /// 実体を解決してから書くことで、ユーザーのdotfiles管理を壊さない。
+    static var zshrcWriteURL: URL {
+        guard FileManager.default.fileExists(atPath: zshrcURL.path) else { return zshrcURL }
+        return zshrcURL.resolvingSymlinksInPath()
+    }
+
     // MARK: - スクリプト本体
 
     /// 対象コマンドを包むシェル関数を生成する。
@@ -54,17 +68,63 @@ nonisolated enum ShellIntegration {
         return """
         #!/bin/sh
         # Subghost: AI CLIを対話起動のときだけ自動でtmux内に入れる。
-        # Subghostが動いていなければ（監視ソケットが無ければ）何もせず素通しするので、
-        # アプリを終了・削除しても claude などの起動は元のまま壊れない。
+        #
+        # この関数はユーザーのシェルに常駐するため、何があっても元のCLIが
+        # 起動しなくなることは許されない。tmuxを経由する条件は事前に厳しく判定し、
+        # それでも失敗したときは必ず素の実行へ戻す。
         _subghost_sock="\(HookInstaller.socketPath)"
+
+        # tmuxへ入れてよい状況かを判定する（0を返したときだけ包む）
+        _subghost_can_wrap() {
+            # Subghost未起動 / 既にtmux内 / tmux未導入
+            [ -S "$_subghost_sock" ] || return 1
+            [ -z "$TMUX" ] || return 1
+            command -v tmux >/dev/null 2>&1 || return 1
+            # tmuxが画面に繋ぐには入力・出力・エラーのすべてが端末である必要がある。
+            # 1つでも欠けると "open terminal failed" でCLIごと起動できなくなる。
+            # 例: `claude < /dev/null`、エディタ組み込み端末、CI。
+            [ -t 0 ] && [ -t 1 ] && [ -t 2 ] || return 1
+            # 画面制御ができない端末ではtmuxは起動できない
+            case "${TERM:-}" in
+                "" | dumb | unknown | emacs) return 1 ;;
+            esac
+            return 0
+        }
+
+        # 対話セッションを開かない使い方は包まない。
+        # 包むとtmux終了時に画面が復元され、出力が消えてしまう（--version 等）。
+        _subghost_is_interactive_use() {
+            for _sg_arg in "$@"; do
+                case "$_sg_arg" in
+                    -p | --print | -v | --version | -h | --help \\
+                    | doctor | update | mcp | config | install | setup-token | migrate-installer)
+                        return 1 ;;
+                esac
+            done
+            return 0
+        }
+
         _subghost_run() {
             _sg_cmd="$1"; shift
-            # Subghost未起動 / 既にtmux内 / tmux未導入 / 非対話（パイプ等）はそのまま実行する
-            if [ ! -S "$_subghost_sock" ] || [ -n "$TMUX" ] || ! command -v tmux >/dev/null 2>&1 || [ ! -t 1 ]; then
+            if ! _subghost_can_wrap || ! _subghost_is_interactive_use "$@"; then
                 command "$_sg_cmd" "$@"
-            else
-                tmux new-session "$_sg_cmd" "$@"
+                return $?
             fi
+
+            # 切り離した状態で作る。ここが失敗した時点ではCLIは一度も実行されて
+            # いないので、二重実行の心配なく素の実行へ戻せる。
+            _sg_sess="ai-$_sg_cmd-$$"
+            if tmux new-session -d -s "$_sg_sess" "$_sg_cmd" "$@" 2>/dev/null; then
+                tmux attach-session -t "$_sg_sess" 2>/dev/null && return 0
+                # 繋げなかった。セッションが残っていればCLIはtmux内で動いているので、
+                # 畳んでから素の実行へ戻す（残っていなければ既に実行・終了済み）。
+                if tmux has-session -t "$_sg_sess" 2>/dev/null; then
+                    tmux kill-session -t "$_sg_sess" 2>/dev/null
+                else
+                    return 0
+                fi
+            fi
+            command "$_sg_cmd" "$@"
         }
         \(functions)
         """
@@ -98,7 +158,7 @@ nonisolated enum ShellIntegration {
         try backupZshrc()
         let separator = current.isEmpty || current.hasSuffix("\n") ? "" : "\n"
         let updated = current + separator + "\n" + sourceLine() + "\n"
-        try updated.write(to: zshrcURL, atomically: true, encoding: .utf8)
+        try updated.write(to: zshrcWriteURL, atomically: true, encoding: .utf8)
     }
 
     static func uninstall() throws {
@@ -106,7 +166,7 @@ nonisolated enum ShellIntegration {
               current.contains(beginMarker) else { return }
         try backupZshrc()
         let cleaned = removeBlock(from: current)
-        try cleaned.write(to: zshrcURL, atomically: true, encoding: .utf8)
+        try cleaned.write(to: zshrcWriteURL, atomically: true, encoding: .utf8)
         try? FileManager.default.removeItem(atPath: scriptPath)
     }
 

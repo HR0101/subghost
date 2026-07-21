@@ -10,6 +10,34 @@
 
 import Foundation
 
+// MARK: - 警戒度のしきい値
+
+/// 何%から色を変えて知らせるか。
+/// 5時間枠を意識して使う人ほど、余裕のあるうちに気づきたい度合いが違うため設定へ出す。
+nonisolated enum UsagePreferences {
+    static let warningKey = "usageWarningThreshold"
+    static let criticalKey = "usageCriticalThreshold"
+
+    static let defaultWarning: Double = 70
+    static let defaultCritical: Double = 90
+    static var thresholdRange: ClosedRange<Double> { 50...99 }
+
+    static var warningThreshold: Double {
+        let stored = NotchPreferences.number(forKey: warningKey, default: defaultWarning)
+        return clamp(stored)
+    }
+
+    /// 警告より低い値が入っていても破綻しないよう、必ず警告以上になるようにする
+    static var criticalThreshold: Double {
+        let stored = NotchPreferences.number(forKey: criticalKey, default: defaultCritical)
+        return max(clamp(stored), warningThreshold)
+    }
+
+    private static func clamp(_ value: Double) -> Double {
+        min(max(value, thresholdRange.lowerBound), thresholdRange.upperBound)
+    }
+}
+
 // MARK: - 1つの制限枠
 
 nonisolated struct UsageWindow: Sendable, Equatable {
@@ -18,20 +46,25 @@ nonisolated struct UsageWindow: Sendable, Equatable {
     /// リセット時刻。取得できない場合は nil。
     let resetsAt: Date?
 
-    /// リセットまでの残り時間を "48m" / "6h48m" の形にする
+    /// リセットまでの残り時間を "48m" / "6h48m" / "6d6h" の形にする。
+    /// 7日枠は残りが100時間を超えることがあり、時間だけで出すと桁が読み取りにくい。
+    /// 1日以上なら「日+時間」に切り替え、分は落とす（その粒度は意味を持たない）。
     func remainingText(now: Date = Date()) -> String? {
         guard let resetsAt else { return nil }
         let seconds = Int(resetsAt.timeIntervalSince(now))
         guard seconds > 0 else { return nil }
 
+        let days = seconds / 86_400
         let hours = seconds / 3600
         let minutes = (seconds % 3600) / 60
+
+        if days > 0 { return "\(days)d\(hours % 24)h" }
         return hours > 0 ? "\(hours)h\(minutes)m" : "\(minutes)m"
     }
 
-    /// 残量に応じた警戒度（表示色の判断に使う）
-    var isCritical: Bool { usedPercent >= 90 }
-    var isWarning: Bool { usedPercent >= 70 }
+    /// 残量に応じた警戒度（表示色の判断に使う）。しきい値は設定で変えられる。
+    var isCritical: Bool { usedPercent >= UsagePreferences.criticalThreshold }
+    var isWarning: Bool { usedPercent >= UsagePreferences.warningThreshold }
 }
 
 // MARK: - 使用量全体

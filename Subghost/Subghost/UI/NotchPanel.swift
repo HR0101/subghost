@@ -52,7 +52,7 @@ extension NSScreen {
             from: screens.map(\.descriptor), preference: preference)
         else { return nil }
 
-        if UserDefaults.standard.bool(forKey: "logDisplaySelection") {
+        if DiagnosticsPreferences.logDisplaySelection {
             let detail = screens.map {
                 "\($0.localizedName)[notch=\($0.hasPhysicalNotch) main=\($0 == NSScreen.main) safeTop=\($0.safeAreaInsets.top)]"
             }.joined(separator: " / ")
@@ -550,14 +550,18 @@ final class NotchPanelController {
 enum NotchLayout {
     static let sideWidth: CGFloat = 44      // コンパクト時、ノッチ左右のアイコン領域幅
     static let compactCornerRadius: CGFloat = 12
-    static let cornerRadius: CGFloat = 28   // 展開時の緩やかな下角丸
+    /// 展開時の緩やかな下角丸。好みが分かれるため設定から変えられる。
+    static var cornerRadius: CGFloat { AppearancePreferences.expandedCornerRadius }
     /// 四分円に近い、側面と底面の接線が連続するベジェ制御係数。
     static let cornerBezierControl: CGFloat = 0.447715
     static let topShoulderWidth: CGFloat = 12 // 画面上端とつなぐ外向きのカーブ
     static let collapseAnimationDuration: TimeInterval = 0.32
     /// セッションが増えてもノッチが画面下まで伸びないよう、一覧部分だけを制限する。
     static let sessionRowEstimatedHeight: CGFloat = 68
-    static let sessionsListMaxHeight: CGFloat = 330
+    /// 一覧に一度に見せる件数から高さを決める。これを超えるぶんはスクロールになる。
+    static var sessionsListMaxHeight: CGFloat {
+        CGFloat(AppearancePreferences.sessionListMaxRows) * sessionRowEstimatedHeight
+    }
 
     static func sessionsListHeight(count: Int) -> CGFloat {
         min(CGFloat(max(count, 0)) * sessionRowEstimatedHeight, sessionsListMaxHeight)

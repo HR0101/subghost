@@ -263,7 +263,11 @@ final class SessionWatcher {
             if let target = session.info.tmuxTarget,
                let text = await TmuxClient.capturePane(target: target) {
                 let cleaned = StateDetector.clean(text, profile: profile)
-                if StateDetector.matches(pattern: profile.busyPattern, in: cleaned) {
+                // busyの判定は経過時間・トークン数を残したテキストで行う
+                // (StateDetector.stripDecoration のコメント参照)
+                if StateDetector.matches(
+                    pattern: profile.busyPattern,
+                    in: StateDetector.stripDecoration(text, profile: profile)) {
                     return   // 実際にまだ動作中
                 }
                 if StateDetector.matches(
@@ -340,7 +344,7 @@ final class SessionWatcher {
     /// `defaults write com.HR.Subghost writeStateDump -bool true` で有効になる。
     /// 常駐アプリはUIしか手掛かりが無く原因調査が難しいため、外から観測できる口を用意する。
     private func writeStateDumpIfEnabled(trigger: String = "poll") {
-        guard UserDefaults.standard.bool(forKey: "writeStateDump") else { return }
+        guard DiagnosticsPreferences.writeStateDump else { return }
 
         let payload: [String: Any] = [
             "trigger": trigger,
@@ -835,7 +839,7 @@ final class SessionWatcher {
             session.state = .idle
             session.pendingChoice = nil
             session.questionQueue = []
-            SoundAlerts.shared.play(.sessionStart)
+            SoundAlerts.shared.play(.sessionStart, session: session.info)
 
         case .sessionEnd:
             session.state = .idle
@@ -844,7 +848,7 @@ final class SessionWatcher {
 
         case .preCompact:
             // コンテキストが逼迫していることを音だけで知らせる（状態は変えない）
-            SoundAlerts.shared.play(.contextLimit)
+            SoundAlerts.shared.play(.contextLimit, session: session.info)
 
         case .userPromptSubmit, .preToolUse, .postToolUse, .subagentStop:
             // サブエージェントの終了では親がまだ作業中なので完了扱いにしない

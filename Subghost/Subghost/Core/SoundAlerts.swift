@@ -165,19 +165,30 @@ final class SoundAlerts {
     }
 
     /// 状態に対応するアラート音を鳴らす。無効な状態では何もしない。
-    func play(for state: AIState) {
+    func play(for state: AIState, session: SessionInfo? = nil) {
         switch state {
-        case .completed: play(.completed)
-        case .error: play(.error)
-        case .awaitingApproval: play(.approval)
-        case .awaitingAnswer: play(.question)
+        case .completed: play(.completed, session: session)
+        case .error: play(.error, session: session)
+        case .awaitingApproval: play(.approval, session: session)
+        case .awaitingAnswer: play(.question, session: session)
         case .idle, .thinking: return
         }
     }
 
-    func play(_ sound: AlertSound) {
-        // 全体設定と、イベントごとの設定の両方を見る
-        guard Self.isEnabled, sound.isEnabled else { return }
+    /// 全体設定・イベント別設定・エージェント/セッションのミュート・静穏時間をまとめて見る。
+    /// セッションに紐づかない音（起動音・送信音）は session を省略する。
+    func play(_ sound: AlertSound, session: SessionInfo? = nil) {
+        guard AlertGate.allowsSound(sound, session: session) else { return }
+        emit(sound)
+    }
+
+    /// 設定画面の試聴。どの設定にも関係なく鳴らす
+    /// （音を選んでいる最中に、静穏時間やミュートで無音になると確認できないため）。
+    func preview(_ sound: AlertSound) {
+        emit(sound)
+    }
+
+    private func emit(_ sound: AlertSound) {
         guard let buffer = buffer(for: sound) else { return }
 
         do {
