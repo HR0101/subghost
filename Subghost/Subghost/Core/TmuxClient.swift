@@ -121,6 +121,36 @@ nonisolated enum TmuxClient {
         return map
     }
 
+    /// 全ペインを列挙し、pty → 最後に出力があった時刻の対応表を返す。
+    ///
+    /// tmux自身が記録している時刻なので、Subghostを再起動しても失われない。
+    /// 「もう使っていないセッション」を一覧から外す判断に使う。
+    /// (Subghost側の `lastActivityAt` はフック受信時にしか動かず、tmux経路の
+    ///  セッションでは起動時刻のまま止まってしまうため、こちらを併用する)
+    static func activityByTTY() async -> [String: Date] {
+        guard let result = try? await run([
+            "list-panes", "-a", "-F", "#{pane_tty}|#{window_activity}",
+        ]), result.succeeded else { return [:] }
+        return parsePaneActivity(result.stdout)
+    }
+
+    /// list-panesの活動時刻出力を解析する（テスト対象の純粋ロジック）
+    nonisolated static func parsePaneActivity(_ output: String) -> [String: Date] {
+        var map: [String: Date] = [:]
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let tty = parts[0].trimmingCharacters(in: .whitespaces)
+            // tmuxはUNIX秒で返す。解釈できない値は「不明」として捨てる（0を時刻とみなさない）
+            guard !tty.isEmpty,
+                  let seconds = TimeInterval(parts[1].trimmingCharacters(in: .whitespaces)),
+                  seconds > 0
+            else { continue }
+            map[tty] = Date(timeIntervalSince1970: seconds)
+        }
+        return map
+    }
+
     /// セッションにアタッチしているクライアントのtty（例 "/dev/ttys004"）を返す。
     /// どのターミナルのどのタブで動いているかを特定するために使う (Jump)。
     /// デタッチ中のセッションでは nil。

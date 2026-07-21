@@ -145,6 +145,12 @@ private struct GeneralSettingsView: View {
     @AppStorage(NotchPreferences.closeOnOutsideClickKey) private var closeOnOutsideClick = true
     @AppStorage(NotchPreferences.choiceAutoCloseIntervalKey) private var choiceAutoCloseInterval = 0.0
     @AppStorage(NotchPreferences.focusChoiceOnAppearKey) private var focusChoiceOnAppear = true
+    @AppStorage(NotchPreferences.hideUnmonitorableSessionsKey)
+    private var hideUnmonitorableSessions = true
+    @AppStorage(NotchPreferences.hideInactiveSessionsKey) private var hideInactiveSessions = true
+    @AppStorage(NotchPreferences.inactiveSessionThresholdKey)
+    private var inactiveSessionThreshold = 1_800.0
+    @AppStorage(NotchPreferences.suggestsTmuxSetupKey) private var suggestsTmuxSetup = true
     @State private var launchAtLogin = false
     @State private var isChangingLoginItem = false
     @State private var loginItemError: String?
@@ -201,6 +207,36 @@ private struct GeneralSettingsView: View {
                 Toggle("フルスクリーン時に非表示", isOn: $hideInFullScreen)
                 Toggle("アクティブなセッションがない時に自動非表示", isOn: $hideWhenNoSessions)
                 Text("承認待ち・質問・入力中は、見逃しを防ぐため設定に関係なく表示します。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("セッション一覧") {
+                Toggle("監視できないセッションを隠す", isOn: $hideUnmonitorableSessions)
+                Text("tmux にもフックにも繋がっていないセッションです。"
+                     + "状態を読むことも、プロンプトを送ることもできません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("しばらく動きの無いセッションを隠す", isOn: $hideInactiveSessions)
+                Stepper(
+                    value: $inactiveSessionThreshold,
+                    in: NotchPreferences.inactiveSessionThresholdRange,
+                    step: 300
+                ) {
+                    Text("動きが無いとみなすまで: \(Int(inactiveSessionThreshold / 60)) 分")
+                }
+                .disabled(!hideInactiveSessions)
+                Text("tmux が記録しているペインの最終出力時刻で判断します。"
+                     + "Subghost を再起動しても引き継がれます。"
+                     + "隠したセッションも監視は続けており、回答が必要になれば必ず表示します。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("tmux の導入を案内する", isOn: $suggestsTmuxSetup)
+                Text("tmux を使わず「監視のみ」で使う場合は切ってください。"
+                     + "監視・通知・承認への回答は tmux が無くても動きます。"
+                     + "プロンプトの送信だけが tmux を必要とします。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -305,18 +341,18 @@ private struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Section("キー入力の送信") {
-                LabeledContent("アクセシビリティ") {
-                    Label(KeystrokeSender.isTrusted ? "許可済み" : "未許可",
-                          systemImage: KeystrokeSender.isTrusted ? "checkmark.circle.fill" : "exclamationmark.circle")
-                        .foregroundStyle(KeystrokeSender.isTrusted ? Color.green : Color.orange)
+            Section("できること") {
+                ForEach(SessionCapability.allCases, id: \.self) { capability in
+                    LabeledContent(capability.label) {
+                        Text(capability.requirement)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                Text("tmuxを介さないセッションへプロンプトや回答を送るには、キー入力を合成する必要があります。対象タブを前面に出してから入力するため、許可が必要です。")
+                Text("プロンプトの送信だけが tmux を必要とします。"
+                     + "監視・完了通知・承認への回答はフックだけで動くため、"
+                     + "tmux を使わない簡易的な構成でも利用できます。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if !KeystrokeSender.isTrusted {
-                    Button("アクセシビリティを許可する") { KeystrokeSender.requestTrust() }
-                }
             }
             Section("tmux") {
                 TextField("tmuxのパス（空欄で自動検出）", text: $tmuxPath)
@@ -1502,20 +1538,13 @@ private struct SetupDiagnosticsView: View {
                 }
 
                 DiagnosticRow(
-                    title: "アクセシビリティ",
-                    detail: KeystrokeSender.isTrusted
-                        ? "tmux外のセッションにもキー入力を送れます"
-                        : "tmux外へのプロンプト送信には許可が必要です",
-                    health: KeystrokeSender.isTrusted ? .ready : .attention
+                    title: "プロンプトの送信",
+                    detail: TmuxClient.resolveTmuxPath() != nil
+                        ? "tmux があるため、tmux内のセッションへ送信できます"
+                        : "tmux が無いため、監視のみの構成です（送信は行えません）",
+                    health: TmuxClient.resolveTmuxPath() != nil ? .ready : .attention
                 ) {
-                    if !KeystrokeSender.isTrusted {
-                        Button("許可する") { KeystrokeSender.requestTrust() }
-                    }
-                    Button("設定を開く") {
-                        openSystemSettings(
-                            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-                        )
-                    }
+                    EmptyView()
                 }
 
                 DiagnosticRow(
@@ -1619,10 +1648,13 @@ private struct SetupDiagnosticsView: View {
     }
 
     private func sessionDetail(_ session: MonitoredSession) -> String {
-        var parts = ["監視: \(session.info.monitoringSource)", "TTY: \(session.info.shortName)"]
+        var parts = [
+            session.info.capabilityLabel,
+            "監視: \(session.info.monitoringSource)",
+            "TTY: \(session.info.shortName)",
+        ]
         if let target = session.info.tmuxTarget { parts.append("tmux: \(target)") }
         if session.info.isHookConnected { parts.append("Hook接続済み") }
-        if !session.info.isMonitorable { parts.append("状態取得不可") }
         return parts.joined(separator: " ／ ")
     }
 

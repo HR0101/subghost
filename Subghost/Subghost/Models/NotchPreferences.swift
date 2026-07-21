@@ -19,6 +19,10 @@ nonisolated enum NotchPreferences {
     static let closeOnOutsideClickKey = "closeOnOutsideClick"
     static let choiceAutoCloseIntervalKey = "choiceAutoCloseInterval"
     static let focusChoiceOnAppearKey = "focusChoiceOnAppear"
+    static let hideUnmonitorableSessionsKey = "hideUnmonitorableSessions"
+    static let hideInactiveSessionsKey = "hideInactiveSessions"
+    static let inactiveSessionThresholdKey = "inactiveSessionThreshold"
+    static let suggestsTmuxSetupKey = "suggestsTmuxSetup"
 
     static var hoverExpansionEnabled: Bool {
         bool(forKey: hoverExpansionEnabledKey, default: true)
@@ -62,6 +66,40 @@ nonisolated enum NotchPreferences {
 
     static var notificationDisplayDuration: TimeInterval {
         number(forKey: notificationDisplayDurationKey, default: 5.0)
+    }
+
+    // MARK: - 一覧に出さないセッション
+
+    /// tmuxにもフックにも繋がっていない＝監視も操作もできないセッションを一覧から外す。
+    /// 既定で有効。表示しても状態が出ず、送信もできないため実用上の情報がない。
+    static var hideUnmonitorableSessions: Bool {
+        bool(forKey: hideUnmonitorableSessionsKey, default: true)
+    }
+
+    /// 一定時間まったく動きの無いセッションを一覧から外す
+    static var hideInactiveSessions: Bool {
+        bool(forKey: hideInactiveSessionsKey, default: true)
+    }
+
+    /// tmuxの導入案内を出すか。
+    /// tmuxを使わず監視だけで使うのも正規の構成なので、断れるようにしておく。
+    static var suggestsTmuxSetup: Bool {
+        bool(forKey: suggestsTmuxSetupKey, default: true)
+    }
+
+    static func setSuggestsTmuxSetup(_ value: Bool) {
+        UserDefaults.standard.set(value, forKey: suggestsTmuxSetupKey)
+    }
+
+    static let inactiveSessionThresholdRange: ClosedRange<TimeInterval> = 300...86_400
+
+    /// 「動きが無い」とみなすまでの秒数（既定 30分）
+    static var inactiveSessionThreshold: TimeInterval {
+        let stored = number(forKey: inactiveSessionThresholdKey, default: 1_800)
+        return min(
+            max(stored, inactiveSessionThresholdRange.lowerBound),
+            inactiveSessionThresholdRange.upperBound
+        )
     }
 
     static var collapseOnMouseExit: Bool {

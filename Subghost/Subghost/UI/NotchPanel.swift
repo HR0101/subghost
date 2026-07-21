@@ -446,8 +446,9 @@ final class NotchPanelController {
             )
         case .sessions:
             // 一覧は最大高を超えた分だけ内部スクロールする。
+            // 一覧に実際に出す件数で高さを決める（絞り込みで消えた分の余白を作らない）
             let listHeight = NotchLayout.sessionsListHeight(
-                count: coordinator.watcher.sessions.count
+                count: coordinator.watcher.visibleSessions.count
             )
             size = NSSize(
                 width: NotchLayout.canvasWidth(

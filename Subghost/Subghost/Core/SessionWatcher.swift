@@ -43,6 +43,60 @@ nonisolated enum SessionError: Error, LocalizedError {
     }
 }
 
+// MARK: - 一覧に出すかどうかの判断 (純粋ロジック)
+
+/// 「もう使っていないセッション」を一覧から外すための判断。
+///
+/// 使い終わった CLI はプロセスとしては生き続けるため、放っておくと一覧が
+/// 過去のセッションで埋まる。ただし**隠すのは表示だけ**で監視は続けており、
+/// 回答が必要になったセッションは条件に関わらず必ず表示する（見逃し防止）。
+///
+/// I/O を持たない純粋な判断にしてあるので、固定の `Date` で単体テストできる。
+nonisolated enum SessionVisibility {
+
+    /// 判断に使うセッション側の状態
+    struct Input {
+        /// 承認待ち・質問待ちなど、答えないとCLIが進めない状態か
+        var needsUserResponse: Bool
+        /// 現在プロンプトの送信先に選ばれているか
+        var isActiveTarget: Bool
+        /// tmux かフックで監視・操作できるか
+        var isMonitorable: Bool
+        /// 最後に動きがあった時刻（tmuxの記録を含む）
+        var activityAt: Date
+        /// 手動で一覧から外したときの活動時刻。以降に動きがあれば自動で戻す。
+        var hiddenAtActivity: Date?
+    }
+
+    /// 判断に使う設定側の値
+    struct Rules {
+        /// 「すべて表示」中は絞り込みを行わない
+        var revealAll: Bool
+        var hideUnmonitorable: Bool
+        var hideInactive: Bool
+        var inactiveThreshold: TimeInterval
+    }
+
+    static func isVisible(_ input: Input, rules: Rules, at now: Date) -> Bool {
+        if rules.revealAll { return true }
+        // 回答しないとCLIが止まるものは、どの設定よりも優先して見せる
+        if input.needsUserResponse { return true }
+        // 送信先が一覧から消えると、どこへ送るのか分からなくなる
+        if input.isActiveTarget { return true }
+
+        // 手動で外したもの。外した後に新しい動きがあれば自動で戻る。
+        if let hiddenAt = input.hiddenAtActivity, input.activityAt <= hiddenAt {
+            return false
+        }
+        if rules.hideUnmonitorable, !input.isMonitorable { return false }
+        if rules.hideInactive,
+           now.timeIntervalSince(input.activityAt) >= rules.inactiveThreshold {
+            return false
+        }
+        return true
+    }
+}
+
 /// 監視中のセッション1つ分の可観測状態
 @Observable
 final class MonitoredSession: Identifiable {
@@ -58,6 +112,20 @@ final class MonitoredSession: Identifiable {
     var workingDirectory: String?
     /// 最後に何か動きがあった時刻（経過時間の表示に使う）
     var lastActivityAt: Date = Date()
+    /// tmuxが記録しているペインの最終出力時刻。
+    /// `lastActivityAt` はフック受信時にしか動かないため、tmux経路のセッションでは
+    /// Subghostの起動時刻のまま止まってしまう。放置されたセッションを見分けるには
+    /// Subghostの再起動をまたいでも失われないこちらが要る。
+    var tmuxActivityAt: Date?
+    /// ユーザーが一覧から手動で外したときの、その時点での活動時刻。
+    /// これより新しい動きがあれば「また使い始めた」とみなして自動的に戻す。
+    var hiddenAtActivity: Date?
+
+    /// 表示・放置判定に使う、最も新しい活動時刻
+    var effectiveActivityAt: Date {
+        guard let tmuxActivityAt else { return lastActivityAt }
+        return max(lastActivityAt, tmuxActivityAt)
+    }
     /// ノッチから回答すべき選択肢（承認/質問）。なければ nil。
     var pendingChoice: PendingChoice?
     /// まだ尋ねていない残りの質問。
@@ -182,6 +250,66 @@ final class SessionWatcher {
         sessions.first { $0.info.tty == activeSessionName } ?? sessions.first
     }
 
+    // MARK: - 一覧に出すセッションの絞り込み
+
+    /// 一覧に出すセッション。
+    ///
+    /// 絞り込みは**表示だけ**の話で、監視は全セッションに対して続ける。
+    /// 隠したセッションで承認待ちが起きたら見逃しになるため、
+    /// 回答が要る状態と現在の送信先は、どの条件よりも優先して必ず出す。
+    var visibleSessions: [MonitoredSession] {
+        let now = Date()
+        return sessions.filter { isVisible($0, at: now) }
+    }
+
+    /// 一覧から外されているセッションの件数（「他に N 件」の表示に使う）
+    var hiddenSessionCount: Int { sessions.count - visibleSessions.count }
+
+    /// 「すべて表示」を押している間だけ、絞り込みを一時的に解除する。
+    /// 設定を変えに行かなくても、隠れているものをその場で確認できるようにする。
+    var revealsHiddenSessions = false
+
+    func isVisible(_ session: MonitoredSession, at now: Date = Date()) -> Bool {
+        SessionVisibility.isVisible(
+            SessionVisibility.Input(
+                needsUserResponse: session.state.needsUserResponse,
+                isActiveTarget: session.info.tty == activeSessionName,
+                isMonitorable: session.info.isMonitorable,
+                activityAt: session.effectiveActivityAt,
+                hiddenAtActivity: session.hiddenAtActivity
+            ),
+            rules: SessionVisibility.Rules(
+                revealAll: revealsHiddenSessions,
+                hideUnmonitorable: NotchPreferences.hideUnmonitorableSessions,
+                hideInactive: NotchPreferences.hideInactiveSessions,
+                inactiveThreshold: NotchPreferences.inactiveSessionThreshold
+            ),
+            at: now
+        )
+    }
+
+    /// 一覧から手動で外す（プロセスはそのまま）
+    func hide(_ session: MonitoredSession) {
+        session.hiddenAtActivity = session.effectiveActivityAt
+    }
+
+    /// 手動で外したセッションをすべて戻す
+    func unhideAll() {
+        for session in sessions { session.hiddenAtActivity = nil }
+    }
+
+    /// セッションのCLIプロセスを終了させる。
+    ///
+    /// 取り消せない操作なので、呼び出し側で必ず確認を取ること。
+    /// SIGKILLではなくSIGTERMを送り、CLIに後始末（記録の書き出し等）をさせる。
+    func terminate(_ session: MonitoredSession) {
+        guard session.info.pid > 0 else { return }
+        kill(session.info.pid, SIGTERM)
+        // 次の巡回でプロセスが消えていれば reconcile が一覧から外す。
+        // 終了を待たずに一覧から消して、押した手応えを返す。
+        session.hiddenAtActivity = session.effectiveActivityAt
+    }
+
     /// いずれかのセッションが生成中か（アイコンのパルス用）
     var anyThinking: Bool { sessions.contains { $0.state == .thinking } }
 
@@ -234,6 +362,15 @@ final class SessionWatcher {
         // 1. 実行中プロセスからAI CLIを検出する（エイリアス・命名規則に依存しない）
         let agents = await AgentDiscovery.discover(profiles: CLIProfile.withCustomAliases(customAliases))
         reconcile(agents: agents)
+
+        // tmuxが持っている最終出力時刻を取り込む（放置セッションの判定に使う）。
+        // 全ペイン分を1回のtmux呼び出しでまとめて取る。
+        if tmuxAvailable {
+            let activity = await TmuxClient.activityByTTY()
+            for session in sessions {
+                if let at = activity[session.info.tty] { session.tmuxActivityAt = at }
+            }
+        }
 
         // 2. 状態判定。フック接続の有無で経路が異なる。
         let now = Date()
@@ -461,7 +598,7 @@ final class SessionWatcher {
     /// 送信先セッションを次へ循環切替する（入力モードのTabキー用）
     /// 送信できないセッションは飛ばす。
     func cycleActiveSession() {
-        let names = sessions.map { $0.info.tty }
+        let names = sessions.filter { $0.info.canSendPrompt }.map { $0.info.tty }
         if let next = Self.nextSessionName(in: names, after: activeSession?.info.tty) {
             chooseActiveSession(next)
         }
@@ -512,13 +649,11 @@ final class SessionWatcher {
         // 誤って発動しうる（プロンプト送信直後に stale 判定されてしまう）。
         session.lastActivityAt = Date()
 
+        // 送信経路は tmux だけ。キー入力の合成は対象タブを前面に出す必要があり、
+        // 「裏で動いているCLIへ送る」という前提を満たせないため使わない。
+        // 送れないセッションでは、そもそも入力欄を出さない（UI側で抑止済み）。
         guard let target = session.info.tmuxTarget else {
-            // tmuxが無い場合はキー入力を合成して送る（要アクセシビリティ権限）
-            try await KeystrokeSender.send(text: text, to: session.info, submit: true)
-            let event = session.detector.noteUserSentPrompt(at: Date())
-            apply(event: event, to: session)
-            if event == .none { session.state = .thinking }
-            return
+            throw SessionError.notMonitorable
         }
         try await TmuxClient.sendPrompt(text, to: target)
         // 送信後は thinking へ即時遷移 (設計書 5.2)

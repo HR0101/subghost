@@ -433,10 +433,29 @@ final class AppCoordinator {
         }
     }
 
+    /// プロンプトを送れるセッションが1つでもあるか。
+    /// 入力欄を出すかどうかの唯一の判断基準にする。
+    var canSendPromptToAnySession: Bool {
+        watcher.sessions.contains { $0.info.canSendPrompt }
+    }
+
     func expandInput() {
         notificationPresentationTask?.cancel()
         collapseTask?.cancel()
         lastSendError = nil
+
+        // 送れないセッションで入力欄を出すと、書いてから送信時に断ることになる。
+        // 送れる相手がいなければ入力欄自体を出さず、一覧で状況を見せる。
+        guard canSendPromptToAnySession else {
+            showSessions()
+            return
+        }
+        // 選ばれている送信先が送れないなら、送れるセッションへ寄せる
+        if watcher.activeSession?.info.canSendPrompt == false,
+           let sendable = watcher.sessions.first(where: { $0.info.canSendPrompt }) {
+            watcher.chooseActiveSession(sendable.info.tty)
+        }
+
         setMode(.input)
         panelController?.focusInput()
     }
@@ -477,9 +496,8 @@ final class AppCoordinator {
             return
         }
         let submittedDraftKey = promptDraftKey
-        // tmuxが無くてもキー入力の合成で送れるため、そちらの可否も見る
-        guard session.info.tmuxTarget != nil || KeystrokeSender.isTrusted else {
-            lastSendError = KeystrokeError.accessibilityNotTrusted.localizedDescription
+        guard session.info.canSendPrompt else {
+            lastSendError = SessionError.notMonitorable.localizedDescription
             return
         }
         lastSendError = nil
@@ -514,8 +532,46 @@ final class AppCoordinator {
 
     /// 一覧から選んだセッションを送信先にして、プロンプト入力欄を開く
     func promptSession(_ session: MonitoredSession) {
+        // 送れないセッションでは一覧の送信ボタン自体を出していないが、
+        // 経路が増えても取り違えないよう、ここでも確かめる。
+        guard session.info.canSendPrompt else { return }
         watcher.chooseActiveSession(session.info.tty)
         expandInput()
+    }
+
+    // MARK: - 一覧の片付け
+
+    /// 一覧から外す（CLIプロセスはそのまま動かし続ける）
+    func hideSession(_ session: MonitoredSession) {
+        watcher.hide(session)
+    }
+
+    /// CLIごと終了させる。取り消せない操作なので必ず確認を取る。
+    ///
+    /// ノッチのパネルは statusBar より上にいるため、パネル内にシートを出すと
+    /// 隠れてしまう。アプリモーダルの NSAlert で確実に前へ出す。
+    func confirmTerminate(_ session: MonitoredSession) {
+        NSApp.activate()
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText =
+            "\(session.info.displayName) の \(session.info.profile.displayName) を終了しますか？"
+        alert.informativeText =
+            "作業中だった場合、途中の内容は失われることがあります。"
+            + "終了させず、一覧から隠すだけにもできます。"
+        alert.addButton(withTitle: "終了する")
+        alert.addButton(withTitle: "キャンセル")
+        alert.addButton(withTitle: "隠すだけ")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            watcher.terminate(session)
+        case .alertThirdButtonReturn:
+            watcher.hide(session)
+        default:
+            break
+        }
     }
 
     /// 一覧から選んだセッションのタブへ移動する

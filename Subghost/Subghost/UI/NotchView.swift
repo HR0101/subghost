@@ -356,14 +356,15 @@ struct NotchView: View {
 
             Spacer(minLength: notchWidth)
 
-            // 右余白：全セッションの小ドット
+            // 右余白：一覧に出しているセッションの小ドット
             HStack(spacing: 4) {
-                if coordinator.watcher.sessions.isEmpty {
+                let visible = coordinator.watcher.visibleSessions
+                if visible.isEmpty {
                     Image(systemName: "moon.zzz")
                         .font(.system(size: 10))
                         .foregroundStyle(.gray)
                 } else {
-                    ForEach(coordinator.watcher.sessions.prefix(4)) { session in
+                    ForEach(visible.prefix(4)) { session in
                         StateDot(state: session.state, pulsing: session.state.shouldPulse, size: 6)
                     }
                 }
@@ -603,24 +604,50 @@ struct NotchView: View {
                 autoTmuxReminder
             }
 
-            if !coordinator.watcher.sessions.isEmpty {
+            let visible = coordinator.watcher.visibleSessions
+            if !visible.isEmpty {
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 6) {
-                        ForEach(coordinator.watcher.sessions) { session in
+                        ForEach(visible) { session in
                             SessionRow(
                                 session: session,
                                 isActive: session.info.tty == coordinator.watcher.activeSessionName,
                                 onJump: { coordinator.jump(to: session) },
-                                onPrompt: { coordinator.promptSession(session) }
+                                onPrompt: { coordinator.promptSession(session) },
+                                onHide: { coordinator.hideSession(session) },
+                                onTerminate: { coordinator.confirmTerminate(session) }
                             )
                         }
                     }
                     .padding(.trailing, 4)
                 }
                 .scrollIndicators(.visible)
-                .frame(height: NotchLayout.sessionsListHeight(
-                    count: coordinator.watcher.sessions.count
-                ))
+                .frame(height: NotchLayout.sessionsListHeight(count: visible.count))
+            }
+
+            // 隠したぶんは黙って消さず、件数と戻す手段を残す
+            if coordinator.watcher.revealsHiddenSessions {
+                Button("放置中のセッションを隠す") {
+                    coordinator.watcher.revealsHiddenSessions = false
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.75))
+                .padding(.top, 2)
+            } else if coordinator.watcher.hiddenSessionCount > 0 {
+                HStack(spacing: 6) {
+                    Text("他に \(coordinator.watcher.hiddenSessionCount) 件（放置・監視不可）")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.5))
+                    Button("すべて表示") {
+                        coordinator.watcher.unhideAll()
+                        coordinator.watcher.revealsHiddenSessions = true
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.75))
+                }
+                .padding(.top, 2)
             }
         }
         .padding(.horizontal, 16)
@@ -767,29 +794,24 @@ struct NotchView: View {
 
         case .permissions:
             VStack(alignment: .leading, spacing: 8) {
-                Text("アクセシビリティ権限")
+                Text("tmux を使うかどうか")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
-                Text("質問への回答をノッチから送るには、アクセシビリティの許可が必要です"
-                     + "（tmux経由のセッションでは不要です）。")
+                Text("フックの登録だけで、状態の監視・完了通知・承認への回答が使えます。"
+                     + "ノッチからプロンプトを送りたい場合のみ tmux が必要です。")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.7))
+
                 HStack(spacing: 8) {
-                    Image(systemName: KeystrokeSender.isTrusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(KeystrokeSender.isTrusted ? .green : .orange)
-                    Text(KeystrokeSender.isTrusted ? "許可済みです" : "まだ許可されていません")
+                    let hasTmux = TmuxClient.resolveTmuxPath() != nil
+                    Image(systemName: hasTmux ? "checkmark.circle.fill" : "minus.circle")
+                        .foregroundStyle(hasTmux ? .green : .white.opacity(0.5))
+                    Text(hasTmux
+                         ? "tmux があります。プロンプトの送信まで使えます"
+                         : "tmux はありません。監視のみの構成で動きます")
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.8))
                     Spacer()
-                    if !KeystrokeSender.isTrusted {
-                        Button("システム設定を開く") { KeystrokeSender.requestTrust() }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.12)))
-                    }
                 }
             }
 
@@ -838,9 +860,13 @@ struct NotchView: View {
 
     /// tmux外で起動したことを検出した場合だけ、自動化を案内する。
     /// フック連携済みでも、ユーザーがtmux利用を望む場合に見落とさないよう表示する。
+    /// tmux の導入を勧めるか。
+    ///
+    /// tmuxを使わず「監視だけ」で使うのも正規の構成なので、
+    /// 送信を必要としない人にまで出し続けない。設定で止められる。
     private var shouldOfferAutoTmux: Bool {
-        !autoTmuxInstalled
-            && coordinator.watcher.sessions.contains { $0.info.tmuxTarget == nil }
+        guard !autoTmuxInstalled, NotchPreferences.suggestsTmuxSetup else { return false }
+        return coordinator.watcher.sessions.contains { $0.info.tmuxTarget == nil }
     }
 
     private var autoTmuxReminder: some View {
@@ -869,6 +895,15 @@ struct NotchView: View {
                 .controlSize(.small)
                 .help("claude / codex / agy（カスタムエイリアス含む）を自動的にtmux内で起動します")
             }
+
+            // 監視だけで使う人向けの出口。勧誘を出し続けない。
+            Button("監視だけで使う") {
+                NotchPreferences.setSuggestsTmuxSetup(false)
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 10))
+            .foregroundStyle(.white.opacity(0.6))
+            .help("この案内を今後表示しません。設定の「セッション一覧」からいつでも戻せます")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -886,7 +921,7 @@ struct NotchView: View {
         if TmuxClient.resolveTmuxPath() == nil {
             return "tmuxが見つかりません。brew install tmux の後に自動起動を設定できます"
         }
-        return "ボタンを押すと、次に開くターミナルからtmuxを挟み忘れなくなります"
+        return "tmuxを挟むとノッチからプロンプトを送れます（無くても監視と通知は動きます）"
     }
 
     private func enableAutoTmux() {
@@ -1157,9 +1192,14 @@ struct NotchView: View {
                     // ドット自体は装飾。状態は下の送信先ラベルが読み上げる。
                     StateDot(state: active.state, pulsing: active.state.shouldPulse, size: 7)
                 }
-                if coordinator.watcher.sessions.count > 1 {
+                // 送信先の候補は「実際に送れるセッション」だけに絞る。
+                // 選べるのに送れない相手が並んでいると、書いてから断られることになる。
+                let selectable = coordinator.watcher.visibleSessions.filter {
+                    $0.info.canSendPrompt
+                }
+                if selectable.count > 1 {
                     Picker("送信先", selection: activeSessionBinding) {
-                        ForEach(coordinator.watcher.sessions) { session in
+                        ForEach(selectable) { session in
                             Text("\(session.info.displayName)（\(session.state.displayName)）")
                                 .tag(Optional(session.info.tty))
                         }
@@ -1277,7 +1317,9 @@ struct NotchView: View {
                 Text("AI CLI が見つかりません。ターミナルで claude / codex / agy を起動してください")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
-            } else if coordinator.watcher.activeSession?.info.isMonitorable == false {
+            } else if coordinator.watcher.activeSession?.info.canSendPrompt == false {
+                // 入力欄は送れる相手がいるときにしか出さないので、通常ここには来ない。
+                // Pickerで送れない相手へ切り替えた場合の保険。
                 Text(coordinator.watcher.tmuxAvailable
                      ? "このセッションはtmuxの外で動いているため送信できません。tmux内で起動し直してください"
                      : "tmuxが見つかりません。設定でパスを指定するかインストールしてください")
@@ -1335,10 +1377,15 @@ struct SessionRow: View {
     let onJump: () -> Void
     /// 送信ボタンを押したとき（このセッションへプロンプトを送る）
     let onPrompt: () -> Void
+    /// 一覧から外すとき（プロセスはそのまま）
+    let onHide: () -> Void
+    /// CLIごと終了させるとき（確認は呼び出し側で取る）
+    let onTerminate: () -> Void
 
     @State private var isHovering = false
     @State private var isPromptHovering = false
     @State private var isMuteHovering = false
+    @State private var isHideHovering = false
     /// このセッションを黙らせているか。
     /// SessionMuteStore は実行中のみの保持で @Observable の変更通知が
     /// このビューまで届かないため、押した結果をここへ写して表示に反映する。
@@ -1374,6 +1421,14 @@ struct SessionRow: View {
                             Spacer(minLength: 4)
                             TagBadge(text: session.info.profile.displayName, tint: agentTint)
                             TagBadge(text: session.state.displayName, tint: stateTint)
+                            // tmuxの有無でできることが変わるので、それを明示する。
+                            // 「送信可」は既定の状態なので、欠けているときだけ出す。
+                            if session.info.capability < .full {
+                                TagBadge(
+                                    text: session.info.capabilityLabel,
+                                    tint: .orange.opacity(0.35)
+                                )
+                            }
                             if let terminal = session.info.terminalName {
                                 TagBadge(text: terminal, tint: .white.opacity(0.18))
                             }
@@ -1412,20 +1467,24 @@ struct SessionRow: View {
             .accessibilityLabel(rowAccessibilityLabel)
             .accessibilityHint("このセッションのターミナルのタブへ移動します")
 
-            Button(action: onPrompt) {
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(isPromptHovering ? 0.95 : 0.6))
-                    .frame(width: 24, height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(.white.opacity(isPromptHovering ? 0.2 : 0.07))
-                    )
+            // 送信経路（tmux）が無いセッションでは、押せないボタンを出すより
+            // 最初から出さない方が「何ができるか」が伝わる。
+            if session.info.canSendPrompt {
+                Button(action: onPrompt) {
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(isPromptHovering ? 0.95 : 0.6))
+                        .frame(width: 24, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(.white.opacity(isPromptHovering ? 0.2 : 0.07))
+                        )
+                }
+                .buttonStyle(.plain)
+                .onHover { isPromptHovering = $0 }
+                .help("このセッションへプロンプトを送る")
+                .accessibilityLabel("\(session.info.displayName) へプロンプトを送る")
             }
-            .buttonStyle(.plain)
-            .onHover { isPromptHovering = $0 }
-            .help("このセッションへプロンプトを送る")
-            .accessibilityLabel("\(session.info.displayName) へプロンプトを送る")
 
             // このセッションだけを黙らせる。設定を開かずに、うるさい1本を素早く止められる。
             Button {
@@ -1449,6 +1508,30 @@ struct SessionRow: View {
                     ? "\(session.info.displayName) の知らせを再開する"
                     : "\(session.info.displayName) の知らせを止める"
             )
+
+            // 使い終わったセッションを一覧から片付ける。
+            // 既定は「隠すだけ」。プロセスの終了は取り消せないので、
+            // 誤って作業中のCLIを消さないよう長押し相当のメニューの奥に置く。
+            Menu {
+                Button("一覧から隠す", action: onHide)
+                Divider()
+                Button("CLIを終了する…", role: .destructive, action: onTerminate)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(isHideHovering ? 0.95 : 0.35))
+                    .frame(width: 24, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(.white.opacity(isHideHovering ? 0.2 : 0.07))
+                    )
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 24, height: 22)
+            .onHover { isHideHovering = $0 }
+            .help("このセッションを一覧から片付ける")
+            .accessibilityLabel("\(session.info.displayName) を一覧から片付ける")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -1472,6 +1555,10 @@ struct SessionRow: View {
             session.info.displayName,
             session.state.accessibilityDescription,
         ]
+        // 送信ボタンの有無は見た目でしか分からないため、できることを言葉でも伝える
+        if session.info.capability < .full {
+            parts.append(session.info.capability.summary)
+        }
         if isActive { parts.append("現在の送信先") }
         if let prompt = session.lastUserPrompt, !prompt.isEmpty {
             parts.append("直近の指示 \(prompt)")
