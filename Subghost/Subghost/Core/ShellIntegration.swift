@@ -13,8 +13,10 @@
 //  安全設計:
 //  - ~/.zshrc は書き換え前にバックアップする
 //  - Subghostが追加した行は目印で囲み、解除時にその範囲だけを取り除く
-//  - 包む処理は「非対話・tmux内・tmux未導入」のときは何もせず素通しする
-//    （claude --version などが壊れない）
+//  - 包む処理は「Subghost未起動・非対話・tmux内・tmux未導入」のときは何もせず
+//    素通しする（claude --version などが壊れない）。Subghostの起動判定は
+//    監視ソケットの有無で行い、フック(subghost-bridge)と同じ基準に揃える。
+//    これによりアプリを終了・削除しても claude 等の起動は元のまま壊れない。
 //
 
 import Foundation
@@ -52,10 +54,13 @@ nonisolated enum ShellIntegration {
         return """
         #!/bin/sh
         # Subghost: AI CLIを対話起動のときだけ自動でtmux内に入れる。
+        # Subghostが動いていなければ（監視ソケットが無ければ）何もせず素通しするので、
+        # アプリを終了・削除しても claude などの起動は元のまま壊れない。
+        _subghost_sock="\(HookInstaller.socketPath)"
         _subghost_run() {
             _sg_cmd="$1"; shift
-            # 既にtmux内 / tmux未導入 / 非対話（パイプ等）のときはそのまま実行する
-            if [ -n "$TMUX" ] || ! command -v tmux >/dev/null 2>&1 || [ ! -t 1 ]; then
+            # Subghost未起動 / 既にtmux内 / tmux未導入 / 非対話（パイプ等）はそのまま実行する
+            if [ ! -S "$_subghost_sock" ] || [ -n "$TMUX" ] || ! command -v tmux >/dev/null 2>&1 || [ ! -t 1 ]; then
                 command "$_sg_cmd" "$@"
             else
                 tmux new-session "$_sg_cmd" "$@"

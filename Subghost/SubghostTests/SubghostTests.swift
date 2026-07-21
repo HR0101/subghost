@@ -1449,6 +1449,10 @@ struct ShellIntegrationTests {
         // 非対話・tmux内・tmux未導入では素通しする条件が入っていること
         #expect(body.contains("[ -n \"$TMUX\" ]"))
         #expect(body.contains("[ ! -t 1 ]"))
+        // Subghost未起動（監視ソケットが無い）ときも素通しすること。
+        // これがないとアプリを終了・削除しても claude が tmux 起動に化けたまま残る。
+        #expect(body.contains("[ ! -S \"$_subghost_sock\" ]"))
+        #expect(body.contains(HookInstaller.socketPath))
     }
 
     @Test func カスタムエイリアス名も対象コマンドとして包む() {
