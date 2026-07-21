@@ -4,6 +4,12 @@
 //
 //  設計書 フェーズ5: 設定画面（判定閾値の調整: 設計書 12）
 //
+//  設定ウインドウの全体。外観・履歴とデータ・通知とサウンド・ショートカット
+//  などのタブを持ち、各 *Preferences（UserDefaults）への読み書き口になる。
+//
+//  ウインドウは SwiftUI の Settings シーン任せにせず、SettingsWindowController が
+//  自前で開く。メニューバーに常駐しないアプリなので、標準の導線が使えないため。
+//
 
 import AppKit
 import SwiftUI
@@ -285,7 +291,7 @@ private struct GeneralSettingsView: View {
             Section("ターミナル") {
                 Picker("移動先のターミナル", selection: $preferredTerminal) {
                     Text("自動判定").tag("")
-                    ForEach(TerminalApp.allCases) { app in
+                    ForEach(TerminalApp.allCases.filter(\.isLaunchable)) { app in
                         Text(app.displayName).tag(app.rawValue)
                     }
                 }
@@ -293,6 +299,9 @@ private struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("ターミナル.appはタブ単位で移動できます（初回に自動化の許可が必要）。GhosttyはAppleScript非対応のため、アプリの前面化までとなります。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("VS Code・Cursor・Windsurfの内蔵ターミナルは自動判定の対象です。タブの特定はできないため、そのウインドウの前面化までとなります。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

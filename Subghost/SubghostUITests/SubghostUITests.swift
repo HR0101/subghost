@@ -4,6 +4,10 @@
 //
 //  Created by hara ryuto   on 2026/07/16.
 //
+//  アプリを実際に起動して操作するUIテスト（XCTest）。
+//  ロジックの検証は SubghostTests（Swift Testing）側で行うため、
+//  ここは起動できること・画面が出ることの確認に絞る。
+//
 
 import XCTest
 

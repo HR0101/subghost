@@ -4,6 +4,10 @@
 //
 //  Ghostty補助ノッチAIアシスタント
 //
+//  アプリの入口。@main の App 本体と AppDelegate だけを持つ。
+//  メニューバーには常駐せず、Scene は SwiftUI が最低1つ要求するための
+//  Settings のみ。実際の起動処理・終了処理はすべて AppCoordinator へ委ねる。
+//
 
 import SwiftUI
 
