@@ -10,6 +10,42 @@ import SwiftUI
 import UniformTypeIdentifiers
 import UserNotifications
 
+/// 設定ウインドウを自前で持つ。
+///
+/// SwiftUIの `Settings` シーンは `SettingsLink`（Sceneの環境が要る）か
+/// AppKitの非公開セレクタ `showSettingsWindow:` からしか開けない。
+/// ノッチは手動で作った NSPanel なので Scene の環境が届かず、
+/// 非公開セレクタもmacOSの版によって応答しないため「押しても何も起きない」になる。
+/// 表示経路を自分で握って、どちらにも依存せずに開けるようにする。
+final class SettingsWindowController {
+
+    static let shared = SettingsWindowController()
+
+    private var window: NSWindow?
+
+    func show() {
+        // LSUIElementのため、明示的に前面へ出さないと背面で開いたままになる
+        NSApp.activate()
+        makeWindowIfNeeded().makeKeyAndOrderFront(nil)
+    }
+
+    /// 一度作ったウインドウは閉じても使い回す（選択中のページと位置を保つため）
+    private func makeWindowIfNeeded() -> NSWindow {
+        if let window { return window }
+
+        let created = NSWindow(
+            contentViewController: NSHostingController(rootView: SettingsView())
+        )
+        created.title = "Subghost 設定"
+        // 閉じたときに解放されると、上で保持している参照が無効になる
+        created.isReleasedWhenClosed = false
+        created.center()
+        created.setFrameAutosaveName("SubghostSettingsWindow")
+        window = created
+        return created
+    }
+}
+
 struct SettingsView: View {
     @State private var selection: SettingsPage = .general
 

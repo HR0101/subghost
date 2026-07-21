@@ -556,7 +556,11 @@ struct NotchView: View {
                 .accessibilityValue(coordinator.isMuted ? "消音中" : "オン")
                 .accessibilityHint(coordinator.isMuted ? "サウンドを有効にします" : "サウンドを消音します")
 
-                SettingsLink {
+                // SettingsLink は Scene の環境が要るため、Scene外のこのパネルでは動かない。
+                // 自前の設定ウインドウを開く（SettingsWindowController 参照）。
+                Button {
+                    coordinator.openSettings()
+                } label: {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.8))

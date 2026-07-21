@@ -552,6 +552,19 @@ final class AppCoordinator {
         }
     }
 
+    // MARK: - 設定ウインドウ
+
+    /// 設定ウインドウを開く。
+    ///
+    /// 表示そのものは `SettingsWindowController` が持つ（SwiftUIの Settings シーンに
+    /// 依存しない理由はそちらのコメントを参照）。
+    func openSettings() {
+        // 先に畳む。resignInput() が NSApp.deactivate() を呼ぶため、
+        // 順番を逆にすると show() の中の activate() が打ち消される。
+        collapse()
+        SettingsWindowController.shared.show()
+    }
+
     // MARK: - 表示先ディスプレイ (追補)
 
     /// 表示先の設定が変わったときにノッチを配置し直す
