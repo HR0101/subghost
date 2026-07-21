@@ -5,6 +5,12 @@
 //  設計書 4.2: 完了通知（UserNotifications）
 //  設計書 追補: 承認リクエスト／質問の通知（バナーからも承認・拒否できる）
 //
+//  通知の発行と、バナー上で押されたボタンの受け取りを担当する。
+//
+//  バナーの応答は「通知を出した時点のセッション」へ返さなければならない。
+//  ttyは使い回されるため、NotificationSessionReference で tty と PID の両方を
+//  照合し、入れ替わった別プロセスへ誤って承認を送らないようにしている。
+//
 
 import Foundation
 import UserNotifications

@@ -323,6 +323,62 @@ struct StateDetectorTests {
         #expect(detector.state == .idle)
     }
 
+    /// 完了後の画面は、ステータス行やヒント行が差し替わるだけでも「変化」する。
+    /// それを作業再開とみなして再び完了判定すると、1回の応答に対して通知が
+    /// 何度も出てしまう（実機で確認した不具合）。
+    @Test func 完了後の再描画で同じ応答を二度完了として知らせない() {
+        var detector = makeDetector()
+        let t0 = Date(timeIntervalSince1970: 0)
+        _ = detector.ingest(rawText: "A", at: t0)
+        _ = detector.ingest(rawText: "A\n応答本文です", at: t0.addingTimeInterval(0.8))
+        let final = "A\n応答本文です\n│ > │"
+        _ = detector.ingest(rawText: final, at: t0.addingTimeInterval(1.6))
+        let first = detector.ingest(rawText: final, at: t0.addingTimeInterval(4.0))
+        guard case .becameCompleted = first else {
+            Issue.record("1回目が完了にならなかった: \(first)")
+            return
+        }
+
+        // ステータス行だけが差し替わる（本文は同じ）。busy表示は出ない。
+        let redrawn = "A\n応答本文です\n│ > │\n  ⏸ manual mode on · gh auth login for PR status"
+        let resumed = detector.ingest(rawText: redrawn, at: t0.addingTimeInterval(5.0))
+        #expect(resumed == .becameThinking)
+
+        // 通常の静止時間では完了に戻さない
+        #expect(detector.ingest(rawText: redrawn, at: t0.addingTimeInterval(7.0)) == .none)
+
+        // 十分に静止しても、本文が同じなら完了としては知らせず待機へ戻すだけ
+        let again = detector.ingest(rawText: redrawn, at: t0.addingTimeInterval(20.0))
+        #expect(again == .becameIdle)
+        #expect(detector.state == .idle)
+    }
+
+    /// 再描画ではなく本当に次の応答が来た場合は、通常どおり完了を知らせる。
+    @Test func 完了後に新しい応答が来たら改めて完了を知らせる() {
+        var detector = makeDetector()
+        let t0 = Date(timeIntervalSince1970: 0)
+        _ = detector.ingest(rawText: "A", at: t0)
+        _ = detector.ingest(rawText: "A\n1つ目の応答", at: t0.addingTimeInterval(0.8))
+        let first = "A\n1つ目の応答\n│ > │"
+        _ = detector.ingest(rawText: first, at: t0.addingTimeInterval(1.6))
+        _ = detector.ingest(rawText: first, at: t0.addingTimeInterval(4.0))
+        #expect(detector.state == .completed)
+
+        // busy表示＝実際に作業している裏付けがあるので、再描画扱いにはしない
+        let busy = "A\n1つ目の応答\n✻ Thinking… (esc to interrupt)\n│ > │"
+        _ = detector.ingest(rawText: busy, at: t0.addingTimeInterval(5.0))
+        #expect(detector.state == .thinking)
+
+        let second = "A\n1つ目の応答\n2つ目の応答\n│ > │"
+        _ = detector.ingest(rawText: second, at: t0.addingTimeInterval(6.0))
+        let event = detector.ingest(rawText: second, at: t0.addingTimeInterval(8.0))
+        guard case .becameCompleted(let preview) = event else {
+            Issue.record("2つ目の応答が完了にならなかった: \(event)")
+            return
+        }
+        #expect(preview.contains { $0.contains("2つ目の応答") })
+    }
+
     @Test func プロンプト送信でthinkingへ遷移する() {
         var detector = makeDetector()
         let t0 = Date(timeIntervalSince1970: 0)
@@ -1963,6 +2019,24 @@ struct TerminalJumpTests {
     @Test func タブ単位で移動できるのはターミナルappのみ() {
         #expect(TerminalApp.terminal.supportsTabJump)
         #expect(!TerminalApp.ghostty.supportsTabJump)
+    }
+
+    @Test func エディタの内蔵ターミナルもヘルパー経由で特定できる() {
+        // 実測値: 36186(tmux) → 34224(zsh) → 16536(Code Helper) → 16270(VS Code)
+        // 内蔵ターミナルのシェルはヘルパープロセスの子であり、本体は祖先にしか現れない
+        let parents: [Int32: Int32] = [36186: 34224, 34224: 16536, 16536: 16270, 16270: 1]
+        let terminals: [Int32: TerminalApp] = [16270: .vscode]
+
+        #expect(ProcessTree.findAncestor(of: 36186, in: terminals, parents: parents) == .vscode)
+    }
+
+    @Test func エディタは移動先ターミナルとして起動しない() {
+        // 内蔵ターミナルは「セッションの所在」を示すだけで、単独の移動先にはならない
+        #expect(TerminalApp.terminal.isLaunchable)
+        #expect(TerminalApp.ghostty.isLaunchable)
+        #expect(!TerminalApp.vscode.isLaunchable)
+        #expect(!TerminalApp.cursor.isLaunchable)
+        #expect(!TerminalApp.windsurf.isLaunchable)
     }
 }
 

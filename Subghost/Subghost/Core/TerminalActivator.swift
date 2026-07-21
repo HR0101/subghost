@@ -18,6 +18,10 @@ import ApplicationServices
 nonisolated enum TerminalApp: String, CaseIterable, Identifiable, Sendable {
     case ghostty
     case terminal
+    case vscode
+    case vscodeInsiders
+    case cursor
+    case windsurf
 
     var id: String { rawValue }
 
@@ -25,6 +29,10 @@ nonisolated enum TerminalApp: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .ghostty: return "com.mitchellh.ghostty"
         case .terminal: return "com.apple.Terminal"
+        case .vscode: return "com.microsoft.VSCode"
+        case .vscodeInsiders: return "com.microsoft.VSCodeInsiders"
+        case .cursor: return "com.todesktop.230313mzl4w4u92"
+        case .windsurf: return "com.exafunction.windsurf"
         }
     }
 
@@ -32,12 +40,27 @@ nonisolated enum TerminalApp: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .ghostty: return "Ghostty"
         case .terminal: return "ターミナル.app"
+        case .vscode: return "VS Code"
+        case .vscodeInsiders: return "VS Code Insiders"
+        case .cursor: return "Cursor"
+        case .windsurf: return "Windsurf"
         }
     }
 
     /// タブ単位の正確な移動ができるか（AppleScript対応の有無）
     var supportsTabJump: Bool {
         self == .terminal
+    }
+
+    /// 「移動先のターミナル」として選択・起動してよいか。
+    ///
+    /// エディタの内蔵ターミナルは、セッションの所在を特定するためだけに扱う。
+    /// セッションと無関係にエディタを起動しても、そこにCLIは居ない。
+    var isLaunchable: Bool {
+        switch self {
+        case .ghostty, .terminal: return true
+        case .vscode, .vscodeInsiders, .cursor, .windsurf: return false
+        }
     }
 
     /// 起動中のインスタンスがあるか
@@ -54,8 +77,10 @@ enum TerminalActivator {
 
     /// 設定で指定された優先ターミナル。未設定なら自動判定。
     static var preferred: TerminalApp? {
-        guard let raw = UserDefaults.standard.string(forKey: "preferredTerminal") else { return nil }
-        return TerminalApp(rawValue: raw)
+        guard let raw = UserDefaults.standard.string(forKey: "preferredTerminal"),
+              let app = TerminalApp(rawValue: raw), app.isLaunchable
+        else { return nil }
+        return app
     }
 
     // MARK: - Jump
@@ -128,6 +153,10 @@ enum TerminalActivator {
         case .ghostty:
             guard let title = frontmostGhosttyTitle() else { return false }
             return titleMatches(title, session: session)
+        case .vscode, .vscodeInsiders, .cursor, .windsurf:
+            // エディタが前面でも、内蔵ターミナルのどのタブが見えているかは分からない。
+            // 別のタブやエディタ画面を見ている可能性があるため、通知を見逃させない側に倒す。
+            return false
         }
     }
 
@@ -144,7 +173,7 @@ enum TerminalActivator {
     }
 
     private static func firstRunning() -> TerminalApp? {
-        TerminalApp.allCases.first { $0.isRunning }
+        TerminalApp.allCases.first { $0.isLaunchable && $0.isRunning }
     }
 
     // MARK: - tty からホストのターミナルを特定する

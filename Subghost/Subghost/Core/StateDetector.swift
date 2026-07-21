@@ -31,6 +31,13 @@ nonisolated struct StateDetector: Sendable {
     var idleFallbackInterval: TimeInterval = 30.0
     /// 回答直後に同じ選択肢が画面に残っている間、再通知を抑制する秒数
     var answeredSuppressionInterval: TimeInterval = 4.0
+    /// 完了を知らせた直後、作業中の裏付け（busy表示）が無いまま再び静止した場合に
+    /// 改めて完了と判定するまでの秒数。
+    ///
+    /// 完了後の画面はステータス行の更新やヒント行の差し替えだけでも「変化」するため、
+    /// `changed` を根拠に thinking へ戻ってしまう。それを通常と同じ 1.5 秒で
+    /// completed に戻すと、1回の応答に対して通知が何度も出る。
+    var redrawStableInterval: TimeInterval = 12.0
 
     private(set) var state: AIState = .idle
     /// 現在表示中の選択待ちブロック（承認/質問）
@@ -42,6 +49,11 @@ nonisolated struct StateDetector: Sendable {
     /// ノッチから回答済みの選択肢（残像による再通知を抑制するために保持）
     private var answeredChoice: PendingChoice?
     private var answeredAt: Date?
+    /// 直前に「完了」として知らせた本文。同じ応答を二度知らせないための控え。
+    private var announcedPreview: [String]?
+    /// 現在の thinking が、完了直後の画面の再描画だけで始まったものか。
+    /// true の間は作業していた裏付けが無いため、完了判定を急がない。
+    private var isRedrawAfterCompletion = false
     /// 起動直後の初回判定で選択肢を見つけたが、まだ確定させていない候補。
     /// (フールプルーフ: 起動直後はフックがまだ繋がっておらず、会話に残った過去の
     /// テキストを誤って選択メニューと検出するリスクが最も高い。1回見ただけでは
@@ -146,6 +158,7 @@ nonisolated struct StateDetector: Sendable {
             pendingChoice = nil
             state = .thinking
             lastChangeAt = now
+            beginNewTurn()
             return .choiceResolved
         }
 
@@ -156,6 +169,11 @@ nonisolated struct StateDetector: Sendable {
             // 変化が無くても busy を見るのは、経過時間だけが動く画面（ツール実行の待ち等）で
             // 一度 completed と誤判定してしまった場合に、自力で生成中へ戻れるようにするため。
             if changed || isBusy {
+                // 完了直後に、作業中の裏付け（busy表示）が無いまま画面だけが変化した場合、
+                // それは応答の再開ではなくステータス行やヒント行の再描画である可能性が高い。
+                // 印を付けておき、下の完了判定で急がないようにする。
+                // (実機で確認した不具合: 1回の応答に対して通知が何度も出ていた)
+                isRedrawAfterCompletion = (state == .completed && !isBusy)
                 state = .thinking
                 completedAt = nil
                 return .becameThinking
@@ -175,16 +193,32 @@ nonisolated struct StateDetector: Sendable {
                 state = .error
                 return .becameError(preview: Self.extractPreview(from: rawText, profile: profile))
             }
-            // busy表示が残っている間は thinking を維持
-            if isBusy { return .none }
+            // busy表示が残っている間は thinking を維持。
+            // ここに来た＝実際に作業していた裏付けが取れたということなので、
+            // 再描画由来の印は落として通常の完了判定へ戻す。
+            if isBusy {
+                isRedrawAfterCompletion = false
+                return .none
+            }
             // N秒変化なし＋プロンプト記号 → completed
+            let requiredStableInterval = isRedrawAfterCompletion ? redrawStableInterval : stableInterval
             if !changed,
                let lastChange = lastChangeAt,
-               now.timeIntervalSince(lastChange) >= stableInterval,
+               now.timeIntervalSince(lastChange) >= requiredStableInterval,
                Self.matches(pattern: profile.promptPattern, in: Self.tail(of: cleaned, lines: 12)) {
+                let preview = Self.extractPreview(from: rawText, profile: profile)
+                isRedrawAfterCompletion = false
+                // 直前に知らせたのと同じ本文なら、新しい応答ではなく同じ応答の再判定。
+                // 状態は待機へ戻すだけにして、通知・音は出さない。
+                guard preview != announcedPreview else {
+                    state = .idle
+                    completedAt = nil
+                    return .becameIdle
+                }
+                announcedPreview = preview
                 state = .completed
                 completedAt = now
-                return .becameCompleted(preview: Self.extractPreview(from: rawText, profile: profile))
+                return .becameCompleted(preview: preview)
             }
             // プロンプト記号が検出できないCLI向けの保険: 長時間静止で idle へ戻す
             if !changed,
@@ -202,6 +236,8 @@ nonisolated struct StateDetector: Sendable {
     mutating func noteUserSentPrompt(at now: Date) -> DetectorEvent {
         completedAt = nil
         lastChangeAt = now
+        // ここから先は新しい応答。前回と同じ本文でも改めて知らせる。
+        beginNewTurn()
         guard state != .thinking else { return .none }
         state = .thinking
         return .becameThinking
@@ -216,8 +252,16 @@ nonisolated struct StateDetector: Sendable {
         pendingChoice = nil
         completedAt = nil
         lastChangeAt = now
+        beginNewTurn()
         state = .thinking
         return .becameThinking
+    }
+
+    /// 新しい応答が始まるときの共通処理。
+    /// 「同じ本文なら知らせない」抑制と、再描画由来の印を持ち越さない。
+    private mutating func beginNewTurn() {
+        announcedPreview = nil
+        isRedrawAfterCompletion = false
     }
 
     /// ユーザーが通知を確認した時に呼ぶ (completed → idle)

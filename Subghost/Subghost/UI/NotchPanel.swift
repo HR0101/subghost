@@ -4,6 +4,14 @@
 //
 //  設計書 6.1: ノッチオーバーレイ（NSPanel .nonactivatingPanel / .borderless）
 //
+//  ノッチUIを載せるウインドウそのものと、その位置・大きさの計算を担う。
+//  NotchMetrics が画面ごとのノッチ位置を求め、NotchPanelController が
+//  パネルの生成・表示・追従を行い、NotchLayout が寸法定数を持つ。
+//
+//  NotchPanel が constrainFrameRect(_:to:) を上書きして矩形をそのまま返しているのは
+//  必須の処置。これが無いと macOS がパネルをメニューバーの下へ押し下げ、
+//  ノッチの位置に固定できなくなる。削除しないこと。
+//
 
 import AppKit
 import CoreGraphics

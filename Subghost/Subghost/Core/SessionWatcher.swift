@@ -5,6 +5,19 @@
 //  設計書 3.3: SessionWatcher（pane出力の監視、状態遷移の判定）
 //            SessionManager（監視対象セッションの選択・切替）
 //
+//  監視の中枢。検出したセッションを MonitoredSession として保持し、
+//  一定間隔の pollOnce() で状態を更新する。副作用（通知・音・記録）はここが持ち、
+//  判定そのものは純粋ロジックの StateDetector に任せる。
+//
+//  2つの監視経路が合流する場所であり、ここが本ファイルの要点:
+//  - フック経路: CLIからのイベントが正、tmux不要（Claude Code / Codex）
+//  - tmux経路 : capture-pane の画面文字から推測、tmuxが要る（全CLI）
+//
+//  一度フックが繋がったセッションには StateDetector.ingest を二度と呼ばない。
+//  画面解析が止まるため、イベントを取りこぼすと Working のまま固まる。
+//  その唯一の受け皿が reconcileStaleHookState で、tmuxがあれば取り直し、
+//  無ければ一定時間後に idle へ倒す。フック処理を触るときもこの網は残すこと。
+//
 
 import Foundation
 import Observation

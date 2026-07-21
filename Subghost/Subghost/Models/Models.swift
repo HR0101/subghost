@@ -4,6 +4,12 @@
 //
 //  設計書 8. データモデル
 //
+//  アプリ全体で共有する値型の定義をまとめた場所。
+//  AI状態(AIState)、CLIごとの検出・判定パターン(CLIProfile)、
+//  ユーザー登録の起動名(CustomAlias)、定型文(Snippet)、
+//  検出したセッション1件(SessionInfo)。
+//  いずれも振る舞いを持たない純粋なデータで、I/Oは Core 側が担う。
+//
 
 import Foundation
 
