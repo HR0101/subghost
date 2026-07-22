@@ -197,19 +197,39 @@ nonisolated enum TmuxClient {
     /// - false: 画面解析で検出した番号メニュー（"❯ 1. Yes" 等、Submit行を持たない）。
     ///   番号キーだけで即確定する構造を前提とし、Enterは送らない。
     /// - true: AskUserQuestion由来の単一選択（タブ形式のUI）。
-    ///   番号キーはカーソル移動/選択の合図でしかなく、確定にはSubmit/Next行への
-    ///   到達とEnterが要る。複数選択(sendChoices)と全く同じ構造のため、
-    ///   要素1つの配列として同じ経路に委ねる。
-    ///   (実機で確認した不具合: ここを単純な「番号キー+Enter」のままにしていたため、
-    ///   Enterが意図しない場所へ着地し、確認画面の"Cancel"を踏んで拒否扱いになっていた)
-    static func sendChoice(_ option: ChoiceOption, totalOptionCount: Int, to target: String) async throws {
-        guard option.needsEnter else {
-            let key = sanitize(option.keystroke)
-            guard !key.isEmpty else { return }
-            try await sendLiteral(key, to: target)
-            return
-        }
-        try await sendChoices([option], totalOptionCount: totalOptionCount, to: target)
+    ///   番号キーを送った直後に画面を確認し、まだ同じ問いの選択肢が残っていれば
+    ///   Submit/Next行への到達とEnterで確定する。
+    ///   (実機で確認した不具合: 複数問構成では、単一選択は番号キーを押した時点で
+    ///   選択が確定し自動的に次の質問(タブ)へ画面が切り替わることがある。それに
+    ///   気づかず一律でSubmit/Next移動のキーを送っていたため、既に切り替わった
+    ///   次の質問の画面に対して誤った位置でEnterを押し、無回答のまま送信していた)
+    ///
+    /// - Parameter allOptionLabels: この問い全体の選択肢ラベル（選んだものだけでなく全て）。
+    ///   選んだラベル1つだけで画面を照合すると、次の質問の画面に偶然同じ文字列
+    ///   （選択済みの回答サマリー等）が含まれていた場合に「まだ同じ問いの画面」と
+    ///   誤判定しうる。全ラベルが必要な分だけ、次の質問への遷移をより確実に検知できる
+    ///   (実機で確認した不具合: ラベル1つだけの判定では、切り替わった次の質問の
+    ///   画面を誤って「同じ画面のまま」と判定し、無関係な位置へキーを送っていた)。
+    static func sendChoice(
+        _ option: ChoiceOption,
+        allOptionLabels: [String],
+        totalOptionCount: Int,
+        to target: String
+    ) async throws {
+        let key = sanitize(option.keystroke)
+        guard !key.isEmpty else { return }
+        try await sendLiteral(key, to: target)
+
+        guard option.needsEnter else { return }
+        try? await Task.sleep(for: keyInterval)
+
+        // まだ同じ問いの選択肢が画面に残っているかを確認する。既に消えていれば
+        // 番号キーだけで確定・画面遷移済みとみなし、それ以上の操作はしない。
+        guard let paneText = await capturePane(target: target),
+              ChoicePrompt.matchesCurrentScreen(optionLabels: allOptionLabels, in: paneText)
+        else { return }
+
+        try await confirmSelection(to: target)
     }
 
     /// 画面キャプチャの読み直しを試みる回数。1回失敗しただけの一時的な取りこぼしを拾うため。
@@ -244,6 +264,12 @@ nonisolated enum TmuxClient {
             try? await Task.sleep(for: keyInterval)
         }
 
+        try await confirmSelection(to: target)
+    }
+
+    /// 選択肢を選び終えた後、Submit/Next行まで移動してEnterで確定する共通処理。
+    /// 単一選択(sendChoice)・複数選択(sendChoices)の両方から使う。
+    private static func confirmSelection(to target: String) async throws {
         // Submit/Next行までの距離は必ず画面から確認する。一時的な取りこぼしに備えて
         // 数回だけ読み直すが、それでも読めなければ当て推量で↓を送らず中止する。
         var steps: Int?

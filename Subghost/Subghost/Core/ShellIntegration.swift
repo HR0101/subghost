@@ -58,8 +58,11 @@ nonisolated enum ShellIntegration {
     /// - Parameter extraCommands: ユーザー登録のカスタムエイリアス名（実行ファイル名）。
     ///   ビルトインと重複するもの（大文字小文字を区別しない）は無視する。
     static func scriptBody(extraCommands: [String] = []) -> String {
+        // ここでコマンド名をそのままシェル関数定義へ埋め込むため、呼び出し元の
+        // バリデーション（CustomAliasStore.add）を信頼しきらず、ここでも
+        // 安全な文字だけに絞る（多層防御。実機レビューで指摘された脆弱性）。
         var seen = Set<String>()
-        let allCommands = (wrappedCommands + extraCommands)
+        let allCommands = (wrappedCommands + extraCommands.filter(CustomAlias.isValidName))
             .filter { seen.insert($0.lowercased()).inserted }
         let functions = allCommands.map { command in
             "\(command)() { _subghost_run \(command) \"$@\"; }"
@@ -168,6 +171,17 @@ nonisolated enum ShellIntegration {
         let cleaned = removeBlock(from: current)
         try cleaned.write(to: zshrcWriteURL, atomically: true, encoding: .utf8)
         try? FileManager.default.removeItem(atPath: scriptPath)
+    }
+
+    /// 既に導入済みの場合だけ、最新のカスタムエイリアスを反映してスクリプト本体を
+    /// 再生成する。zshrcは変更しない（導入されていなければ何もしない）。
+    ///
+    /// カスタムエイリアスの追加・削除のたびに呼ぶ必要がある。導入時にしか
+    /// スクリプトを書き出さないと、後から登録したエイリアス名が自動tmux起動に
+    /// 反映されないままになる（実機レビューで指摘された不具合）。
+    static func refreshScriptIfInstalled(extraCommands: [String] = []) {
+        guard isInstalled() else { return }
+        try? writeScript(extraCommands: extraCommands)
     }
 
     // MARK: - テキスト操作（テスト対象の純粋ロジック）

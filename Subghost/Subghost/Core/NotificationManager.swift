@@ -86,11 +86,24 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     static let shared = NotificationManager()
 
-    /// 承認/質問通知に付けるカテゴリと、そのアクション識別子
+    /// 承認/質問通知に付けるカテゴリと、そのアクション識別子。
+    ///
+    /// 通知バナーのアクションボタンは、選択肢の文言（問いごとに変わる）を
+    /// そのままタイトルにする。UNNotificationCategory は識別子ごとに事前登録が
+    /// 必要なため、「選択肢数」を識別子にしたカテゴリを問いが来るたびに
+    /// 動的に作り直す（registerChoiceCategory 参照）。
     private nonisolated enum Category {
-        static let choice = "SUBGHOST_CHOICE"
-        static let approve = "SUBGHOST_APPROVE"
-        static let deny = "SUBGHOST_DENY"
+        static func choice(optionCount: Int) -> String { "SUBGHOST_CHOICE_\(optionCount)" }
+        static func option(at index: Int) -> String { "SUBGHOST_OPTION_\(index)" }
+        /// 通知バナーに出すボタンの最大数。増やすとバナーが煩雑になるため絞る。
+        static let maxButtonCount = 4
+
+        /// アクション識別子から選択肢のインデックスを取り出す（本体タップとの判別用）
+        static func optionIndex(from actionIdentifier: String) -> Int? {
+            let prefix = "SUBGHOST_OPTION_"
+            guard actionIdentifier.hasPrefix(prefix) else { return nil }
+            return Int(actionIdentifier.dropFirst(prefix.count))
+        }
     }
 
     /// 通知のuserInfoに載せるキー
@@ -108,20 +121,32 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 NSLog("Subghost: 通知の許可取得に失敗しました: \(error.localizedDescription)")
             }
         }
-        registerCategories(on: center)
     }
 
-    /// 通知バナー上の「承認 / 拒否」ボタンを登録する
-    private func registerCategories(on center: UNUserNotificationCenter) {
-        let approve = UNNotificationAction(identifier: Category.approve, title: "承認", options: [])
-        let deny = UNNotificationAction(identifier: Category.deny, title: "拒否", options: [.destructive])
+    /// この問いの選択肢ラベルでボタンを組み立て、動的にカテゴリを登録してから完了を通知する。
+    ///
+    /// 選択肢数ごとの識別子を使い回し、都度そのタイトルを最新の内容へ差し替える
+    /// （事前に無限の組み合わせを登録することはできないため）。登録が完了する前に
+    /// 通知を出すとボタンが出ないことがあるため、完了ハンドラで直列化する。
+    private func registerChoiceCategory(for options: [ChoiceOption], completion: @escaping (String) -> Void) {
+        let identifier = Category.choice(optionCount: options.count)
+        let actions = options.enumerated().map { index, option in
+            UNNotificationAction(
+                identifier: Category.option(at: index),
+                title: option.label,
+                options: option.isNegative ? [.destructive] : []
+            )
+        }
         let category = UNNotificationCategory(
-            identifier: Category.choice,
-            actions: [approve, deny],
-            intentIdentifiers: [],
-            options: []
+            identifier: identifier, actions: actions, intentIdentifiers: [], options: []
         )
-        center.setNotificationCategories([category])
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationCategories { existing in
+            var updated = existing.filter { $0.identifier != identifier }
+            updated.insert(category)
+            center.setNotificationCategories(updated)
+            DispatchQueue.main.async { completion(identifier) }
+        }
     }
 
     // MARK: - 完了・エラー通知
@@ -170,13 +195,22 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         let choiceToken = choiceRegistry.issue(for: reference)
         var userInfo = reference.userInfo
         userInfo[UserInfoKey.choiceToken] = choiceToken
-        // はい／いいえが揃っているときだけバナーにボタンを出す
-        if choice.affirmativeOption != nil, choice.negativeOption != nil {
-            content.categoryIdentifier = Category.choice
-        }
         content.userInfo = userInfo
 
-        post(content: content, identifier: notificationIdentifier(prefix: "subghost-choice", session: session))
+        let identifier = notificationIdentifier(prefix: "subghost-choice", session: session)
+
+        // 複数選択は「チェックを入れてからSubmit」という操作を通知のボタンでは
+        // 表現できない（1つ選ぶと即座に確定してしまう）ため、ボタンは出さず
+        // 本体タップでの操作に委ねる。単一選択はボタン数の実用上の上限内であれば
+        // その場で回答できるようにする。
+        guard !choice.isMultiSelect, (2...Category.maxButtonCount).contains(choice.options.count) else {
+            post(content: content, identifier: identifier)
+            return
+        }
+        registerChoiceCategory(for: choice.options) { [weak self] categoryIdentifier in
+            content.categoryIdentifier = categoryIdentifier
+            self?.post(content: content, identifier: identifier)
+        }
     }
 
     /// 回答済み・完了などで不要になった承認通知を失効させる。
@@ -220,16 +254,16 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         // userInfoはSendableでないため、Taskへ渡す前に必要な値だけ取り出す
         let sessionReference = NotificationSessionReference(userInfo: userInfo)
         let choiceToken = userInfo[UserInfoKey.choiceToken] as? String
+        let optionIndex = Category.optionIndex(from: actionIdentifier)
 
         Task { @MainActor in
-            switch actionIdentifier {
-            case Category.approve, Category.deny:
+            if let optionIndex {
                 Self.respondFromNotification(
                     sessionReference: sessionReference,
                     choiceToken: choiceToken,
-                    isAffirmative: actionIdentifier == Category.approve
+                    optionIndex: optionIndex
                 )
-            default:
+            } else {
                 // 本体タップ：通知を発行したセッションのタブへ移動する (設計書 4.2)
                 Self.jumpFromNotification(to: sessionReference)
             }
@@ -242,7 +276,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     private static func respondFromNotification(
         sessionReference: NotificationSessionReference?,
         choiceToken: String?,
-        isAffirmative: Bool
+        optionIndex: Int
     ) {
         guard let sessionReference, let choiceToken else {
             NSLog("Subghost: 通知アクションに必要な情報が欠けています")
@@ -260,11 +294,11 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             NSLog("Subghost: 古い、または解決済みの通知アクションを無視しました")
             return
         }
-        let option = isAffirmative ? choice.affirmativeOption : choice.negativeOption
-        guard let option else {
-            NSLog("Subghost: 現在の質問に対応する選択肢がありません")
+        guard choice.options.indices.contains(optionIndex) else {
+            NSLog("Subghost: 通知のボタンに対応する選択肢がありません")
             return
         }
+        let option = choice.options[optionIndex]
         guard shared.choiceRegistry.consume(choiceToken, for: sessionReference) else { return }
 
         Task { @MainActor in

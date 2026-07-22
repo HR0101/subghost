@@ -65,8 +65,13 @@ final class AppCoordinator {
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
     @ObservationIgnored private var notificationPresentationTask: Task<Void, Never>?
-    /// ユーザーが閉じた問い合わせ（セッション名 → 内容）。同じ内容では再展開しない。
+    /// ユーザーが明示的に閉じた問い合わせ（セッション名 → 内容）。同じ内容では再展開しない。
     @ObservationIgnored private var dismissedChoices: [String: PendingChoice] = [:]
+    /// タイムアウトで自動的に閉じた問い合わせ（セッション名 → 内容・時刻）。
+    /// ユーザーが見た記録ではないため、クールダウンの後は再度自動展開の対象に戻す。
+    @ObservationIgnored private var autoClosedChoices: [String: (choice: PendingChoice, at: Date)] = [:]
+    /// 自動で閉じた直後にすぐ再展開してしまわないための猶予
+    private static let autoCloseCooldown: TimeInterval = 5.0
 
     private(set) var mode: NotchMode = .compact
     /// パネルコントローラが算出したノッチ寸法（ビューが形状描画に使う）
@@ -278,6 +283,7 @@ final class AppCoordinator {
         case .choiceResolved:
             NotificationManager.shared.invalidateChoice(for: session.info)
             dismissedChoices[session.info.tty] = nil
+            autoClosedChoices[session.info.tty] = nil
             // ターミナル側で回答された場合はノッチを畳む
             if choiceSession === session { collapse() }
         case .becameThinking, .becameIdle:
@@ -303,7 +309,9 @@ final class AppCoordinator {
 
     private func presentNotification(for session: MonitoredSession) {
         // 非同期の前面タブ判定中に入力や承認が開いた場合、それを通知で上書きしない。
-        guard mode != .input, mode != .choice else { return }
+        // オンボーディング中も同様に、通常の完了/エラー通知でセットアップ画面を
+        // 上書きしない（実機レビューで指摘: 上書きされた後は自動で戻らなかった）。
+        guard mode != .input, mode != .choice, mode != .onboarding else { return }
         notificationSession = session
         setMode(.notification)
 
@@ -351,10 +359,7 @@ final class AppCoordinator {
             guard let self, !Task.isCancelled,
                   self.mode == .choice, self.choiceSession === session
             else { return }
-            // collapse() だけだと、まだ未回答という理由で resumePendingChoiceIfNeeded() が
-            // 即座に再展開してしまう。dismissChoice() 経由にして「閉じた」記録を残し、
-            // 同じ問いを再展開しないようにする（Escキーで閉じた場合と同じ扱い）。
-            self.dismissChoice()
+            self.autoCloseChoice(session: session)
         }
     }
 
@@ -401,10 +406,10 @@ final class AppCoordinator {
         }
     }
 
-    /// 回答せずにノッチだけ閉じる（CLIへは何も送らない）
+    /// 回答せずにノッチだけ閉じる（CLIへは何も送らない、Escキー等ユーザーの明示操作）
     func dismissChoice() {
         rememberDismissal()
-        collapse()
+        collapseInternal(resumeIfNeeded: true)
     }
 
     /// 閉じた問い合わせを記録し、同じ内容で再展開しないようにする
@@ -413,13 +418,35 @@ final class AppCoordinator {
         dismissedChoices[session.info.tty] = choice
     }
 
+    /// タイムアウトによる自動クローズ。ユーザーが見たわけではないため
+    /// dismissedChoices には記録しない。ただし collapse() をそのまま呼ぶと
+    /// resumePendingChoiceIfNeeded() が未回答のままの選択肢を検知して即座に
+    /// 開き直してしまい、自動で閉じた意味が無くなる。そのため resumeIfNeeded なしで
+    /// 畳み、短いクールダウンの後に改めて自動展開の対象へ戻す。
+    /// (実機レビューで指摘: 自動タイムアウトで閉じると二度と再表示できなかった)
+    private func autoCloseChoice(session: MonitoredSession) {
+        if let choice = session.pendingChoice {
+            autoClosedChoices[session.info.tty] = (choice, Date())
+        }
+        collapseInternal(resumeIfNeeded: false)
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.autoCloseCooldown))
+            self?.resumePendingChoiceIfNeeded()
+        }
+    }
+
     /// 折りたたみ後、まだ回答されていない問い合わせが残っていれば改めて展開する
     private func resumePendingChoiceIfNeeded() {
         guard mode == .compact else { return }
         guard let session = watcher.sessionAwaitingResponse,
-              let choice = session.pendingChoice,
-              dismissedChoices[session.info.tty] != choice
+              let choice = session.pendingChoice
         else { return }
+        if dismissedChoices[session.info.tty] == choice { return }
+        if let recent = autoClosedChoices[session.info.tty],
+           recent.choice == choice,
+           Date().timeIntervalSince(recent.at) < Self.autoCloseCooldown {
+            return
+        }
         showChoice(for: session)
     }
 
@@ -480,12 +507,16 @@ final class AppCoordinator {
     }
 
     func collapse() {
+        collapseInternal(resumeIfNeeded: true)
+    }
+
+    private func collapseInternal(resumeIfNeeded: Bool) {
         collapseTask?.cancel()
         notificationSession = nil
         choiceSession = nil
         setMode(.compact)
         panelController?.resignInput()
-        resumePendingChoiceIfNeeded()
+        if resumeIfNeeded { resumePendingChoiceIfNeeded() }
     }
 
     func sendPrompt() {
@@ -658,16 +689,22 @@ final class AppCoordinator {
     // MARK: - カスタムエイリアス
 
     /// 追加後、watcherの参照済みリストも同期する（次回ポーリングから反映）。
+    /// 自動tmux起動が既に導入済みなら、スクリプトも最新のエイリアスで再生成する
+    /// （でないと導入後に追加したエイリアスが自動tmux起動へ反映されない）。
     @discardableResult
     func addCustomAlias(name: String, baseProfileID: String) -> Bool {
         let added = customAliasStore.add(name: name, baseProfileID: baseProfileID)
-        if added { watcher.customAliases = customAliasStore.aliases }
+        if added {
+            watcher.customAliases = customAliasStore.aliases
+            ShellIntegration.refreshScriptIfInstalled(extraCommands: customAliasStore.aliases.map(\.name))
+        }
         return added
     }
 
     func removeCustomAlias(_ alias: CustomAlias) {
         customAliasStore.remove(alias)
         watcher.customAliases = customAliasStore.aliases
+        ShellIntegration.refreshScriptIfInstalled(extraCommands: customAliasStore.aliases.map(\.name))
     }
 
     /// ビューが実際に描画した高さを伝える。

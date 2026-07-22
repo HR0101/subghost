@@ -90,8 +90,7 @@ nonisolated struct StateDetector: Sendable {
         }
 
         // 実行中を示す表示が出ていれば生成中とみなす
-        if Self.matches(
-            pattern: profile.busyPattern, in: Self.stripDecoration(rawText, profile: profile)) {
+        if Self.isCurrentlyBusy(rawText, profile: profile) {
             state = .thinking
             return .becameThinking
         }
@@ -104,8 +103,7 @@ nonisolated struct StateDetector: Sendable {
     mutating func ingest(rawText: String, at now: Date) -> DetectorEvent {
         let cleaned = Self.clean(rawText, profile: profile)
         // 作業中表示の判定には、経過時間やトークン数を残したテキストを使う（stripDecoration参照）
-        let isBusy = Self.matches(
-            pattern: profile.busyPattern, in: Self.stripDecoration(rawText, profile: profile))
+        let isBusy = Self.isCurrentlyBusy(rawText, profile: profile)
 
         // 初回は基準値として保存するだけ（起動時に thinking と誤判定しない）
         guard hasBaseline else {
@@ -318,6 +316,19 @@ nonisolated struct StateDetector: Sendable {
     static func tail(of text: String, lines count: Int) -> String {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         return lines.suffix(count).joined(separator: "\n")
+    }
+
+    /// 現在のTUIステータス領域に作業中表示があるか。
+    ///
+    /// capture-pane全体には過去の応答やユーザーの依頼文が残るため、そこに
+    /// "Working" / "Thinking" が含まれるだけで生成中と判定してはいけない。
+    /// 入力欄と現在のステータスが置かれる末尾だけを対象にする。
+    static func isCurrentlyBusy(_ rawText: String, profile: CLIProfile) -> Bool {
+        let currentStatus = tail(
+            of: stripDecoration(rawText, profile: profile),
+            lines: 12
+        )
+        return matches(pattern: profile.busyPattern, in: currentStatus)
     }
 
     /// 本文ではなく、CLIが常設しているヒント・モード表示の行。

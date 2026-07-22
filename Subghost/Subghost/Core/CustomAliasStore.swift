@@ -29,11 +29,15 @@ final class CustomAliasStore {
         load()
     }
 
-    /// 名前を追加する。空文字・重複（大文字小文字を区別しない）は無視する。
+    /// 名前を追加する。空文字・不正な文字・重複（大文字小文字を区別しない）は無視する。
+    ///
+    /// この名前はシェルスクリプトへ直接埋め込まれるため、英数字・ハイフン・
+    /// アンダースコア以外を許すとコマンドインジェクションになりうる
+    /// (CustomAlias.isValidName / 実機レビューで指摘された脆弱性)。
     @discardableResult
     func add(name: String, baseProfileID: String) -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return false }
+        guard CustomAlias.isValidName(trimmed) else { return false }
         guard !aliases.contains(where: { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) else {
             return false
         }
