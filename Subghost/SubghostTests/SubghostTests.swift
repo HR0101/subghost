@@ -296,6 +296,28 @@ struct StateDetectorTests {
         #expect(detector.state == .thinking)
     }
 
+    @Test func 過去のWorking表示が画面上部に残っていても入力待ちなら完了になる() {
+        var detector = StateDetector(profile: .codex)
+        detector.stableInterval = 1.5
+        let t0 = Date(timeIntervalSince1970: 0)
+        _ = detector.ingest(rawText: "初期画面", at: t0)
+
+        // capture-paneの可視領域上部に以前の作業表示が残り、末尾は現在の入力待ち。
+        // 画面全体へbusyPatternを当てると、先頭のWorkingを拾って永久にthinkingになる。
+        let final = (["• Working (12s • Esc to interrupt)"]
+            + (1...12).map { "完了した応答の行\($0)" }
+            + ["›"])
+            .joined(separator: "\n")
+
+        _ = detector.ingest(rawText: final, at: t0.addingTimeInterval(0.8))
+        let event = detector.ingest(rawText: final, at: t0.addingTimeInterval(3.0))
+        guard case .becameCompleted = event else {
+            Issue.record("過去のWorking表示に引きずられた: \(event)")
+            return
+        }
+        #expect(detector.state == .completed)
+    }
+
     @Test func エラーパターンでerrorへ遷移する() {
         var detector = makeDetector()
         let t0 = Date(timeIntervalSince1970: 0)
@@ -630,6 +652,30 @@ struct AgentDiscoveryTests {
         let merged = CLIProfile.withCustomAliases([alias])
         let codexProfile = merged.first { $0.id == "codex" }
         #expect(codexProfile?.executableNames.filter { $0 == "codex" }.count == 1)
+    }
+
+    @Test func 英数字とハイフンアンダースコアのエイリアス名は妥当とみなす() {
+        #expect(CustomAlias.isValidName("codexA"))
+        #expect(CustomAlias.isValidName("my-agent_2"))
+        #expect(CustomAlias.isValidName("_underscore"))
+    }
+
+    @Test(arguments: [
+        "",                     // 空文字
+        "2fast",                // 数字始まり
+        "-dash",                // ハイフン始まり
+        "my agent",             // 空白
+        "codex; rm -rf ~",      // コマンド区切り
+        "codex`whoami`",        // コマンド置換（バッククォート）
+        "$(whoami)",            // コマンド置換（$構文）
+        "codex&&ls",            // 論理演算子
+        "codex|ls",             // パイプ
+        String(repeating: "a", count: 65),   // 長すぎる
+    ])
+    func シェルへ危険な文字を含むエイリアス名は不正とみなす(_ name: String) {
+        // シェルスクリプトへそのまま埋め込まれるため、これらを許すと
+        // コマンドインジェクションが成立してしまう（実機レビューで指摘された脆弱性）
+        #expect(!CustomAlias.isValidName(name))
     }
 
     @Test func tmuxのペイン宛先を解析する() {
@@ -1292,8 +1338,20 @@ struct HookEventTests {
 
     @Test func 判定JSONを生成する() {
         #expect(HookDecision.passthrough.json == "{}")
-        #expect(HookDecision.allow.json.contains("\"permissionDecision\":\"allow\""))
-        #expect(HookDecision.deny(reason: "危険").json.contains("\"permissionDecision\":\"deny\""))
+
+        let allowData = Data(HookDecision.allow.json.utf8)
+        let allowRoot = try? JSONSerialization.jsonObject(with: allowData) as? [String: Any]
+        let allowOutput = allowRoot?["hookSpecificOutput"] as? [String: Any]
+        let allowDecision = allowOutput?["decision"] as? [String: Any]
+        #expect(allowDecision?["behavior"] as? String == "allow")
+        #expect(allowOutput?["permissionDecision"] == nil)
+
+        let denyData = Data(HookDecision.deny(reason: "危険").json.utf8)
+        let denyRoot = try? JSONSerialization.jsonObject(with: denyData) as? [String: Any]
+        let denyOutput = denyRoot?["hookSpecificOutput"] as? [String: Any]
+        let denyDecision = denyOutput?["decision"] as? [String: Any]
+        #expect(denyDecision?["behavior"] as? String == "deny")
+        #expect(denyDecision?["message"] as? String == "危険")
     }
 }
 
@@ -1844,6 +1902,15 @@ struct ShellIntegrationTests {
         #expect(body.components(separatedBy: "codex() {").count - 1 == 1)
     }
 
+    @Test func 危険な文字を含むエイリアス名はスクリプトへ埋め込まない() {
+        // CustomAliasStore側のバリデーションをすり抜けても、ここで多層防御する
+        // （実機レビューで指摘されたシェルインジェクションへの対策）
+        let body = ShellIntegration.scriptBody(extraCommands: ["codex; rm -rf ~", "$(whoami)", "codexA"])
+        #expect(!body.contains("rm -rf"))
+        #expect(!body.contains("whoami"))
+        #expect(body.contains("codexA() { _subghost_run codexA"))
+    }
+
     @Test func 目印で囲んだブロックだけを取り除く() {
         let zshrc = """
         export PATH=/usr/bin
@@ -2235,11 +2302,67 @@ struct ChoicePromptTests {
         }
         #expect(choice.kind == .approval)
         #expect(choice.title == "Do you want to make this edit to foo.swift?")
-        #expect(choice.options.count == 3)
-        #expect(choice.options[0].keystroke == "1")
+        #expect(choice.options.map(\.label) == [
+            "今回だけ許可", "このセッション中は許可", "拒否する",
+        ])
+        #expect(choice.options.map(\.keystroke) == ["1", "2", "3"])
+        #expect(choice.options.map(\.screenLabel) == [
+            "Yes", "Yes, allow all edits this session", "No, and tell Claude what to do (esc)",
+        ])
         #expect(choice.options[0].isAffirmative)
+        #expect(choice.options[1].isAffirmative)
         #expect(choice.options[2].isNegative)
         #expect(choice.options.allSatisfy { !$0.needsEnter })
+    }
+
+    @Test func Codex固有の承認項目を省略せず実際の番号を保つ() {
+        let codexApprovalScreen = """
+        Would you like to run this command?
+        ❯ 1. Yes, proceed
+          2. Yes, and don't ask again for commands that start with `git status`
+          3. No, and tell Codex what to do differently
+        """
+        guard let choice = ChoicePrompt.detect(in: codexApprovalScreen, profile: .codex) else {
+            Issue.record("Codexの承認項目を検出できなかった")
+            return
+        }
+        #expect(choice.kind == .approval)
+        #expect(choice.options.map(\.label) == [
+            "今回だけ許可", "今後この種類の操作を許可", "拒否する",
+        ])
+        #expect(choice.options.map(\.keystroke) == ["1", "2", "3"])
+        #expect(choice.options.map(\.screenLabel) == [
+            "Yes, proceed",
+            "Yes, and don't ask again for commands that start with `git status`",
+            "No, and tell Codex what to do differently",
+        ])
+    }
+
+    @Test func Codexの補足情報付き承認画面から実際の三つのキーを取得する() {
+        let screen = """
+        Would you like to run the following command?
+
+        Environment: local
+
+        Reason: Subghostの承認項目をテストします
+
+        $ date
+
+        › 1. Yes, proceed (y)
+          2. Yes, and don't ask again for commands that start with `date` (p)
+          3. No, and tell Codex what to do differently (esc)
+        """
+        guard let choice = ChoicePrompt.detect(in: screen, profile: .codex) else {
+            Issue.record("Codexの補足情報付き承認画面を検出できなかった")
+            return
+        }
+        // PermissionRequest Hook側ではこの実キーを使うため、画面分類の種類には依存しない。
+        #expect(choice.options.map(\.keystroke) == ["1", "2", "3"])
+        #expect(choice.options.map(\.screenLabel) == [
+            "Yes, proceed (y)",
+            "Yes, and don't ask again for commands that start with `date` (p)",
+            "No, and tell Codex what to do differently (esc)",
+        ])
     }
 
     @Test func 承認以外の問いかけは質問として分類する() {
@@ -2266,6 +2389,7 @@ struct ChoicePromptTests {
             return
         }
         #expect(choice.kind == .approval)
+        #expect(choice.options.map(\.label) == ["今回だけ許可", "拒否する"])
         #expect(choice.options.map(\.keystroke) == ["y", "n"])
         // y/n形式は入力確定にEnterが必要
         #expect(choice.options.allSatisfy { $0.needsEnter })
@@ -2358,6 +2482,19 @@ struct ChoicePromptTests {
 
     @Test func 選択肢が空なら送信前照合を通さない() {
         #expect(!ChoicePrompt.matchesCurrentScreen(optionLabels: [], in: "何かの画面"))
+    }
+
+    @Test func 画面幅で折り返された長いラベルでも送信前照合を通す() {
+        // 実機で確認した不具合: 長いラベルはターミナルの画面幅で複数行に折り返され、
+        // 日本語は単語境界と無関係に任意の文字位置で改行されるため、
+        // 改行を挟んだ状態のままだと単純な contains では一致しなくなっていた。
+        let longLabel = "非常に長い説明文が付いた選択肢を含むパターンで、ノッチ側で折り返しや省略がどう表示されるかを見たいケース"
+        let paneText = """
+        ❯ 2. 非常に長い説明文が付いた選択肢を含むパターンで、ノッチ側で折
+             り返しや省略がどう表示されるかを見たいケース
+             Submit
+        """
+        #expect(ChoicePrompt.matchesCurrentScreen(optionLabels: [longLabel], in: paneText))
     }
 }
 

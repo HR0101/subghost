@@ -30,16 +30,37 @@ nonisolated struct ChoiceOption: Sendable, Equatable, Hashable, Identifiable {
     /// 1始まりの選択肢番号。y/n形式など番号のない問いでは 0。
     let number: Int
     let label: String
+    /// tmux画面上に実際に表示されている元ラベル。
+    ///
+    /// 承認項目はノッチ上で共通の日本語へ揃えるが、送信直前の画面照合には
+    /// CLI固有の元ラベルが必要になるため、表示用とは分けて保持する。
+    let screenLabel: String
     /// tmuxへリテラル送信するキー（"1" や "y"）
     let keystroke: String
     /// キー送信後にEnterが必要か（番号選択メニューは即時確定のため不要）
     let needsEnter: Bool
 
+    init(
+        number: Int,
+        label: String,
+        keystroke: String,
+        needsEnter: Bool,
+        screenLabel: String? = nil
+    ) {
+        self.number = number
+        self.label = label
+        self.screenLabel = screenLabel ?? label
+        self.keystroke = keystroke
+        self.needsEnter = needsEnter
+    }
+
     var id: String { "\(number)-\(keystroke)" }
 
     /// 「はい」系の選択肢か（通知アクションの割り当てに使う）
     var isAffirmative: Bool {
-        ChoicePrompt.matches(pattern: #"(?i)^(y\b|yes\b|allow\b|approve\b|accept\b|ok\b|はい|承認|許可)"#, in: label)
+        ChoicePrompt.matches(
+            pattern: #"(?i)^(y\b|yes\b|allow\b|approve\b|accept\b|ok\b|proceed\b|continue\b|はい|承認|許可|今回(?:だけ)?許可|このセッション中は許可|今後.*許可|継続.*許可)"#,
+            in: label)
     }
 
     /// 「いいえ」系の選択肢か
@@ -106,8 +127,9 @@ nonisolated enum ChoicePrompt {
     /// y/n 形式のプロンプトが「生きている」とみなす末尾からの距離
     private static let yesNoTailLines = 5
 
-    /// 選択肢行: "❯ 1. Yes" / "  2) No" / "▶ 3. …"
-    private static let optionPattern = #"^(?:[❯>▶●•*]\s*)?(\d{1,2})[.)]\s+(\S.*)$"#
+    /// 選択肢行: "❯ 1. Yes" / "› 1. Yes" / "  2) No" / "▶ 3. …"
+    /// Codexはプロンプトでは `›`、バージョンや画面によっては `❯` を使うため両方扱う。
+    private static let optionPattern = #"^(?:[❯›>▶●•*]\s*)?(\d{1,2})[.)]\s+(\S.*)$"#
     /// y/n 形式: "Continue? (y/n)" / "上書きしますか [Y/n]:"
     private static let yesNoPattern = #"(?i)[\[(]\s*y(?:es)?\s*/\s*n(?:o)?\s*[\])]\s*[:?]?\s*$"#
     /// 選択肢ブロックの直上にあってもタイトルとみなさないノイズ行。
@@ -152,11 +174,12 @@ nonisolated enum ChoicePrompt {
         let (title, detail) = extractTitle(above: index, in: lines)
         guard !title.isEmpty else { return nil }
 
+        let kind = classify(title: title, detail: detail, profile: profile)
         return PendingChoice(
-            kind: classify(title: title, detail: detail, profile: profile),
+            kind: kind,
             title: title,
             detail: detail,
-            options: collected
+            options: kind == .approval ? localizedApprovalOptions(collected) : collected
         )
     }
 
@@ -208,12 +231,43 @@ nonisolated enum ChoicePrompt {
             ChoiceOption(number: 1, label: "Yes", keystroke: "y", needsEnter: true),
             ChoiceOption(number: 2, label: "No", keystroke: "n", needsEnter: true),
         ]
+        let kind = classify(title: title, detail: [], profile: profile)
         return PendingChoice(
-            kind: classify(title: title, detail: [], profile: profile),
+            kind: kind,
             title: title,
             detail: [],
-            options: options
+            options: kind == .approval ? localizedApprovalOptions(options) : options
         )
+    }
+
+    /// Claude/Codexで異なる承認メニューを、実際の番号を保ったまま日本語化する。
+    ///
+    /// 選択肢を省略・再採番すると、ノッチの「2」とCLIの「3」のような食い違いが生じる。
+    /// そのため、表示ラベルだけを揃え、元の番号・キー・画面ラベルはすべて維持する。
+    static func localizedApprovalOptions(_ options: [ChoiceOption]) -> [ChoiceOption] {
+        options.map { option in
+            let source = option.screenLabel.lowercased()
+            let localizedLabel: String
+            if option.isNegative {
+                localizedLabel = "拒否する"
+            } else if source.contains("don't ask again") || source.contains("今後") {
+                localizedLabel = "今後この種類の操作を許可"
+            } else if source.contains("session") || source.contains("セッション") {
+                localizedLabel = "このセッション中は許可"
+            } else if option.isAffirmative {
+                localizedLabel = "今回だけ許可"
+            } else {
+                localizedLabel = option.label
+            }
+
+            return ChoiceOption(
+                number: option.number,
+                label: localizedLabel,
+                keystroke: option.keystroke,
+                needsEnter: option.needsEnter,
+                screenLabel: option.screenLabel
+            )
+        }
     }
 
     // MARK: - 補助
@@ -284,9 +338,21 @@ nonisolated enum ChoicePrompt {
     ///
     /// タイトル全文の完全一致は求めない（長い問いは画面幅で折り返されるため）。
     /// 各選択肢のラベルが画面テキストに含まれているかで緩やかに判定する。
+    ///
+    /// 比較時は空白（改行含む）を無視する。長いラベルは画面幅で折り返され、
+    /// 特に日本語は単語境界と無関係に任意の文字位置で改行されるため、改行を
+    /// 残したままの単純な contains では一致しなくなる
+    /// (実機で確認した不具合: 長文ラベルの選択肢だけ「画面が変わった」と
+    ///  誤判定され、送信が常にブロックされていた)。
     nonisolated static func matchesCurrentScreen(optionLabels: [String], in paneText: String) -> Bool {
         guard !optionLabels.isEmpty else { return false }
-        let normalized = normalizedLines(from: paneText).joined(separator: "\n")
-        return optionLabels.allSatisfy { normalized.contains($0) }
+        let normalized = collapsingWhitespace(normalizedLines(from: paneText).joined(separator: "\n"))
+        return optionLabels.allSatisfy { normalized.contains(collapsingWhitespace($0)) }
+    }
+
+    /// 空白文字（スペース・改行など）をすべて取り除く。
+    /// 画面幅での折り返しによって元の連続した文字列が分断されるのを吸収するため。
+    private static func collapsingWhitespace(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
     }
 }

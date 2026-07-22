@@ -415,9 +415,7 @@ final class SessionWatcher {
                 let cleaned = StateDetector.clean(text, profile: profile)
                 // busyの判定は経過時間・トークン数を残したテキストで行う
                 // (StateDetector.stripDecoration のコメント参照)
-                if StateDetector.matches(
-                    pattern: profile.busyPattern,
-                    in: StateDetector.stripDecoration(text, profile: profile)) {
+                if StateDetector.isCurrentlyBusy(text, profile: profile) {
                     return   // 実際にまだ動作中
                 }
                 if StateDetector.matches(
@@ -680,12 +678,52 @@ final class SessionWatcher {
         // ユーザー操作の瞬間に「最後の活動時刻」を更新しておく
         session.lastActivityAt = Date()
 
-        // フック経由の承認は、待たせている接続に判定を返すだけでよい（キー送信は不要）
+        // Hook連携中でもtmuxがある場合は、CLIの実画面に表示された番号を送る。
+        // Codex/ClaudeのHook応答仕様には差や変更があり、JSONだけを返す経路では
+        // ノッチ上は送信済みでもCLIの承認画面が残ることがあった。実画面を読み直して
+        // 選択肢とキーを照合してから、Hookを素通しで解放し、その番号を送る。
         if session.pendingHookConnection != nil {
-            let decision: HookDecision = first.isNegative
-                ? .deny(reason: "Subghostで拒否しました")
-                : .allow
-            session.releasePendingHook(with: decision)
+            if let target = session.info.tmuxTarget {
+                var liveChoice: PendingChoice?
+                for _ in 0..<4 {
+                    if let text = await TmuxClient.capturePane(target: target),
+                       let detected = ChoicePrompt.detect(in: text, profile: session.info.profile) {
+                        // ここへ来る時点でHookのPermissionRequestだと確定している。
+                        // Codexは質問文と選択肢の間にEnvironment/Reason/コマンドを挟むため、
+                        // 画面テキストだけの分類結果がquestionでも番号メニューは利用できる。
+                        liveChoice = detected
+                        break
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+
+                guard let liveChoice,
+                      let liveOption = liveChoice.options.first(where: {
+                          $0.keystroke.lowercased() == first.keystroke.lowercased()
+                      })
+                else {
+                    // 実際の画面と対応するキーを確認できない限り当て推量で送らない。
+                    throw SessionError.choiceScreenChanged
+                }
+
+                // 送信が一時的に失敗して再試行する場合も実画面のラベルで照合できるよう、
+                // pendingChoiceを検出結果へ差し替えてからHookを解放する。
+                session.pendingChoice = liveChoice
+                session.releasePendingHook(with: .passthrough)
+                try? await Task.sleep(for: .milliseconds(120))
+                try await TmuxClient.sendChoice(
+                    liveOption,
+                    allOptionLabels: liveChoice.options.map(\.screenLabel),
+                    totalOptionCount: liveChoice.options.count,
+                    to: target
+                )
+            } else {
+                // tmuxが無い場合はHookの応答だけが背景へ回答を届けられる経路。
+                let decision: HookDecision = first.isNegative
+                    ? .deny(reason: "Subghostで拒否しました")
+                    : .allow
+                session.releasePendingHook(with: decision)
+            }
             session.pendingChoice = nil
             session.state = .thinking
             return
@@ -701,7 +739,7 @@ final class SessionWatcher {
         // フールプルーフ: 表示してから回答するまでの間に画面が別の内容へ進んでいないか、
         // キーを送る前に確かめる。読めた場合のみ照合し、崩れていれば中止する。
         // (実機で確認した不具合: 会話が進んだ後の画面に古い前提のままキーを送り誤爆した)
-        let expectedLabels = (session.pendingChoice?.options ?? options).map(\.label)
+        let expectedLabels = (session.pendingChoice?.options ?? options).map(\.screenLabel)
         if let currentText = await TmuxClient.capturePane(target: target),
            !ChoicePrompt.matchesCurrentScreen(optionLabels: expectedLabels, in: currentText) {
             throw SessionError.choiceScreenChanged
@@ -714,7 +752,8 @@ final class SessionWatcher {
         if isMultiSelect {
             try await TmuxClient.sendChoices(options, totalOptionCount: totalOptionCount, to: target)
         } else {
-            try await TmuxClient.sendChoice(first, totalOptionCount: totalOptionCount, to: target)
+            try await TmuxClient.sendChoice(
+                first, allOptionLabels: expectedLabels, totalOptionCount: totalOptionCount, to: target)
         }
         session.pendingChoice = nil
 
@@ -844,7 +883,7 @@ final class SessionWatcher {
         // 実際に動いているセッションを送信先にする
         preferMonitorableSession()
 
-        applyHook(event: event, to: session, connection: connection)
+        applyHook(event: event, source: request.source, to: session, connection: connection)
         writeStateDumpIfEnabled(trigger: "hook:\(event.kind.rawValue)")
     }
 
@@ -899,6 +938,7 @@ final class SessionWatcher {
 
     private func applyHook(
         event: HookEvent,
+        source: String,
         to session: MonitoredSession,
         connection: HookServer.Connection
     ) {
@@ -942,14 +982,36 @@ final class SessionWatcher {
             }
 
             session.pendingHookConnection = connection
+            let options: [ChoiceOption]
+            if session.info.tmuxTarget != nil {
+                // tmuxへ実キーを送れる場合は、CLI上の番号と同じ3項目を表示する。
+                // 回答時にはcapture-paneから実メニューを再取得するため、ここでの
+                // screenLabelは表示直後の照合に使わない。
+                if source.lowercased() == "codex" {
+                    options = [
+                        ChoiceOption(number: 1, label: "今回だけ許可", keystroke: "1", needsEnter: false),
+                        ChoiceOption(number: 2, label: "今後この種類の操作を許可", keystroke: "2", needsEnter: false),
+                        ChoiceOption(number: 3, label: "拒否する", keystroke: "3", needsEnter: false),
+                    ]
+                } else {
+                    options = [
+                        ChoiceOption(number: 1, label: "今回だけ許可", keystroke: "1", needsEnter: false),
+                        ChoiceOption(number: 2, label: "このセッション中は許可", keystroke: "2", needsEnter: false),
+                        ChoiceOption(number: 3, label: "拒否する", keystroke: "3", needsEnter: false),
+                    ]
+                }
+            } else {
+                // tmuxが無いセッションではHookが表現できる一回許可/拒否だけを出す。
+                options = [
+                    ChoiceOption(number: 1, label: "今回だけ許可", keystroke: "1", needsEnter: false),
+                    ChoiceOption(number: 2, label: "拒否する", keystroke: "2", needsEnter: false),
+                ]
+            }
             let choice = PendingChoice(
                 kind: .approval,
                 title: event.title,
                 detail: [],
-                options: [
-                    ChoiceOption(number: 1, label: "はい、許可する", keystroke: "1", needsEnter: false),
-                    ChoiceOption(number: 2, label: "いいえ、拒否する", keystroke: "2", needsEnter: false),
-                ]
+                options: options
             )
             apply(event: .becameAwaitingChoice(choice), to: session)
             return   // 応答はユーザーの回答時に返す

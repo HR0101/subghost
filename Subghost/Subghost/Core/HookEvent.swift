@@ -186,11 +186,14 @@ nonisolated enum HookDecision: Sendable, Equatable {
     }
 
     private static func decisionJSON(decision: String, reason: String) -> String {
+        var decisionPayload: [String: Any] = ["behavior": decision]
+        if decision == "deny" {
+            decisionPayload["message"] = reason
+        }
         let payload: [String: Any] = [
             "hookSpecificOutput": [
                 "hookEventName": "PermissionRequest",
-                "permissionDecision": decision,
-                "permissionDecisionReason": reason,
+                "decision": decisionPayload,
             ],
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload),

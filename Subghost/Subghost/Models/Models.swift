@@ -166,6 +166,17 @@ nonisolated struct CustomAlias: Codable, Sendable, Identifiable, Hashable {
         self.name = name
         self.baseProfileID = baseProfileID
     }
+
+    /// シェル関数名・実行ファイル名として安全に使える名前か。
+    ///
+    /// この名前は ShellIntegration.scriptBody でシェルスクリプトへそのまま
+    /// 埋め込まれ関数定義になる（例: "\(name)() { ... }"）。空白・セミコロン・
+    /// 括弧・コマンド置換などを許すとシェルインジェクションが成立してしまうため、
+    /// 関数名として安全な文字だけに制限する。
+    static func isValidName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.count <= 64 else { return false }
+        return name.range(of: #"^[A-Za-z_][A-Za-z0-9_-]*$"#, options: .regularExpression) != nil
+    }
 }
 
 // MARK: - スニペット (設計書 4.4 / 8.1)

@@ -1083,6 +1083,8 @@ struct NotchView: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 12)
         .focusable()
+        // 数字キー入力のためフォーカスは維持しつつ、パネル全体を囲うmacOS標準の青枠は出さない。
+        .focusEffectDisabled()
         .focused($choiceFocused)
         .onKeyPress { press in handleChoiceKey(press) }
         .onExitCommand { coordinator.dismissChoice() }

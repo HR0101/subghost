@@ -1212,7 +1212,9 @@ private struct HookSettingsView: View {
                         let added = AppCoordinator.shared.addCustomAlias(
                             name: newAliasName, baseProfileID: newAliasBaseProfileID)
                         if added { newAliasName = "" }
-                        aliasMessage = added ? nil : "その名前は既に登録されているか、空です。"
+                        aliasMessage = added ? nil
+                            : "使えるのは英数字・ハイフン・アンダースコアのみで、先頭は英字か"
+                            + "アンダースコアにしてください（既に登録済みの場合もあります）。"
                     }
                     .disabled(newAliasName.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
