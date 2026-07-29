@@ -321,6 +321,7 @@ struct NotchView: View {
         case .sessions: sessionsContent
         case .activity: activityContent
         case .onboarding: onboardingContent
+        case .sleep: sleepContent
         }
     }
 
@@ -333,6 +334,7 @@ struct NotchView: View {
         case .sessions: return max(notchWidth + 420, 760)
         case .activity: return max(notchWidth + 420, 760)
         case .onboarding: return max(notchWidth + 320, 680)
+        case .sleep: return max(notchWidth + 300, 660)
         }
     }
 
@@ -359,7 +361,17 @@ struct NotchView: View {
             // 右余白：一覧に出しているセッションの小ドット
             HStack(spacing: 4) {
                 let visible = coordinator.watcher.visibleSessions
-                if visible.isEmpty {
+                if let countdown = coordinator.sleepScheduler.countdown {
+                    // まもなく寝ることは、どの表示に切り替わっていても目に入るようにする。
+                    // 承認待ちなどで案内が隠れても、ここで気づいて取り消せる。
+                    HStack(spacing: 2) {
+                        Image(systemName: "zzz")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("\(Int(ceil(countdown.remaining)))")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    }
+                    .foregroundStyle(countdown.isPaused ? Color.gray : Color.purple)
+                } else if visible.isEmpty {
                     Image(systemName: "moon.zzz")
                         .font(.system(size: 10))
                         .foregroundStyle(.gray)
@@ -387,6 +399,11 @@ struct NotchView: View {
     /// コンパクト表示の読み上げ文。状態は色と絵でしか出していないため、言葉で補う。
     private var compactAccessibilityLabel: String {
         let sessions = coordinator.watcher.sessions
+        // 秒数の数字だけでは何のカウントか伝わらないため、真っ先に読み上げる
+        if let countdown = coordinator.sleepScheduler.countdown {
+            return "Subghost。\(countdown.label) の完了により、"
+                + "あと\(Int(ceil(countdown.remaining)))秒でスリープします"
+        }
         guard let active = coordinator.watcher.activeSession else {
             return sessions.isEmpty
                 ? "Subghost。AI CLIは実行されていません"
@@ -604,6 +621,8 @@ struct NotchView: View {
                 autoTmuxReminder
             }
 
+            sleepReservationBanner
+
             let visible = coordinator.watcher.visibleSessions
             if !visible.isEmpty {
                 ScrollView(.vertical) {
@@ -612,9 +631,13 @@ struct NotchView: View {
                             SessionRow(
                                 session: session,
                                 isActive: session.info.tty == coordinator.watcher.activeSessionName,
+                                isSleepReserved: coordinator.sleepScheduler.isReservedSession(
+                                    tty: session.info.tty, pid: session.info.pid
+                                ),
                                 onJump: { coordinator.jump(to: session) },
                                 onPrompt: { coordinator.promptSession(session) },
                                 onHide: { coordinator.hideSession(session) },
+                                onToggleSleep: { coordinator.toggleSleepReservation(for: session) },
                                 onTerminate: { coordinator.confirmTerminate(session) }
                             )
                         }
@@ -652,6 +675,65 @@ struct NotchView: View {
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 12)
+    }
+
+    /// 一覧の先頭に出す、スリープ予約の状況。
+    ///
+    /// 予約したこと自体を忘れると「なぜか勝手に寝る」ようにしか見えない。
+    /// 予約がある間は常にここへ出し、その場で解除できるようにする。
+    @ViewBuilder
+    private var sleepReservationBanner: some View {
+        let scheduler = coordinator.sleepScheduler
+        if let countdown = scheduler.countdown {
+            sleepBannerFrame {
+                Image(systemName: "moon.zzz.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.purple)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(countdown.label) の完了により、あと \(Int(ceil(countdown.remaining))) 秒でスリープします")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                    if let hold = countdown.holdMessage {
+                        Text(hold)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange.opacity(0.9))
+                    }
+                }
+                Spacer(minLength: 6)
+                Button("取り消す") { coordinator.cancelSleepCountdown() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+        } else if scheduler.isReserved {
+            sleepBannerFrame {
+                Image(systemName: "moon.zzz")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.purple.opacity(0.9))
+                // 複数を予約しているときは、最後の1つが終わるまで待つことを明示する
+                Text(scheduler.reservations.count > 1
+                     ? "\(scheduler.reservationLabel) のタスクがすべて終わったらスリープします"
+                     : "\(scheduler.reservationLabel) のタスクが終わったらスリープします")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(2)
+                Spacer(minLength: 6)
+                Button("解除") { coordinator.cancelAllSleepReservations() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+        }
+    }
+
+    private func sleepBannerFrame<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 8) { content() }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.purple.opacity(0.22)))
     }
 
     // MARK: - 展開（履歴）：見逃したイベントを確認
@@ -934,6 +1016,121 @@ struct NotchView: View {
             autoTmuxMessage = "自動起動を設定できませんでした: \(error.localizedDescription)"
             autoTmuxMessageIsError = true
         }
+    }
+
+    // MARK: - 展開（スリープ）：まもなく寝ることを知らせ、取り消す機会を出す
+
+    /// スリープは取り消せない操作なので、この画面の主役は残り時間と取り消しボタン。
+    /// 「何が終わったから寝るのか」も併せて出し、身に覚えのない発火に気づけるようにする。
+    private var sleepContent: some View {
+        let scheduler = coordinator.sleepScheduler
+        let countdown = scheduler.countdown
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Color.clear.frame(height: topInset)   // ノッチ本体を避ける
+
+            HStack(spacing: 8) {
+                Image(systemName: "moon.zzz.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.purple)
+                Text("まもなくスリープします")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                if let countdown {
+                    Text("\(Int(ceil(countdown.remaining))) 秒")
+                        .font(.system(size: 15, weight: .bold, design: .monospaced))
+                        .foregroundStyle(countdown.isPaused ? .white.opacity(0.5) : .white)
+                }
+            }
+
+            if let countdown {
+                // 複数を予約していた場合は「すべて終わった」ことを明示する
+                Text(countdown.completionText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ProgressView(
+                    value: min(max(countdown.remaining, 0), SleepPreferences.countdown),
+                    total: SleepPreferences.countdown
+                )
+                .tint(countdown.isPaused ? Color.gray : Color.purple)
+
+                if let hold = countdown.holdMessage {
+                    Label(hold, systemImage: "pause.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange.opacity(0.9))
+                }
+            } else if let message = scheduler.statusMessage {
+                Text(message)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    coordinator.cancelSleepCountdown()
+                } label: {
+                    Text("取り消す")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.18)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("スリープをやめます。予約は残るので、次に完了したとき改めて確認します")
+
+                Button {
+                    coordinator.cancelAllSleepReservations()
+                } label: {
+                    Text("予約も解除")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("スリープをやめ、この予約自体を取り消します")
+
+                Spacer()
+
+                Button {
+                    coordinator.sleepImmediately()
+                } label: {
+                    Label("今すぐスリープ", systemImage: "moon.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+                .disabled(countdown == nil)
+            }
+
+            Text("Esc でも取り消せます")
+                .font(.system(size: 10))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+        .focusable()
+        .focusEffectDisabled()
+        .onExitCommand { coordinator.cancelSleepCountdown() }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(sleepAccessibilityLabel)
+    }
+
+    private var sleepAccessibilityLabel: String {
+        guard let countdown = coordinator.sleepScheduler.countdown else {
+            return coordinator.sleepScheduler.statusMessage ?? "スリープの予定はありません"
+        }
+        var text = "\(countdown.completionText)。"
+            + "あと\(Int(ceil(countdown.remaining)))秒でスリープします"
+        if let hold = countdown.holdMessage { text += "。\(hold)" }
+        return text
     }
 
     // MARK: - 展開（承認/質問）：Approve / Ask
@@ -1375,12 +1572,16 @@ struct SessionRow: View {
     let session: MonitoredSession
     /// 現在の送信先か
     let isActive: Bool
+    /// このセッションの完了でスリープする予約が入っているか
+    let isSleepReserved: Bool
     /// 行本体を押したとき（そのタブへ移動）
     let onJump: () -> Void
     /// 送信ボタンを押したとき（このセッションへプロンプトを送る）
     let onPrompt: () -> Void
     /// 一覧から外すとき（プロセスはそのまま）
     let onHide: () -> Void
+    /// 完了後スリープの予約を入り切りするとき
+    let onToggleSleep: () -> Void
     /// CLIごと終了させるとき（確認は呼び出し側で取る）
     let onTerminate: () -> Void
 
@@ -1433,6 +1634,10 @@ struct SessionRow: View {
                             }
                             if let terminal = session.info.terminalName {
                                 TagBadge(text: terminal, tint: .white.opacity(0.18))
+                            }
+                            // 予約中であることは行を見た時点で分かるようにする
+                            if isSleepReserved {
+                                TagBadge(text: "完了後スリープ", tint: .purple.opacity(0.45))
                             }
                             Text(elapsedText)
                                 .font(.system(size: 10))
@@ -1517,6 +1722,13 @@ struct SessionRow: View {
             Menu {
                 Button("一覧から隠す", action: onHide)
                 Divider()
+                Button(
+                    isSleepReserved
+                        ? "完了後のスリープ予約を解除"
+                        : "このタスクが終わったらMacをスリープ",
+                    action: onToggleSleep
+                )
+                Divider()
                 Button("CLIを終了する…", role: .destructive, action: onTerminate)
             } label: {
                 Image(systemName: "xmark")
@@ -1562,6 +1774,7 @@ struct SessionRow: View {
             parts.append(session.info.capability.summary)
         }
         if isActive { parts.append("現在の送信先") }
+        if isSleepReserved { parts.append("完了後にスリープを予約中") }
         if let prompt = session.lastUserPrompt, !prompt.isEmpty {
             parts.append("直近の指示 \(prompt)")
         }
