@@ -76,11 +76,22 @@ Ordered by capability, and the reason several error messages exist:
 
 `AppCoordinator` (`@Observable` singleton) holds all UI state and wires the components; `NotchPanelController` owns the `NSPanel`; `NotchView` renders it.
 
-`NotchMode` is the requested mode, but `displayMode` is what actually renders — it applies a priority ladder (input > choice > onboarding > notification > sessions > activity > hover > compact) so urgent prompts cannot be buried and typing is never interrupted. Change display precedence there, not at the call sites.
+`NotchMode` is the requested mode, but `displayMode` is what actually renders — it applies a priority ladder (input > choice > sleep > onboarding > notification > sessions > activity > hover > compact) so urgent prompts cannot be buried and typing is never interrupted. Change display precedence there, not at the call sites.
 
 `NotchPanel` overrides `constrainFrameRect(_:to:)` to return the rect unchanged. Without it macOS pushes the panel below the menu bar and it never sits in the notch. Do not remove it.
 
 `NotchLayout` holds geometry constants shared between the panel and the SwiftUI view; `canvasWidth(for:)` accounts for the top shoulder curve, so panel sizing and shape drawing must both go through it or they desync.
+
+### Sleep-on-completion holds rather than cancels, and never fires unattended-blind
+
+`SleepScheduler` holds a list of reserved targets and puts the Mac to sleep (`pmset sleepnow`) after a countdown. Sleep cannot be undone and fires while the user is away, so the shape is deliberate:
+
+- The decision lives in `SleepCondition`, a pure function over `SleepSessionSnapshot` values — no I/O, unit-tested with fixed inputs. Side effects stay in `SleepScheduler` / `SystemSleeper`.
+- **Several reservations mean "wait for the last one."** `hold` only clears when every *live* target is settled. A target whose CLI has exited is dropped from the decision (`liveTargets`) — keeping it would make "all done" unsatisfiable forever, so one dead session would silently disable the feature.
+- **A blocked countdown stops, it does not cancel.** `hold` returns a reason (`targetBusy`, `awaitingResponse`, `targetMissing`) and the remaining seconds simply stop decreasing. Cancelling instead would silently discard the user's intent the moment they touched the keyboard.
+- `awaitingResponse` looks at **every** session, not just the target's. A session waiting on approval is a stopped CLI; sleeping there means the user returns to no progress at all.
+- `idle` is never "finished". The countdown only starts from a completion event received *after* the reservation, or reserving while nothing runs would sleep immediately.
+- The reservation is intentionally **not persisted**. It is a one-session intent; restoring it later means sleeping during unrelated work.
 
 ### Anything written into the user's shell or CLI config must fail open
 
