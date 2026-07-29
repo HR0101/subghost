@@ -26,6 +26,7 @@ enum NotchMode: Equatable {
     case sessions       // 複数CLIの一覧
     case activity       // 完了・エラー・回答待ちの履歴
     case onboarding      // 初回起動時の案内
+    case sleep          // まもなくスリープする案内（取り消しの機会）
 }
 
 /// 初回起動時の案内（ようこそ→フック連携→権限確認→完了）の各段階
@@ -61,6 +62,8 @@ final class AppCoordinator {
     let customAliasStore = CustomAliasStore()
     /// セッション個別のミュート（実行中のみ保持。AlertGate から参照される）
     let sessionMutes = SessionMuteStore()
+    /// タスク完了後のスリープ予約（実行中のみ保持。詳細は SleepScheduler 参照）
+    let sleepScheduler = SleepScheduler()
     @ObservationIgnored private var panelController: NotchPanelController?
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
@@ -117,6 +120,8 @@ final class AppCoordinator {
         if mode == .input { return .input }
         // 送信中／送信完了表示のあいだは一覧へ切り替えない
         if mode == .choice { return .choice }
+        // まもなくスリープする案内は、取り消す機会そのもの。案内や通知に埋もれさせない。
+        if mode == .sleep { return .sleep }
         // 初回案内は、本当に急ぎの選択肢対応の次に優先する。
         // 通知や一覧に割り込まれて案内が埋もれないようにするため。
         if mode == .onboarding { return .onboarding }
@@ -153,6 +158,7 @@ final class AppCoordinator {
         watcher.onEvent = { [weak self] session, event in
             self?.handle(event: event, session: session)
         }
+        wireSleepScheduler()
         watcher.customAliases = customAliasStore.aliases
         watcher.startHookServer()
         watcher.start()
@@ -174,6 +180,88 @@ final class AppCoordinator {
         if !UserDefaults.standard.bool(forKey: Self.hasCompletedOnboardingKey) {
             setMode(.onboarding)
         }
+    }
+
+    // MARK: - タスク完了後のスリープ (追補)
+
+    /// スケジューラへ、現在のセッションと表示状態を渡す口を用意する。
+    ///
+    /// スケジューラ自身は監視も画面も知らない。判断に要る材料をここで注入し、
+    /// 「寝てよいか」の判断とその実行だけを向こうに任せる。
+    private func wireSleepScheduler() {
+        sleepScheduler.sessionsProvider = { [weak self] in
+            self?.watcher.sessions.map {
+                SleepSessionSnapshot(info: $0.info, state: $0.state)
+            } ?? []
+        }
+        // 入力中はユーザーが目の前にいる。書いている途中で寝るのは明らかに誤り。
+        sleepScheduler.isUserInteracting = { [weak self] in self?.mode == .input }
+        sleepScheduler.onCountdownStarted = { [weak self] in self?.presentSleepCountdown() }
+        sleepScheduler.onCountdownFinished = { [weak self] in
+            guard let self, self.mode == .sleep else { return }
+            self.collapse()
+        }
+    }
+
+    /// このセッションのタスクが終わったらスリープする予約を入り切りする。
+    /// 複数を予約した場合は、そのすべてが終わってからスリープする。
+    func toggleSleepReservation(for session: MonitoredSession) {
+        let info = session.info
+        let target = SleepTarget.session(tty: info.tty, pid: info.pid)
+        if sleepScheduler.isReservedSession(tty: info.tty, pid: info.pid) {
+            sleepScheduler.cancelReservation(target)
+            return
+        }
+        sleepScheduler.reserve(
+            target,
+            label: "\(info.profile.displayName)（\(info.displayName)）"
+        )
+    }
+
+    /// このCLIのタスクが終わったらスリープする予約を入り切りする（設定画面から）
+    func toggleSleepReservation(forAgent profile: CLIProfile) {
+        let target = SleepTarget.agent(profileID: profile.id)
+        if sleepScheduler.isReservedAgent(profileID: profile.id) {
+            sleepScheduler.cancelReservation(target)
+            return
+        }
+        sleepScheduler.reserve(target, label: profile.displayName)
+    }
+
+    /// 待ち時間を取り消す（予約は残るので、次に完了したらまた待ち時間へ入る）
+    func cancelSleepCountdown() {
+        sleepScheduler.cancelCountdown(message: "スリープを取り消しました。予約は残しています。")
+        if mode == .sleep { collapse() }
+    }
+
+    /// 予約を1件だけ解除する
+    func cancelSleepReservation(_ target: SleepTarget) {
+        sleepScheduler.cancelReservation(target)
+        if mode == .sleep, !sleepScheduler.isReserved { collapse() }
+    }
+
+    /// 予約をすべて解除する
+    func cancelAllSleepReservations() {
+        sleepScheduler.cancelAllReservations()
+        if mode == .sleep { collapse() }
+    }
+
+    /// 待たずに今すぐ寝る
+    func sleepImmediately() {
+        sleepScheduler.sleepImmediately()
+    }
+
+    /// まもなくスリープすることをノッチへ出す。
+    ///
+    /// 入力中と回答待ちの表示は妨げない。表示できなくても待ち時間は進むが、
+    /// コンパクト表示と一覧に残り時間が出るので、そちらから取り消せる。
+    private func presentSleepCountdown() {
+        guard mode != .input, mode != .choice else { return }
+        notificationPresentationTask?.cancel()
+        collapseTask?.cancel()
+        notificationSession = nil
+        setMode(.sleep)
+        panelController?.modeChanged()
     }
 
     // MARK: - グローバルショートカット (設計書 4.3)
@@ -255,6 +343,8 @@ final class AppCoordinator {
             activity.record(kind: .completed, session: session.info, preview: preview)
             SoundAlerts.shared.play(for: .completed, session: session.info)
             NotificationManager.shared.notify(session: session.info, state: .completed, preview: preview)
+            // スリープ予約より先に通知・音を出す。寝る前に「何が終わったか」は必ず残す。
+            sleepScheduler.noteFinished(SleepSessionSnapshot(info: session.info, state: .completed))
             if AlertGate.allowsAutoExpand(.completed, session: session.info) {
                 showNotification(for: session)
             }
@@ -263,6 +353,7 @@ final class AppCoordinator {
             activity.record(kind: .error, session: session.info, preview: preview)
             SoundAlerts.shared.play(for: .error, session: session.info)
             NotificationManager.shared.notify(session: session.info, state: .error, preview: preview)
+            sleepScheduler.noteFinished(SleepSessionSnapshot(info: session.info, state: .error))
             if AlertGate.allowsAutoExpand(.error, session: session.info) {
                 showNotification(for: session)
             }
