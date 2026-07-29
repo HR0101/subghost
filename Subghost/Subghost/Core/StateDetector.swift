@@ -337,7 +337,8 @@ nonisolated struct StateDetector: Sendable {
         #"(?i)^\?? ?(for shortcuts|shift\+tab|tab to|auto-accept|bypass|plan mode"#
         // 所要時間の行は完了後も残るが本文ではない。動詞はランダムなので形で弾く
         // （実機: "Worked for 6m 23s" / "Sautéed for 9s"）
-        + #"|context left|tokens|/help|esc to|tip:)|^\S+ for \d|/effort\s*$"#
+        + #"|context left|tokens|/help|esc to|tip:|new task\?\s*/clear to save)"#
+        + #"|^\S+ for \d|/effort\s*$|^new task\?\s*/clear to save\s+[\d.]+k?\s+tokens\s*$"#
 
     /// 最終応答のチラ見せ用テキストを抽出する (設計書 4.2)
     /// 入力ボックス/プロンプト行より上の、直近の本文ブロックを最大4行返す。

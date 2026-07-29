@@ -282,6 +282,8 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            SleepSettingsSection()
+
             Section("監視") {
                 VStack(alignment: .leading) {
                     Slider(value: $pollInterval, in: 0.4...3.0, step: 0.1) {
@@ -391,6 +393,96 @@ private struct GeneralSettingsView: View {
             }
             launchAtLogin = LoginItemManager.isEnabled
             isChangingLoginItem = false
+        }
+    }
+}
+
+// MARK: - タスク完了後のスリープ
+
+/// 「このCLIのタスクが終わったらMacをスリープ」の設定。
+///
+/// 予約そのものは永続化していない（理由は SleepScheduler のコメント参照）ため、
+/// ここでのCLIの選択は設定の保存ではなく「今この場で予約を作る」操作になる。
+/// 見た目が他の設定と同じでも意味が違うので、注記でその点を明示している。
+private struct SleepSettingsSection: View {
+    @AppStorage(SleepPreferences.countdownKey)
+    private var countdown = SleepPreferences.defaultCountdown
+    @AppStorage(SleepPreferences.includesErrorKey) private var includesError = true
+    @AppStorage(SleepPreferences.repeatsKey) private var repeats = false
+
+    private var scheduler: SleepScheduler { AppCoordinator.shared.sleepScheduler }
+
+    /// CLIごとのトグルとスリープ予約を繋ぐ。複数選べる。
+    private func reservationBinding(for profile: CLIProfile) -> Binding<Bool> {
+        Binding(
+            get: { scheduler.isReservedAgent(profileID: profile.id) },
+            set: { _ in AppCoordinator.shared.toggleSleepReservation(forAgent: profile) }
+        )
+    }
+
+    var body: some View {
+        Section("タスク完了後のスリープ") {
+            ForEach(CLIProfile.builtins) { profile in
+                Toggle(profile.displayName, isOn: reservationBinding(for: profile))
+            }
+            Text("選んだCLIのタスクが終わり、どのセッションも回答待ちでなければ、"
+                 + "猶予をおいてMacをスリープします。"
+                 + "複数を選んだ場合は、最後の1つが終わるまで待ちます。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if !scheduler.sessionReservations.isEmpty {
+                ForEach(scheduler.sessionReservations) { reservation in
+                    LabeledContent("セッション指定") {
+                        HStack(spacing: 8) {
+                            Text(reservation.label)
+                                .foregroundStyle(.secondary)
+                            Button("解除") {
+                                AppCoordinator.shared.cancelSleepReservation(reservation.target)
+                            }
+                        }
+                    }
+                }
+                Text("ノッチの一覧から入れた、セッション1本ごとの予約です。"
+                     + "上のCLI単位の予約と組み合わせられます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Stepper(value: $countdown, in: SleepPreferences.countdownRange, step: 5) {
+                LabeledContent("スリープまでの猶予") {
+                    Text("\(countdown, specifier: "%.0f")秒")
+                        .monospacedDigit()
+                }
+            }
+            Text("この間はノッチから取り消せます。対象が作業を再開したときや、"
+                 + "どれかのセッションが回答待ちのあいだは、猶予を数えるのを止めて待ちます。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("エラーで終わった場合もスリープする", isOn: $includesError)
+            Text("切ると、失敗して止まったセッションではスリープしません。"
+                 + "気づかないうちに寝てほしくない場合に切ってください。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("スリープした後も予約を残す", isOn: $repeats)
+            Text("既定では一度スリープすると予約を解除します。"
+                 + "残すと、復帰して作業を再開するたびに繰り返しスリープします。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("予約は Subghost を終了すると消えます。"
+                 + "特定のセッション1本だけを対象にしたい場合は、"
+                 + "ノッチの一覧から「このタスクが終わったらMacをスリープ」を選んでください。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let message = scheduler.statusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

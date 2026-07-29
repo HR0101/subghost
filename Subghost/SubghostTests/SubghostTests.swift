@@ -522,6 +522,24 @@ struct StateDetectorTests {
         #expect(!preview.contains { $0.contains("/effort") })
     }
 
+    @Test func Claudeの新規タスク案内を返信として表示しない() {
+        let screen = """
+        ⏺ 修正が完了しました。
+          日本語の返信本文です。
+
+        ─────────────────────────────────────────────
+        new task? /clear to save 499.5k tokens
+        ❯
+        ─────────────────────────────────────────────
+          Opus 4.8 · effort xhigh in subghost
+        """
+        let preview = StateDetector.extractPreview(from: screen, profile: .claude)
+        #expect(preview.contains { $0.contains("修正が完了しました") })
+        #expect(preview.contains { $0.contains("日本語の返信本文です") })
+        #expect(!preview.contains { $0.contains("new task?") })
+        #expect(!preview.contains { $0.contains("tokens") })
+    }
+
     @Test func スピナーの変化だけではthinkingにならない() {
         var detector = makeDetector()
         let t0 = Date(timeIntervalSince1970: 0)
@@ -2675,5 +2693,348 @@ struct ChoiceStateTests {
             Issue.record("抑制時間経過後に再通知されなかった: \(renotified)")
             return
         }
+    }
+}
+
+// MARK: - タスク完了後のスリープ
+
+/// スリープは取り消せず、しかも席を外している前提で起きる。
+/// 「寝てよい」と判断する条件はここで固定値のまま網羅しておく。
+struct SleepConditionTests {
+
+    private func セッション(
+        tty: String = "/dev/ttys001",
+        pid: Int32 = 100,
+        profileID: String = "claude",
+        state: AIState
+    ) -> SleepSessionSnapshot {
+        SleepSessionSnapshot(tty: tty, pid: pid, profileID: profileID, state: state)
+    }
+
+    @Test func 予約したCLIの完了でスリープへ進む() {
+        let finished = セッション(state: .completed)
+        #expect(SleepCondition.shouldStartCountdown(
+            targets: [.agent(profileID: "claude")],
+            finished: finished,
+            sessions: [finished],
+            includesError: true
+        ))
+    }
+
+    @Test func 予約していないCLIの完了では進まない() {
+        let finished = セッション(profileID: "codex", state: .completed)
+        #expect(!SleepCondition.shouldStartCountdown(
+            targets: [.agent(profileID: "claude")],
+            finished: finished,
+            sessions: [finished],
+            includesError: true
+        ))
+    }
+
+    /// 同じCLIをタブ違いで並行して使っている場合、まだ動いている方が本命かもしれない
+    @Test func 同じCLIの別セッションが作業中なら進まない() {
+        let finished = セッション(state: .completed)
+        let working = セッション(tty: "/dev/ttys002", pid: 200, state: .thinking)
+        #expect(!SleepCondition.shouldStartCountdown(
+            targets: [.agent(profileID: "claude")],
+            finished: finished,
+            sessions: [finished, working],
+            includesError: true
+        ))
+        #expect(SleepCondition.hold(
+            targets: [.agent(profileID: "claude")], sessions: [finished, working]) == .targetBusy)
+    }
+
+    /// 答えるまでCLIは止まったまま。そこで寝ると、戻ってきても何も進んでいない。
+    @Test func 予約の対象外でも回答待ちがあれば進まない() {
+        let finished = セッション(state: .completed)
+        let waiting = セッション(
+            tty: "/dev/ttys003", pid: 300, profileID: "codex", state: .awaitingApproval)
+        #expect(!SleepCondition.shouldStartCountdown(
+            targets: [.agent(profileID: "claude")],
+            finished: finished,
+            sessions: [finished, waiting],
+            includesError: true
+        ))
+        #expect(SleepCondition.hold(
+            targets: [.agent(profileID: "claude")], sessions: [finished, waiting]) == .awaitingResponse)
+    }
+
+    @Test func 質問待ちも回答待ちとして扱う() {
+        let finished = セッション(state: .completed)
+        let asking = セッション(tty: "/dev/ttys004", pid: 400, state: .awaitingAnswer)
+        #expect(SleepCondition.hold(
+            targets: [.agent(profileID: "claude")], sessions: [finished, asking]) == .awaitingResponse)
+    }
+
+    @Test func エラー終了を終了に含めるかは設定で決まる() {
+        let failed = セッション(state: .error)
+        #expect(SleepCondition.shouldStartCountdown(
+            targets: [.agent(profileID: "claude")],
+            finished: failed,
+            sessions: [failed],
+            includesError: true
+        ))
+        #expect(!SleepCondition.shouldStartCountdown(
+            targets: [.agent(profileID: "claude")],
+            finished: failed,
+            sessions: [failed],
+            includesError: false
+        ))
+    }
+
+    /// 予約した直後、何も動いていないだけで寝てしまってはいけない
+    @Test func 待機中や生成中は終了とみなさない() {
+        #expect(!SleepCondition.isFinished(.idle, includesError: true))
+        #expect(!SleepCondition.isFinished(.thinking, includesError: true))
+        #expect(!SleepCondition.isFinished(.awaitingApproval, includesError: true))
+        #expect(!SleepCondition.isFinished(.awaitingAnswer, includesError: true))
+        #expect(SleepCondition.isFinished(.completed, includesError: false))
+    }
+
+    @Test func 対象のセッションが見当たらなければ待たせる() {
+        let other = セッション(profileID: "codex", state: .idle)
+        #expect(SleepCondition.hold(
+            targets: [.agent(profileID: "claude")], sessions: [other]) == .targetMissing)
+        #expect(SleepCondition.hold(
+            targets: [.agent(profileID: "claude")], sessions: []) == .targetMissing)
+    }
+
+    /// ttyは使い回されるため、PIDまで一致しなければ別のセッション
+    @Test func セッション指定はPIDまで一致しないと対象外() {
+        let session = セッション(state: .completed)
+        #expect(SleepCondition.covers(.session(tty: "/dev/ttys001", pid: 100), session))
+        #expect(!SleepCondition.covers(.session(tty: "/dev/ttys001", pid: 999), session))
+        #expect(!SleepCondition.covers(.session(tty: "/dev/ttys009", pid: 100), session))
+    }
+
+    @Test func セッション指定では他のセッションの作業中は妨げにならない() {
+        let finished = セッション(state: .completed)
+        let otherWorking = セッション(tty: "/dev/ttys002", pid: 200, state: .thinking)
+        #expect(SleepCondition.shouldStartCountdown(
+            targets: [.session(tty: "/dev/ttys001", pid: 100)],
+            finished: finished,
+            sessions: [finished, otherWorking],
+            includesError: true
+        ))
+    }
+
+    /// 複数を予約したときは「最後の1つが終わるまで待つ」
+    @Test func 複数予約では片方が残っている間は進まない() {
+        let claudeDone = セッション(state: .completed)
+        let codexWorking = セッション(
+            tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .thinking)
+        let targets: [SleepTarget] = [.agent(profileID: "claude"), .agent(profileID: "codex")]
+
+        #expect(!SleepCondition.shouldStartCountdown(
+            targets: targets,
+            finished: claudeDone,
+            sessions: [claudeDone, codexWorking],
+            includesError: true
+        ))
+        #expect(SleepCondition.hold(
+            targets: targets, sessions: [claudeDone, codexWorking]) == .targetBusy)
+    }
+
+    @Test func 複数予約は最後の1つが終わった時点で進む() {
+        let claudeDone = セッション(state: .completed)
+        let codexDone = セッション(
+            tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .completed)
+
+        #expect(SleepCondition.shouldStartCountdown(
+            targets: [.agent(profileID: "claude"), .agent(profileID: "codex")],
+            finished: codexDone,
+            sessions: [claudeDone, codexDone],
+            includesError: true
+        ))
+    }
+
+    /// 消えた予約を数え続けると、残りが終わっても永久に寝られなくなる
+    @Test func 対象が消えた予約は判断から外す() {
+        let claudeDone = セッション(state: .completed)
+        let targets: [SleepTarget] = [.agent(profileID: "claude"), .agent(profileID: "codex")]
+
+        #expect(SleepCondition.liveTargets(targets, sessions: [claudeDone])
+                == [.agent(profileID: "claude")])
+        #expect(SleepCondition.hold(targets: targets, sessions: [claudeDone]) == .none)
+        // ただし1つも残っていなければ、狙う相手がいないので進めない
+        #expect(SleepCondition.hold(targets: targets, sessions: []) == .targetMissing)
+    }
+
+    @Test func 猶予秒数を安全な範囲へ補正する() {
+        #expect(SleepPreferences.normalizedCountdown(0) == 5)
+        #expect(SleepPreferences.normalizedCountdown(30) == 30)
+        #expect(SleepPreferences.normalizedCountdown(10_000) == 300)
+    }
+}
+
+/// 猶予の消化とスリープの実行。
+/// 実際に寝かせるわけにはいかないので、実行は差し替え、時間は tick() で手動に進める。
+@MainActor
+final class SleepTestProbe {
+    /// スリープを実行した回数
+    var sleepCount = 0
+    /// 判定へ渡すセッション一覧（テストの途中で差し替える）
+    var sessions: [SleepSessionSnapshot] = []
+    /// ノッチで入力中か
+    var isInteracting = false
+}
+
+@MainActor
+struct SleepSchedulerTests {
+
+    private func セッション(
+        tty: String = "/dev/ttys001",
+        pid: Int32 = 100,
+        profileID: String = "claude",
+        state: AIState
+    ) -> SleepSessionSnapshot {
+        SleepSessionSnapshot(tty: tty, pid: pid, profileID: profileID, state: state)
+    }
+
+    private func 用意する(_ sessions: [SleepSessionSnapshot]) -> (SleepScheduler, SleepTestProbe) {
+        let probe = SleepTestProbe()
+        probe.sessions = sessions
+        let scheduler = SleepScheduler()
+        scheduler.automaticTicking = false
+        scheduler.sessionsProvider = { probe.sessions }
+        scheduler.isUserInteracting = { probe.isInteracting }
+        scheduler.sleepAction = { probe.sleepCount += 1 }
+        return (scheduler, probe)
+    }
+
+    /// 猶予ぶん進めるのに要する回数（設定値に追随させる）
+    private var 猶予の秒数: Int { Int(SleepPreferences.countdown) }
+
+    @Test func 猶予を数え終えたらスリープする() async {
+        let finished = セッション(state: .completed)
+        let (scheduler, probe) = 用意する([finished])
+        scheduler.reserve(.agent(profileID: "claude"), label: "Claude Code")
+        scheduler.noteFinished(finished)
+        #expect(scheduler.countdown != nil)
+
+        for _ in 0..<猶予の秒数 { await scheduler.tick() }
+        #expect(probe.sleepCount == 1)
+        #expect(scheduler.countdown == nil)
+        // 既定では1回で予約を解除する
+        #expect(!scheduler.isReserved)
+    }
+
+    @Test func 予約していなければ完了しても何も起きない() async {
+        let finished = セッション(state: .completed)
+        let (scheduler, probe) = 用意する([finished])
+        scheduler.noteFinished(finished)
+        #expect(scheduler.countdown == nil)
+        #expect(probe.sleepCount == 0)
+    }
+
+    /// 目の前で入力している最中に寝るのは明らかな誤り
+    @Test func ノッチへ入力中は猶予を数えない() async {
+        let finished = セッション(state: .completed)
+        let (scheduler, probe) = 用意する([finished])
+        scheduler.reserve(.agent(profileID: "claude"), label: "Claude Code")
+        scheduler.noteFinished(finished)
+
+        probe.isInteracting = true
+        for _ in 0..<猶予の秒数 { await scheduler.tick() }
+        #expect(probe.sleepCount == 0)
+        #expect(scheduler.countdown?.pausedByUser == true)
+        #expect(scheduler.countdown?.remaining == SleepPreferences.countdown)
+
+        // 入力を終えれば、その続きから数え直す
+        probe.isInteracting = false
+        for _ in 0..<猶予の秒数 { await scheduler.tick() }
+        #expect(probe.sleepCount == 1)
+    }
+
+    /// 猶予の途中で承認待ちが現れたら、答えるまで寝てはいけない
+    @Test func 途中で回答待ちが現れたら猶予を止める() async {
+        let finished = セッション(state: .completed)
+        let (scheduler, probe) = 用意する([finished])
+        scheduler.reserve(.agent(profileID: "claude"), label: "Claude Code")
+        scheduler.noteFinished(finished)
+
+        probe.sessions = [
+            finished,
+            セッション(tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .awaitingApproval),
+        ]
+        for _ in 0..<猶予の秒数 { await scheduler.tick() }
+        #expect(probe.sleepCount == 0)
+        #expect(scheduler.countdown?.hold == .awaitingResponse)
+
+        // 回答が済めば残りを数え直して寝る
+        probe.sessions = [finished]
+        for _ in 0..<猶予の秒数 { await scheduler.tick() }
+        #expect(probe.sleepCount == 1)
+    }
+
+    /// 取り消しても予約は残す。次に完了したときは改めて確認する。
+    @Test func 猶予の取り消しでは予約が残る() async {
+        let finished = セッション(state: .completed)
+        let (scheduler, probe) = 用意する([finished])
+        scheduler.reserve(.agent(profileID: "claude"), label: "Claude Code")
+        scheduler.noteFinished(finished)
+        scheduler.cancelCountdown(message: nil)
+
+        #expect(scheduler.countdown == nil)
+        #expect(scheduler.isReserved)
+        for _ in 0..<猶予の秒数 { await scheduler.tick() }
+        #expect(probe.sleepCount == 0)
+
+        // 次の完了で改めて猶予に入る
+        scheduler.noteFinished(finished)
+        #expect(scheduler.countdown != nil)
+    }
+
+    /// 複数のCLIを予約したときは、最後の1つが終わってから寝る
+    @Test func 複数予約は最後の1つが終わるまでスリープしない() async {
+        let claudeDone = セッション(state: .completed)
+        let codexWorking = セッション(
+            tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .thinking)
+        let (scheduler, probe) = 用意する([claudeDone, codexWorking])
+        scheduler.reserve(.agent(profileID: "claude"), label: "Claude Code")
+        scheduler.reserve(.agent(profileID: "codex"), label: "Codex CLI")
+
+        // Claudeが終わってもCodexが動いている間は猶予にすら入らない
+        scheduler.noteFinished(claudeDone)
+        #expect(scheduler.countdown == nil)
+
+        let codexDone = セッション(
+            tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .completed)
+        probe.sessions = [claudeDone, codexDone]
+        scheduler.noteFinished(codexDone)
+        #expect(scheduler.countdown?.targetCount == 2)
+
+        for _ in 0..<猶予の秒数 { await scheduler.tick() }
+        #expect(probe.sleepCount == 1)
+    }
+
+    /// 予約の途中で片方のCLIが終了しても、残りを待ち続ける
+    @Test func 片方のセッションが終了しても残りの予約は待ち続ける() async {
+        let claude = セッション(state: .completed)
+        let codex = セッション(tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .thinking)
+        let (scheduler, probe) = 用意する([claude, codex])
+        scheduler.reserve(.session(tty: "/dev/ttys001", pid: 100), label: "Claude Code（a）")
+        scheduler.reserve(.session(tty: "/dev/ttys002", pid: 200), label: "Codex CLI（b）")
+
+        probe.sessions = [codex]   // Claude側のCLIが終了した
+        await scheduler.tick()
+
+        #expect(scheduler.reservations.count == 1)
+        #expect(scheduler.isReservedSession(tty: "/dev/ttys002", pid: 200))
+        #expect(probe.sleepCount == 0)
+    }
+
+    /// 対象のCLIが終了してしまったら、狙う相手がいない。黙って残さず解除する。
+    @Test func セッション指定の対象が消えたら予約を解除する() async {
+        let finished = セッション(state: .completed)
+        let (scheduler, probe) = 用意する([finished])
+        scheduler.reserve(.session(tty: "/dev/ttys001", pid: 100), label: "Claude Code")
+
+        probe.sessions = []
+        await scheduler.tick()
+        #expect(!scheduler.isReserved)
+        #expect(scheduler.statusMessage != nil)
+        #expect(probe.sleepCount == 0)
     }
 }
