@@ -489,6 +489,14 @@ final class NotchPanelController {
                 ),
                 height: metrics.topInset + 150 + CGFloat(extraRows) * 40
             )
+        case .sleep:
+            // 残り時間・進捗バー・ボタン列の固定構成。保留理由が出る分だけ余裕を持たせる。
+            size = NSSize(
+                width: NotchLayout.canvasWidth(
+                    for: max(metrics.notchWidth + 300, 660)
+                ),
+                height: metrics.topInset + 175
+            )
         }
         return NSRect(
             x: metrics.screenFrame.midX - size.width / 2,
