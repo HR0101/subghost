@@ -25,6 +25,8 @@ nonisolated enum HookEventKind: String, CaseIterable, Sendable {
     case stopFailure = "StopFailure"
     case subagentStop = "SubagentStop"
     case preCompact = "PreCompact"   // コンテキストが逼迫し圧縮が始まる
+    case postCompact = "PostCompact"
+    case subagentStart = "SubagentStart"
 
     /// このイベントが表すセッション状態。nilなら状態を変えない。
     var resultingState: AIState? {
@@ -32,12 +34,12 @@ nonisolated enum HookEventKind: String, CaseIterable, Sendable {
         case .sessionStart, .sessionEnd: return .completed
         case .userPromptSubmit, .preToolUse, .postToolUse: return .thinking
         // サブエージェントが終わっても親はまだ作業中
-        case .subagentStop: return .thinking
+        case .subagentStart, .subagentStop: return .thinking
         // 圧縮は処理の一部なので状態は変えない
-        case .preCompact: return nil
+        case .preCompact, .postCompact: return nil
         case .notification, .permissionRequest: return .thinking
         case .stop: return .completed
-        case .stopFailure: return .completed
+        case .stopFailure: return .error
         }
     }
 
@@ -65,37 +67,8 @@ nonisolated struct HookEvent: Sendable, Equatable {
     let kind: HookEventKind
     let sessionID: String
     let cwd: String?
-    /// 権限リクエストの対象ツール名（"Bash" 等）
-    let toolName: String?
-    /// 権限リクエストの内容を1行に要約したもの（コマンド文字列など）
-    let toolSummary: String?
-    /// Notificationイベントの本文
-    let message: String?
-    /// セッション記録(JSONL)のパス。選択肢の復元に使う。
+    /// セッション記録(JSONL)のパス。プレビューを明示的に有効にした場合だけ読む。
     let transcriptPath: String?
-    /// tool_input に選択肢が含まれる場合の質問（AskUserQuestion）。
-    /// ペイロードから直接取れるため、記録を読む必要がない。
-    /// AskUserQuestion は複数の問いをまとめて送ってくるため配列で持つ。
-    let embeddedQuestions: [PendingChoice]
-
-    /// 先頭の質問（1問だけを扱う既存経路向け）
-    var embeddedQuestion: PendingChoice? { embeddedQuestions.first }
-
-    /// ノッチに出す問いかけ文
-    var title: String {
-        switch kind {
-        case .permissionRequest:
-            if let toolName, let toolSummary, !toolSummary.isEmpty {
-                return "\(toolName) の実行を許可しますか？\n\(toolSummary)"
-            }
-            if let toolName { return "\(toolName) の実行を許可しますか？" }
-            return "実行を許可しますか？"
-        case .notification:
-            return message ?? "入力を待っています"
-        default:
-            return kind.rawValue
-        }
-    }
 
     /// 作業ディレクトリ名（表示用）
     var projectName: String? {
@@ -116,17 +89,11 @@ nonisolated enum HookEventDecoder {
               let kind = HookEventKind(normalizing: rawName)
         else { return nil }
 
-        let toolInput = dict["tool_input"] as? [String: Any]
-
         return HookEvent(
             kind: kind,
             sessionID: dict["session_id"] as? String ?? "",
             cwd: dict["cwd"] as? String,
-            toolName: dict["tool_name"] as? String,
-            toolSummary: toolInput.flatMap { summarize(toolInput: $0) },
-            message: dict["message"] as? String,
-            transcriptPath: dict["transcript_path"] as? String,
-            embeddedQuestions: toolInput.map { TranscriptReader.parseQuestions(input: $0) } ?? []
+            transcriptPath: dict["transcript_path"] as? String
         )
     }
 
@@ -137,66 +104,5 @@ nonisolated enum HookEventDecoder {
             if let value = dict[key] as? String, !value.isEmpty { return value }
         }
         return nil
-    }
-
-    /// tool_inputから人が読める1行の要約を作る
-    static func summarize(toolInput: [String: Any], maxLength: Int = 120) -> String? {
-        // よく使われるキーを優先順に拾う
-        let preferredKeys = ["command", "file_path", "path", "pattern", "url", "description"]
-        var summary: String?
-        for key in preferredKeys {
-            if let value = toolInput[key] as? String, !value.isEmpty {
-                summary = value
-                break
-            }
-        }
-        guard var text = summary else { return nil }
-
-        text = text
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return nil }
-        if text.count > maxLength {
-            text = String(text.prefix(maxLength)) + "…"
-        }
-        return text
-    }
-}
-
-// MARK: - 権限リクエストへの応答
-
-nonisolated enum HookDecision: Sendable, Equatable {
-    case allow
-    case deny(reason: String)
-    /// 介入せず、CLI本来の確認画面に任せる
-    case passthrough
-
-    /// フックの標準出力へ返すJSON
-    var json: String {
-        switch self {
-        case .passthrough:
-            // 空オブジェクト＝何も指示しない。CLIは通常どおりユーザーに尋ねる。
-            return "{}"
-        case .allow:
-            return Self.decisionJSON(decision: "allow", reason: "Subghostで承認しました")
-        case .deny(let reason):
-            return Self.decisionJSON(decision: "deny", reason: reason)
-        }
-    }
-
-    private static func decisionJSON(decision: String, reason: String) -> String {
-        var decisionPayload: [String: Any] = ["behavior": decision]
-        if decision == "deny" {
-            decisionPayload["message"] = reason
-        }
-        let payload: [String: Any] = [
-            "hookSpecificOutput": [
-                "hookEventName": "PermissionRequest",
-                "decision": decisionPayload,
-            ],
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              let text = String(data: data, encoding: .utf8) else { return "{}" }
-        return text
     }
 }

@@ -36,10 +36,10 @@ nonisolated struct HookRequest: Sendable {
 
 // MARK: - サーバ
 
-/// フック接続を待ち受ける。応答は非同期に返せる（承認待ちのあいだ接続を保持するため）。
+/// フック接続を待ち受ける。監視専用のため、受信後は直ちに空応答を返す。
 final class HookServer: @unchecked Sendable {
 
-    /// 接続1本を表す。応答を返すまでフック側（＝CLI）は待ち続ける。
+    /// 接続1本を表す。
     final class Connection: @unchecked Sendable {
         private let fd: Int32
         private let lock = NSLock()
@@ -95,6 +95,7 @@ final class HookServer: @unchecked Sendable {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        chmod(directory, 0o700)
         // 前回のソケットファイルが残っていると bind に失敗する
         try? FileManager.default.removeItem(atPath: socketPath)
 
@@ -155,7 +156,7 @@ final class HookServer: @unchecked Sendable {
                 if errno == EINTR { continue }
                 return
             }
-            // 1接続ずつ独立に処理する（承認待ちで長時間ブロックするため）
+            // 接続ごとに独立して読み、遅いクライアントが他のイベントを妨げないようにする
             Thread.detachNewThread { [weak self] in
                 self?.handle(clientFD: clientFD)
             }
@@ -204,6 +205,7 @@ final class HookServer: @unchecked Sendable {
             .split(separator: "\r\n")
             .first { $0.lowercased().hasPrefix("content-length:") }
             .flatMap { Int($0.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+        guard contentLength >= 0, contentLength <= 1_048_576 else { return nil }
 
         var bodyCount = buffer.count - headerEnd.upperBound
         while bodyCount < contentLength {
@@ -211,6 +213,7 @@ final class HookServer: @unchecked Sendable {
             guard n > 0 else { break }
             buffer.append(contentsOf: chunk[0..<n])
             bodyCount += n
+            if bodyCount > 1_048_576 { return nil }
         }
         return buffer
     }

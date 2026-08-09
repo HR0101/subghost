@@ -27,11 +27,6 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
     case completed          // AIがターンを完了
     case error              // ツールエラー / APIエラー
 
-    // インタラクション
-    case approval           // 権限の承認待ち
-    case question           // 質問への回答待ち
-    case promptSent         // ノッチからプロンプトを送信
-
     // システム
     case contextLimit       // コンテキストがもうすぐ満杯
 
@@ -41,9 +36,6 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
         case .sessionStart: return "セッション開始"
         case .completed: return "タスク完了"
         case .error: return "タスクエラー"
-        case .approval: return "承認が必要"
-        case .question: return "入力待ち"
-        case .promptSent: return "プロンプト送信"
         case .contextLimit: return "コンテキスト制限"
         }
     }
@@ -54,9 +46,6 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
         case .sessionStart: return "新しい Claude / Codex / Antigravity セッション"
         case .completed: return "AI がターンを完了しました"
         case .error: return "ツールエラーまたは API エラー"
-        case .approval: return "権限の承認待ち"
-        case .question: return "AI が入力を待っています"
-        case .promptSent: return "プロンプトを送信しました"
         case .contextLimit: return "コンテキストウィンドウがもうすぐ満杯"
         }
     }
@@ -66,7 +55,6 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
         switch self {
         case .appLaunched: return "アプリ"
         case .sessionStart, .completed, .error: return "セッション"
-        case .approval, .question, .promptSent: return "インタラクション"
         case .contextLimit: return "システム"
         }
     }
@@ -107,23 +95,6 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
             // エラー。下行させて不穏さを出す
             return [ToneStep(frequency: 415, duration: 0.09),     // G#4
                     ToneStep(frequency: 311, duration: 0.16)]     // D#4
-
-        case .approval:
-            // 承認待ち。反復で気を引き、最後に上げて「待っている」ことを示す
-            return [ToneStep(frequency: 880, duration: 0.06),     // A5
-                    ToneStep(frequency: 0, duration: 0.04),
-                    ToneStep(frequency: 880, duration: 0.06),
-                    ToneStep(frequency: 0, duration: 0.04),
-                    ToneStep(frequency: 1174, duration: 0.12)]    // D6
-
-        case .question:
-            // 質問。語尾を上げる問いかけ調
-            return [ToneStep(frequency: 659, duration: 0.08),     // E5
-                    ToneStep(frequency: 988, duration: 0.13)]     // B5
-
-        case .promptSent:
-            // 送信。邪魔にならないよう短い単発
-            return [ToneStep(frequency: 1046, duration: 0.04)]    // C6
 
         case .contextLimit:
             // 警告。低音の反復で他と明確に区別する
@@ -169,14 +140,12 @@ final class SoundAlerts {
         switch state {
         case .completed: play(.completed, session: session)
         case .error: play(.error, session: session)
-        case .awaitingApproval: play(.approval, session: session)
-        case .awaitingAnswer: play(.question, session: session)
         case .idle, .thinking: return
         }
     }
 
     /// 全体設定・イベント別設定・エージェント/セッションのミュート・静穏時間をまとめて見る。
-    /// セッションに紐づかない音（起動音・送信音）は session を省略する。
+    /// セッションに紐づかない音（起動音など）は session を省略する。
     func play(_ sound: AlertSound, session: SessionInfo? = nil) {
         guard AlertGate.allowsSound(sound, session: session) else { return }
         emit(sound)

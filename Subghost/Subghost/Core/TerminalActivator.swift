@@ -5,7 +5,7 @@
 //  設計書 4.2: クリックでターミナルを最前面化
 //  設計書 追補: Jump（AI CLIが動いている「タブ」まで正確に移動する）
 //
-//  tmuxのクライアントttyを手がかりに、どのターミナルのどのタブかを特定する。
+//  CLIプロセスのttyを手がかりに、どのターミナルのどのタブかを特定する。
 //  ターミナル.appはAppleScriptでタブを直接選択できる。
 //  GhosttyはAppleScript非対応のため、アプリの前面化までを行う。
 //
@@ -217,12 +217,8 @@ enum TerminalActivator {
         return result.stringValue == "ok"
     }
 
-    // MARK: - 入力先の検証
-
     /// 現在前面にあるタブのtty。特定できない場合は nil。
-    ///
-    /// キー入力を合成する前に「本当に狙ったタブが前面か」を確かめるために使う。
-    /// Ghosttyはタブを問い合わせる手段が無いため必ず nil を返す。
+    /// 完了通知を抑制してよいかの判定に使う。
     static func frontmostTTY() -> String? {
         guard TerminalApp.terminal.isRunning else { return nil }
 
@@ -239,20 +235,6 @@ enum TerminalActivator {
 
         guard let tty = result.stringValue, isValidTTY(tty) else { return nil }
         return tty
-    }
-
-    /// 指定セッションのタブが前面にあると確認できたか。
-    /// 確認できない場合は nil を返し、呼び出し側で送信を中止させる。
-    static func isFrontmostTab(session: SessionInfo) -> Bool? {
-        // ターミナル.appは tty で厳密に照合できる
-        if let focused = frontmostTTY() { return focused == session.tty }
-
-        // Ghostty は tty を問い合わせられないが、前面ウインドウのタイトルに
-        // セッションID・作業ディレクトリが含まれるため、それで照合する。
-        if let title = frontmostGhosttyTitle() {
-            return titleMatches(title, session: session)
-        }
-        return nil
     }
 
     /// ウインドウタイトルが対象セッションを指しているか（純粋ロジック）

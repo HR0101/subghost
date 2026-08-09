@@ -4,7 +4,7 @@
 //
 //  設定そのものを扱う操作（初期化・書き出し・読み込み）と、開発用の記録フラグ。
 //
-//  フック導入や ~/.zshrc の書き換えまで行うアプリなので、設定を一度まっさらに
+//  フック導入のようにアプリ外の設定も持つため、アプリ内設定を一度まっさらに
 //  戻せる導線を用意しておく。書き出し／読み込みは、環境を移すときと、
 //  不具合の報告に設定内容を添えたいときのため。
 //
@@ -19,7 +19,7 @@ nonisolated enum DiagnosticsPreferences {
     static let writeStateDumpKey = "writeStateDump"
     static let logDisplaySelectionKey = "logDisplaySelection"
 
-    /// 画面解析の入力と判定結果をファイルへ書き出す（状態判定の誤りを調べるため）
+    /// フック受信とセッション状態をファイルへ書き出す
     static var writeStateDump: Bool {
         NotchPreferences.bool(forKey: writeStateDumpKey, default: false)
     }
@@ -31,8 +31,7 @@ nonisolated enum DiagnosticsPreferences {
 
     /// 状態ダンプの書き出し先（診断画面から開けるようにする）
     static var stateDumpDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Subghost", isDirectory: true)
+        HookInstaller.supportDirectory.appendingPathComponent("run", isDirectory: true)
     }
 }
 
@@ -70,7 +69,7 @@ enum SettingsStore {
     ]
 
     /// すべての設定を消して初期状態へ戻す。
-    /// フックの導入や ~/.zshrc の変更といったアプリ外への変更には触れない。
+    /// フックの導入といったアプリ外への変更には触れない。
     static func resetAll() throws {
         guard let domainName else { throw SettingsError.noDomain }
         UserDefaults.standard.removePersistentDomain(forName: domainName)
