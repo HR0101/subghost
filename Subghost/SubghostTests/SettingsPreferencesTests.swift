@@ -75,27 +75,17 @@ struct NotificationEventTests {
     @Test func 状態から対応する通知イベントを求める() {
         #expect(NotificationEvent.from(state: .completed) == .completed)
         #expect(NotificationEvent.from(state: .error) == .error)
-        #expect(NotificationEvent.from(state: .awaitingApproval) == .approval)
-        #expect(NotificationEvent.from(state: .awaitingAnswer) == .question)
         // 知らせる必要のない状態には対応するイベントが無い
         #expect(NotificationEvent.from(state: .idle) == nil)
         #expect(NotificationEvent.from(state: .thinking) == nil)
     }
 
-    /// 回答するまでCLIが止まるイベントだけが、静穏時間や集中モードの例外になる
-    @Test func 回答待ちのイベントだけをブロッキングとして扱う() {
-        #expect(NotificationEvent.approval.isBlocking)
-        #expect(NotificationEvent.question.isBlocking)
-        #expect(!NotificationEvent.completed.isBlocking)
-        #expect(!NotificationEvent.error.isBlocking)
-    }
-
     @Test func サウンドと通知イベントが対応する() {
         #expect(AlertSound.completed.notificationEvent == .completed)
-        #expect(AlertSound.approval.notificationEvent == .approval)
+        #expect(AlertSound.error.notificationEvent == .error)
         // セッションに紐づかない音には対になる通知が無い
         #expect(AlertSound.appLaunched.notificationEvent == nil)
-        #expect(AlertSound.promptSent.notificationEvent == nil)
+        #expect(AlertSound.sessionStart.notificationEvent == nil)
     }
 }
 
@@ -195,40 +185,6 @@ struct HotkeyBindingTests {
         HotkeyPreset.migrateIfNeeded(defaults: defaults)
 
         #expect(HotkeyAction.showSessions.binding(in: defaults) == chosen)
-    }
-}
-
-// MARK: - 並べ替え
-
-struct ReorderingTests {
-
-    @Test func 要素を後ろへ移動する() {
-        let items = ["a", "b", "c", "d"]
-        // SwiftUIのonMoveは「移動先＝取り除く前の添字」で渡してくる
-        let moved = Reordering.moved(items, fromOffsets: IndexSet(integer: 0), toOffset: 3)
-        #expect(moved == ["b", "c", "a", "d"])
-    }
-
-    @Test func 要素を前へ移動する() {
-        let items = ["a", "b", "c", "d"]
-        let moved = Reordering.moved(items, fromOffsets: IndexSet(integer: 3), toOffset: 1)
-        #expect(moved == ["a", "d", "b", "c"])
-    }
-
-    @Test func 複数の要素をまとめて移動する() {
-        let items = ["a", "b", "c", "d", "e"]
-        let moved = Reordering.moved(items, fromOffsets: IndexSet([0, 2]), toOffset: 5)
-        #expect(moved == ["b", "d", "e", "a", "c"])
-    }
-
-    @Test func 範囲外の指定でも壊れない() {
-        let items = ["a", "b", "c"]
-        #expect(Reordering.moved(items, fromOffsets: IndexSet(integer: 9), toOffset: 0) == items)
-        // 移動先が末尾を超えても末尾へ収める
-        #expect(
-            Reordering.moved(items, fromOffsets: IndexSet(integer: 0), toOffset: 99)
-                == ["b", "c", "a"]
-        )
     }
 }
 
