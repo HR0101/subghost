@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Monitor-only regression guard
+        run: >-
+          ! grep -R -nE
+          'send-keys|capture-pane|new-session|attach-session|kill-session'
+          Subghost/Subghost --include='*.swift'
+      - name: Build
+        run: >-
+          xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost
+          -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+      - name: Unit tests
+        run: >-
+          xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost
+          -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
+          -only-testing:SubghostTests test

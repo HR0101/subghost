@@ -4,7 +4,7 @@
 
 Subghost is a SwiftUI macOS menu-bar application. The Xcode project is at `Subghost/Subghost.xcodeproj`; application code lives in `Subghost/Subghost/`:
 
-- `Core/` contains CLI discovery, hooks, tmux integration, state detection, and terminal control.
+- `Core/` contains CLI discovery, hook-based state monitoring, legacy tmux cleanup, and terminal activation.
 - `Models/` contains shared data and preferences.
 - `UI/` contains the notch panel, settings, coordinator, and reusable views.
 - `Assets.xcassets/` stores app icons and colors.

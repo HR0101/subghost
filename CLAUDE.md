@@ -1,121 +1,68 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+SubghostはSwiftUI製のmacOSメニューバー／ノッチ常駐アプリです。Claude CodeとCodex CLIのタスクが作業途中か完了したかを、CLIフックから監視します。
 
-`AGENTS.md` covers project layout, coding style, testing conventions, and commit/PR rules — follow it and do not duplicate it here. This file covers commands and the architecture that only becomes visible after reading several files together.
+## 重要な製品境界
 
-## Commands
+- 監視専用。CLIへプロンプト、承認、回答、キー入力を送らない。
+- tmuxを起動・接続・キャプチャ・操作しない。
+- `ShellIntegration` は旧版が追加したauto-tmuxブロックを削除する移行専用。新しい設定を追加する処理へ戻さない。
+- 画面テキストから状態を推測しない。状態の正はフックイベントとする。
+- 終了イベントを時間だけで推測しない。取りこぼし時の誤完了より、`Working`の維持を選ぶ。
 
-Run from the repository root. `DEVELOPER_DIR` is required whenever `xcode-select` points at the Command Line Tools rather than Xcode.
+## 構成
+
+- `Core/AgentDiscovery.swift`: `ps`からCLIプロセス、PID、TTYを検出
+- `Core/HookInstaller.swift`: Claude/Codex設定への監視フックの安全な追加・解除
+- `Core/HookServer.swift`: Unixドメインソケット上のローカルHTTP受信
+- `Core/SessionWatcher.swift`: プロセス照合、フック状態、診断情報
+- `Core/TranscriptReader.swift`: 本文表示を明示的に有効にした場合だけ記録末尾を読む
+- `UI/AppCoordinator.swift`: 監視イベントを通知、履歴、サウンド、スリープへ伝播
+- `UI/NotchView.swift`: ノッチUI
+- `SubghostApp.swift`: アプリ入口とメニューバーの復旧導線
+
+## セッション識別
+
+`SessionInfo.id`はPIDがある場合はCLI種別＋PID、フック専用セッションではCLI種別＋`session_id`を使います。TTYはターミナルへ移動するための属性であり、同一性には使いません。同じTTYで複数CLIが動く場合や、TTYのないバックグラウンド実行を取り違えないためです。
+
+フックの対応付けは次の順です。
+
+1. CLIの`session_id`
+2. PID
+3. 候補が1件だけのTTY
+4. 候補が1件だけの作業フォルダ
+
+## フックの安全性
+
+- 既存設定は保持し、書き換え前にバックアップする。
+- Subghost所有項目は`subghost-bridge`マーカーで識別する。
+- ブリッジはソケットが無ければ成功終了し、通信には1秒の上限を持つ。
+- 受信サーバは状態処理を始める前に空応答を返す。
+- フックは判断を返さず、CLI本来の承認フローへ介入しない。
+- CLIの対応イベントは更新されるため、イベント集合を変更するときは導入中のCLIと公式資料を確認する。
+
+## プライバシー
+
+本文プレビューは既定で無効です。無効中はtranscriptを読まず、履歴にはプレースホルダだけを保存します。無効へ切り替えた時点で既存の履歴本文も置換します。診断ダンプは明示設定時だけ有効です。
+
+## ビルドとテスト
 
 ```sh
-# Build
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost build
+xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost \
+  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 
-# All tests (unit + UI)
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost test
-
-# One suite / one test (targets: SubghostTests, SubghostUITests)
-... -only-testing:SubghostTests/StateDetectorTests test
-... -only-testing:'SubghostTests/StateDetectorTests/エラーパターンでerrorへ遷移する()' test
+xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost \
+  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO \
+  -only-testing:SubghostTests test
 ```
 
-If the build fails with `No signing certificate "Mac Development" found`, the project's `DEVELOPMENT_TEAM` does not match a certificate on this machine. Override it on the command line — `xcodebuild ... DEVELOPMENT_TEAM=<your team id>` — rather than editing `project.pbxproj`, which would churn the file for everyone else.
+UI、通知、フォーカス、ノッチ操作を変えた場合は署名可能な環境で全テストを実行します。テストでは固定`Date`と純粋ロジックを優先し、待ち時間に依存させません。
 
-Unit tests are Swift Testing (`@Test` / `#expect`) with Japanese behavior-statement names; UI tests are XCTest.
+## 変更時の確認
 
-## Architecture
-
-Subghost is a menu-bar-less macOS app: `SubghostApp` owns only a `Settings` scene, and `AppDelegate` starts the singleton `AppCoordinator`, which is the sole entry point. All interaction happens through a floating notch panel.
-
-### Discovery is zero-config, and tty is the identity
-
-`AgentDiscovery` finds AI CLIs by scanning running processes for executable names from `CLIProfile.executableNames` — not by shell aliases or tmux session naming. It uses the kernel's real executable name, so CLIs that rewrite their process title (Claude Code) are still matched, and processes without a controlling terminal are excluded.
-
-`SessionInfo.id` is the **tty**, not the pid or tmux name. This is what lets a session survive tmux being absent. `CLIProfile.withCustomAliases` folds user-registered wrapper-script names into the built-in profiles at discovery time.
-
-### Two monitoring paths converge in SessionWatcher
-
-This is the central design fact. `SessionWatcher.pollOnce()` runs both, and **which path a session uses changes the rules that apply to it**:
-
-| | Hook path | tmux path |
-|---|---|---|
-| Transport | Unix domain socket, minimal HTTP/1.1 (`HookServer`) | `tmux capture-pane` text scraping |
-| Accuracy | Events are authoritative | Inferred from screen text |
-| Requires tmux | No | Yes |
-| CLIs | Claude Code, Codex | All three |
-
-**Once a session is hook-connected, `StateDetector.ingest` is never called for it again** (`pollOnce` hits `continue`). Screen analysis stops entirely, so a dropped hook event has no self-healing route and the session would stick on `Working` forever. `reconcileStaleHookState` exists solely as the independent safety net for this — it re-checks via tmux when available, and otherwise forces `idle` after a long timeout. Preserve this net when touching hook handling.
-
-For the same reason, `handleHook` resets a `thinking` state on first hook connection: a `thinking` inferred from screen scraping cannot be trusted once the only thing that can move state is hook events.
-
-### State detection is a pure state machine
-
-`StateDetector` is a `nonisolated struct` with no I/O — text in, `DetectorEvent` out — which is why it is heavily unit-testable with fixed `Date` values. Keep it that way; put side effects in `SessionWatcher`.
-
-Two entry points, deliberately different:
-- `adoptCurrentState` — first sight of an already-running CLI. Never returns "completed", because announcing a response that finished before Subghost launched is a false alarm.
-- `ingest` — steady-state, diff-driven.
-
-Choice detection (`ChoicePrompt`) uses a two-poll confirmation on startup (`candidateChoice`): a numbered list must be seen twice before it is treated as a live prompt, because leftover conversation text reads like a menu.
-
-`CLIProfile` regexes are the contract with each CLI's real on-screen UI. They drift when a CLI ships a UI change — `promptPattern` in particular gates preview extraction, since `extractPreview` slices off everything below the last prompt line to drop the status bar. Verify against real `capture-pane` output, not just mock fixtures.
-
-### Sending back to the CLI has three routes with different requirements
-
-Ordered by capability, and the reason several error messages exist:
-1. **Hook return value** — approvals only, no keystrokes involved, works in the background.
-2. **tmux `send-keys`** — arbitrary text, works in the background.
-3. **Synthesized keystrokes** (`KeystrokeSender`) — the fallback when there is no tmux. Requires Accessibility permission (`AXIsProcessTrusted`) *and* the target tab in front, so it cannot serve background replies.
-
-`MonitoredSession.canRespondToChoice` encodes exactly this: only routes 1 and 2 count.
-
-### UI layer
-
-`AppCoordinator` (`@Observable` singleton) holds all UI state and wires the components; `NotchPanelController` owns the `NSPanel`; `NotchView` renders it.
-
-`NotchMode` is the requested mode, but `displayMode` is what actually renders — it applies a priority ladder (input > choice > sleep > onboarding > notification > sessions > activity > hover > compact) so urgent prompts cannot be buried and typing is never interrupted. Change display precedence there, not at the call sites.
-
-`NotchPanel` overrides `constrainFrameRect(_:to:)` to return the rect unchanged. Without it macOS pushes the panel below the menu bar and it never sits in the notch. Do not remove it.
-
-`NotchLayout` holds geometry constants shared between the panel and the SwiftUI view; `canvasWidth(for:)` accounts for the top shoulder curve, so panel sizing and shape drawing must both go through it or they desync.
-
-### Sleep-on-completion holds rather than cancels, and never fires unattended-blind
-
-`SleepScheduler` holds a list of reserved targets and puts the Mac to sleep (`pmset sleepnow`) after a countdown. Sleep cannot be undone and fires while the user is away, so the shape is deliberate:
-
-- The decision lives in `SleepCondition`, a pure function over `SleepSessionSnapshot` values — no I/O, unit-tested with fixed inputs. Side effects stay in `SleepScheduler` / `SystemSleeper`.
-- **Several reservations mean "wait for the last one."** `hold` only clears when every *live* target is settled. A target whose CLI has exited is dropped from the decision (`liveTargets`) — keeping it would make "all done" unsatisfiable forever, so one dead session would silently disable the feature.
-- **A blocked countdown stops, it does not cancel.** `hold` returns a reason (`targetBusy`, `awaitingResponse`, `targetMissing`) and the remaining seconds simply stop decreasing. Cancelling instead would silently discard the user's intent the moment they touched the keyboard.
-- `awaitingResponse` looks at **every** session, not just the target's. A session waiting on approval is a stopped CLI; sleeping there means the user returns to no progress at all.
-- `idle` is never "finished". The countdown only starts from a completion event received *after* the reservation, or reserving while nothing runs would sleep immediately.
-- The reservation is intentionally **not persisted**. It is a one-session intent; restoring it later means sleeping during unrelated work.
-
-### Anything written into the user's shell or CLI config must fail open
-
-Subghost edits two things that live outside the app and outlive it: `~/.zshrc` (via `ShellIntegration`) and `~/.claude/settings.json` / `~/.codex/hooks.json` (via `HookInstaller`). A mistake here does not surface as a Subghost bug — it surfaces as **the user's `claude` no longer starting**, on a machine where Subghost may not even be running. This has already shipped once and broken users.
-
-The invariant: **no code path installed by Subghost may prevent the CLI from running.** Concretely, in `ShellIntegration.scriptBody`:
-
-- The tmux preconditions are checked *before* delegating, and every one of them falls through to `command "$cmd" "$@"`. `[ -t 0 ] && [ -t 1 ] && [ -t 2 ]` is required, not just stdout — tmux needs all three or it dies with `open terminal failed` and the CLI never runs (`claude < /dev/null`, editor terminals, CI). `TERM` in `dumb`/`unknown`/`emacs` fails the same way.
-- Non-interactive invocations (`--version`, `-p`, `doctor`, `mcp`, …) are never wrapped — tmux restores the screen on exit and the output vanishes.
-- The session is created with `new-session -d` and attached separately. Creation failing means the CLI has **not** run, so falling back cannot double-execute it. Do not collapse this back into a single attached `tmux new-session`.
-
-The same "fail open" rule shapes `HookInstaller`: the hook command is `[ -x "$1" ] && …; exit 0` so a missing bridge is a no-op, paths are passed as `sh -c` arguments rather than interpolated (a `'` in the home directory would otherwise break the command), and the bridge always applies a `curl -m` bound so a wedged Subghost cannot hang the CLI.
-
-The `statusLine` entry follows the same shape: `statuslineCommand` embeds the user's original command as a `sh -c` argument, so deleting `~/.subghost` degrades to the original statusline instead of leaving a dead command, and `uninstallStatusline` can recover the original from `settings.json` alone when the saved copy is gone. Detection is by `marker`, not by comparing against `statuslineScriptPath` — the stored command is a wrapper, not a bare path.
-
-Config files may be symlinks into a dotfiles repo, so writes go through `zshrcWriteURL` / `writeURL(for:)`, which resolve the link — an atomic write to the link path would replace it with a regular file. `addHooks` skips any event whose existing value is not the expected shape rather than overwriting it, because that value is the user's own hooks. `writeSettings` encodes through `encodedSettings` (which re-parses before returning) and rolls the file back if the post-write read fails.
-
-`encodedSettings` must keep its `JSONSerialization.isValidJSONObject` guard: `JSONSerialization.data(withJSONObject:)` raises an **NSException** on a non-JSON value, which Swift `do`/`catch` cannot catch — it terminates the app rather than surfacing an error.
-
-When touching any of this, verify against a real pty (`pty.fork()`), not just the unit tests — the failures are all tty-conditional and invisible to a piped test harness.
-
-## Gotchas
-
-- **SourceKit diagnostics like `Cannot find type 'X' in scope` in this project are noise** from single-file indexing across an Xcode target with no module boundaries. Trust `xcodebuild`, not the editor diagnostics.
-- **`SubghostUITests.testLaunchPerformance` is flaky** — it measures launch time and fails intermittently on identical code. Re-run before treating a failure as a regression.
-- Runtime behavior depends on macOS permissions (Accessibility for keystrokes, Automation for Terminal.app tab jumping). Failures there surface as user-facing errors, not crashes.
-- `詳細設計書.md` is the design of record and section numbers are cited throughout the code comments (`設計書 5.2` etc.). Read the cited section before changing state transitions or UI flows.
+- 生成したブリッジに`tmux`、`send-keys`、`.zshrc`変更が含まれない
+- 同一TTYの別PIDを別セッションとして扱う
+- `StopFailure`をエラーとして履歴へ残す
+- 本文非表示中にtranscriptを読まない
+- メニューバーから一覧、設定、終了へ到達できる
+- 既存フックと旧版auto-tmux削除の移行を壊さない
