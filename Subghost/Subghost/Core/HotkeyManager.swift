@@ -101,45 +101,35 @@ nonisolated struct HotkeyBinding: Codable, Equatable, Sendable {
 // MARK: - 割り当てられる操作
 
 nonisolated enum HotkeyAction: String, CaseIterable, Identifiable, Sendable {
-    case toggleInput
     case showSessions
     case showActivity
     case jumpToTerminal
-    case approveChoice
-    case denyChoice
     case toggleMute
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .toggleInput: return "プロンプト入力を開く／閉じる"
         case .showSessions: return "セッション一覧を開く"
         case .showActivity: return "アクティビティ履歴を開く"
         case .jumpToTerminal: return "対象のターミナルへ移動"
-        case .approveChoice: return "承認する"
-        case .denyChoice: return "拒否する"
         case .toggleMute: return "サウンドの消音を切り替える"
         }
     }
 
     var detail: String {
         switch self {
-        case .toggleInput: return "どのアプリからでもノッチの入力欄を開きます"
         case .showSessions: return "検出中のAI CLIを一覧で表示します"
-        case .showActivity: return "完了・エラー・回答待ちの履歴を開きます"
-        case .jumpToTerminal: return "回答待ち、なければ送信先のセッションのタブへ移動します"
-        case .approveChoice: return "回答待ちの承認リクエストに「はい」で答えます"
-        case .denyChoice: return "回答待ちの承認リクエストに「いいえ」で答えます"
+        case .showActivity: return "完了したタスクの履歴を開きます"
+        case .jumpToTerminal: return "選択中のセッションのタブへ移動します"
         case .toggleMute: return "アラート音を一時的に止めます"
         }
     }
 
     var category: String {
         switch self {
-        case .toggleInput, .showSessions, .showActivity: return "ノッチを開く"
+        case .showSessions, .showActivity: return "ノッチを開く"
         case .jumpToTerminal: return "移動"
-        case .approveChoice, .denyChoice: return "回答"
         case .toggleMute: return "サウンド"
         }
     }
@@ -150,7 +140,7 @@ nonisolated enum HotkeyAction: String, CaseIterable, Identifiable, Sendable {
     /// 増やさないため。必要な人だけが明示的に割り当てる。
     var defaultBinding: HotkeyBinding? {
         switch self {
-        case .toggleInput:
+        case .showSessions:
             return HotkeyBinding(
                 keyCode: UInt32(kVK_Space),
                 carbonModifiers: UInt32(optionKey),
@@ -200,7 +190,7 @@ nonisolated enum HotkeyAction: String, CaseIterable, Identifiable, Sendable {
 // MARK: - 旧設定からの移行
 
 /// 以前は「⌥Space / ⌃Space / ⇧⌘Space」の3択だった。
-/// 既存ユーザーの選択を、そのまま toggleInput の割り当てとして引き継ぐ。
+/// 既存ユーザーの選択を、セッション一覧の割り当てとして引き継ぐ。
 nonisolated enum HotkeyPreset {
     static let userDefaultsKey = "globalHotkeyPreset"
     static let migratedKey = "hotkeyPresetMigrated"
@@ -218,8 +208,8 @@ nonisolated enum HotkeyPreset {
         default: return
         }
         // 既に新形式で割り当て済みなら上書きしない
-        guard defaults.data(forKey: HotkeyAction.toggleInput.userDefaultsKey) == nil else { return }
-        HotkeyAction.toggleInput.setBinding(
+        guard defaults.data(forKey: HotkeyAction.showSessions.userDefaultsKey) == nil else { return }
+        HotkeyAction.showSessions.setBinding(
             HotkeyBinding(
                 keyCode: UInt32(kVK_Space),
                 carbonModifiers: modifiers,

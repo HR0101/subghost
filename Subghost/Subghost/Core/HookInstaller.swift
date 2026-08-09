@@ -48,18 +48,18 @@ nonisolated enum HookTarget: String, CaseIterable, Identifiable, Sendable {
         case .claude:
             return ["SessionStart", "SessionEnd", "UserPromptSubmit",
                     "PreToolUse", "PostToolUse",
-                    "Notification", "PermissionRequest", "Stop", "StopFailure", "PreCompact"]
+                    "Notification", "Stop", "StopFailure", "PreCompact"]
         case .codex:
-            // Codexが対応するのはこの6種のみ（Notification / PreToolUse は無い）
+            // 状態監視に必要なイベントだけを登録し、承認処理には介入しない。
             return ["SessionStart", "UserPromptSubmit", "PostToolUse",
-                    "PermissionRequest", "Stop", "SubagentStop"]
+                    "Stop", "SubagentStop"]
         }
     }
 
     /// matcherを取るイベント（取らないイベントに付けると弾かれることがある）
     var matcherEvents: Set<String> {
         switch self {
-        case .claude: return ["PreToolUse", "PostToolUse", "PermissionRequest", "Notification"]
+        case .claude: return ["PreToolUse", "PostToolUse", "Notification"]
         case .codex: return ["PostToolUse"]
         }
     }
@@ -417,6 +417,21 @@ nonisolated enum HookInstaller {
         var result = root
         var hooks = (root["hooks"] as? [String: Any]) ?? [:]
 
+        // 旧版が登録した承認・質問用フックを含め、現在の監視イベント集合に無い
+        // Subghost所有エントリを先に除去する。ユーザー自身のフックは残す。
+        for (event, value) in hooks where !target.events.contains(event) {
+            guard var matchers = value as? [[String: Any]] else { continue }
+            matchers.removeAll { matcher in
+                guard let inner = matcher["hooks"] as? [[String: Any]] else { return false }
+                return inner.contains { ($0["command"] as? String)?.contains(marker) == true }
+            }
+            if matchers.isEmpty {
+                hooks.removeValue(forKey: event)
+            } else {
+                hooks[event] = matchers
+            }
+        }
+
         for event in target.events {
             // 既存の値が想定した形でなければ、そのイベントには一切触れない。
             // 空配列で置き換えるとユーザーが自分で書いたフックを消してしまう。
@@ -430,9 +445,7 @@ nonisolated enum HookInstaller {
                 return inner.contains { ($0["command"] as? String)?.contains(marker) == true }
             }
 
-            // 承認待ちは応答があるまで接続を保持するため、長めの上限を指定する
-            let isPermission = event == "PermissionRequest"
-            let timeout = isPermission ? permissionTimeoutSeconds : normalTimeoutSeconds
+            let timeout = normalTimeoutSeconds
             let hookEntry: [String: Any] = [
                 "type": "command",
                 "command": hookCommand(

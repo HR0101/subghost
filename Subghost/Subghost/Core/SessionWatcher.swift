@@ -9,14 +9,7 @@
 //  一定間隔の pollOnce() で状態を更新する。副作用（通知・音・記録）はここが持ち、
 //  判定そのものは純粋ロジックの StateDetector に任せる。
 //
-//  2つの監視経路が合流する場所であり、ここが本ファイルの要点:
-//  - フック経路: CLIからのイベントが正、tmux不要（Claude Code / Codex）
-//  - tmux経路 : capture-pane の画面文字から推測、tmuxが要る（全CLI）
-//
-//  一度フックが繋がったセッションには StateDetector.ingest を二度と呼ばない。
-//  画面解析が止まるため、イベントを取りこぼすと Working のまま固まる。
-//  その唯一の受け皿が reconcileStaleHookState で、tmuxがあれば取り直し、
-//  無ければ一定時間後に idle へ倒す。フック処理を触るときもこの網は残すこと。
+//  状態監視はCLIフックだけを正とする。端末画面の解析と入力送信は行わない。
 //
 
 import Foundation
@@ -198,7 +191,8 @@ final class SessionWatcher {
             UserDefaults.standard.set(activeSessionName, forKey: "activeSessionName")
         }
     }
-    private(set) var tmuxAvailable = true
+    /// 旧UIとのソース互換用。tmux方式は廃止したため常にfalse。
+    private(set) var tmuxAvailable = false
 
     /// 送信先をユーザーが明示的に選んだか。
     /// 真のあいだは自動切り替えを行わない（意図しないCLIへの誤送信を防ぐ）。
@@ -346,54 +340,18 @@ final class SessionWatcher {
     /// ユーザー登録のカスタムエイリアス（AppCoordinatorが変更のたびに同期する）
     var customAliases: [CustomAlias] = []
 
-    /// フック未着イベント（stopが来ない等）で固着した .thinking を裏取りするまでの猶予。
-    /// 短すぎるとフックイベント到着直後の一瞬を誤って裏取りしかねないため、数秒は待つ。
-    private static let hookStaleCheckDelay: TimeInterval = 5.0
-    /// tmuxで裏取りできても busy/prompt のどちらとも判定できない画面が続いた場合の猶予
-    private static let hookStaleUnknownScreenInterval: TimeInterval = 30.0
-    /// tmuxが無く画面で裏取りできない場合、最後の手段として強制的にidleへ戻すまでの猶予
+    /// Stopイベントを取りこぼした場合、Working表示を永久に残さないための安全弁。
     private static let hookStaleForceIdleInterval: TimeInterval = 600.0
-    /// completed のまま放置された場合にidleへ自動遷移するまでの秒数（tmux接続時のStateDetectorと揃える）
-    private static let completedHoldInterval: TimeInterval = 8.0
 
     func pollOnce() async {
-        tmuxAvailable = TmuxClient.resolveTmuxPath() != nil
-
         // 1. 実行中プロセスからAI CLIを検出する（エイリアス・命名規則に依存しない）
         let agents = await AgentDiscovery.discover(profiles: CLIProfile.withCustomAliases(customAliases))
         reconcile(agents: agents)
 
-        // tmuxが持っている最終出力時刻を取り込む（放置セッションの判定に使う）。
-        // 全ペイン分を1回のtmux呼び出しでまとめて取る。
-        if tmuxAvailable {
-            let activity = await TmuxClient.activityByTTY()
-            for session in sessions {
-                if let at = activity[session.info.tty] { session.tmuxActivityAt = at }
-            }
-        }
-
-        // 2. 状態判定。フック接続の有無で経路が異なる。
+        // 2. 状態はフックだけで更新する。画面文字のポーリングはしない。
         let now = Date()
-        let stable = UserDefaults.standard.object(forKey: "stableInterval") as? Double ?? 1.5
         for session in sessions {
-            if session.info.isHookConnected {
-                // フックイベント自体は正確だが、取りこぼし（フックサーバ再起動、CLIの
-                // クラッシュ、stopイベント未着等）が起きると自己修復する手段が無く
-                // Working等のまま永久に固着してしまう。ingestによる画面解析は
-                // フック接続後は行わないため、ここで独立した安全網をかける。
-                await reconcileStaleHookState(session: session, at: now)
-                continue
-            }
-            guard let target = session.info.tmuxTarget,
-                  let text = await TmuxClient.capturePane(target: target) else { continue }
-            session.detector.stableInterval = stable
-
-            // 初めて見るセッションは、差分ではなく現在の画面から状態を推定する。
-            // Subghost起動前から承認待ちで止まっているものを取りこぼさないため。
-            let event = session.detector.needsInitialAdoption
-                ? session.detector.adoptCurrentState(rawText: text, at: now)
-                : session.detector.ingest(rawText: text, at: now)
-            apply(event: event, to: session)
+            await reconcileStaleHookState(session: session, at: now)
         }
 
         refreshCodexUsage()
@@ -401,49 +359,12 @@ final class SessionWatcher {
         writeStateDumpIfEnabled()
     }
 
-    /// フック接続セッションの状態が、実際のCLIの様子と食い違っていないか裏取りする（安全網）。
-    /// tmuxも繋がっていれば画面で確認し、無ければ長時間経過を根拠に強制的に戻す。
+    /// Stopイベントを取りこぼしてもWorkingが永久に残らないようにする安全網。
     private func reconcileStaleHookState(session: MonitoredSession, at now: Date) async {
-        switch session.state {
-        case .thinking:
-            let elapsed = now.timeIntervalSince(session.lastActivityAt)
-            guard elapsed >= Self.hookStaleCheckDelay else { return }
-            let profile = session.info.profile
-
-            if let target = session.info.tmuxTarget,
-               let text = await TmuxClient.capturePane(target: target) {
-                let cleaned = StateDetector.clean(text, profile: profile)
-                // busyの判定は経過時間・トークン数を残したテキストで行う
-                // (StateDetector.stripDecoration のコメント参照)
-                if StateDetector.isCurrentlyBusy(text, profile: profile) {
-                    return   // 実際にまだ動作中
-                }
-                if StateDetector.matches(
-                    pattern: profile.promptPattern, in: StateDetector.tail(of: cleaned, lines: 12)) {
-                    session.state = .completed
-                    session.lastCompletedAt = now
-                    session.preview = StateDetector.extractPreview(from: text, profile: profile)
-                    return
-                }
-                // busyでもプロンプト待ちでもない画面（予期しない表示等）は判定を急がず、
-                // 猶予をおいてもなお変わらなければ安全側のidleへ倒す
-                if elapsed >= Self.hookStaleUnknownScreenInterval {
-                    session.state = .idle
-                }
-            } else if elapsed >= Self.hookStaleForceIdleInterval {
-                // 画面を確認する手段が無い場合の最後の保険
-                session.state = .idle
-            }
-
-        case .completed:
-            guard let completedAt = session.lastCompletedAt,
-                  now.timeIntervalSince(completedAt) >= Self.completedHoldInterval
-            else { return }
-            session.state = .idle
-
-        default:
-            return
-        }
+        guard session.state == .thinking,
+              now.timeIntervalSince(session.lastActivityAt) >= Self.hookStaleForceIdleInterval
+        else { return }
+        session.state = .completed
     }
 
     /// 各セッションの直近のやり取りを記録から読み出す。
@@ -499,7 +420,6 @@ final class SessionWatcher {
             "updatedAt": ISO8601DateFormatter().string(from: Date()),
             "activeSessionName": activeSessionName ?? "(なし)",
             "hookServerRunning": hookServerRunning,
-            "tmuxAvailable": tmuxAvailable,
             "sessions": sessions.map { session in
                 [
                     "tty": session.info.tty,
@@ -509,7 +429,6 @@ final class SessionWatcher {
                     "isMonitorable": session.info.isMonitorable,
                     "monitoringSource": session.info.monitoringSource,
                     "hookSessionID": session.info.hookSessionID ?? "(なし)",
-                    "tmuxTarget": session.info.tmuxTarget ?? "(なし)",
                     "lastActivitySecondsAgo": Date().timeIntervalSince(session.lastActivityAt),
                 ]
             },
@@ -534,7 +453,7 @@ final class SessionWatcher {
         for session in sessions {
             guard let agent = incoming[session.info.tty] else { continue }
             // 同じttyでもCLIが再起動していれば作り直す必要がある
-            if session.info.pid != agent.pid || session.info.tmuxTarget != agent.tmuxTarget {
+            if session.info.pid != agent.pid {
                 session.replaceInfo(SessionInfo(agent: agent))
             }
         }
@@ -570,10 +489,7 @@ final class SessionWatcher {
 
     /// そのセッションが動いているターミナルの名前を求める
     private func resolveTerminalName(for info: SessionInfo) -> String? {
-        // tmux配下ではペインのptyであり、アタッチ中クライアントのttyとは別物
-        let tty = info.tmuxSession == nil ? info.tty : nil
-        guard let tty else { return nil }
-        return TerminalActivator.hostingTerminal(tty: tty)?.displayName
+        TerminalActivator.hostingTerminal(tty: info.tty)?.displayName
     }
 
     /// 送信先が監視できないセッションのままなら、監視できるものへ移す。
@@ -639,154 +555,9 @@ final class SessionWatcher {
         onEvent?(session, event)
     }
 
-    // MARK: - プロンプト送信 (設計書 4.3 / PromptSender)
+    // MARK: - フック方式
 
-    func sendPrompt(_ text: String, to session: MonitoredSession) async throws {
-        // フック接続セッションの固着検知は「最後の活動時刻」からの経過時間を見るため、
-        // ここで動かさないと直前のフックイベントからの古い経過時間のまま安全網が
-        // 誤って発動しうる（プロンプト送信直後に stale 判定されてしまう）。
-        session.lastActivityAt = Date()
-
-        // 送信経路は tmux だけ。キー入力の合成は対象タブを前面に出す必要があり、
-        // 「裏で動いているCLIへ送る」という前提を満たせないため使わない。
-        // 送れないセッションでは、そもそも入力欄を出さない（UI側で抑止済み）。
-        guard let target = session.info.tmuxTarget else {
-            throw SessionError.notMonitorable
-        }
-        try await TmuxClient.sendPrompt(text, to: target)
-        // 送信後は thinking へ即時遷移 (設計書 5.2)
-        let event = session.detector.noteUserSentPrompt(at: Date())
-        apply(event: event, to: session)
-        if event == .none {
-            session.state = .thinking
-        }
-    }
-
-    // MARK: - 選択肢への回答 (Approve / Ask)
-
-    /// ノッチで選ばれた選択肢をセッションへ送信する
-    func respond(with option: ChoiceOption, in session: MonitoredSession) async throws {
-        try await respond(with: [option], in: session)
-    }
-
-    /// 複数選択の回答をまとめて送信する。
-    /// 単一選択でも要素1つの配列として扱えるため、こちらが実体になる。
-    func respond(with options: [ChoiceOption], in session: MonitoredSession) async throws {
-        guard let first = options.first else { return }
-        let isMultiSelect = session.pendingChoice?.isMultiSelect ?? false
-        // sendPromptと同じ理由で、フック接続セッションの固着検知が誤発動しないよう
-        // ユーザー操作の瞬間に「最後の活動時刻」を更新しておく
-        session.lastActivityAt = Date()
-
-        // Hook連携中でもtmuxがある場合は、CLIの実画面に表示された番号を送る。
-        // Codex/ClaudeのHook応答仕様には差や変更があり、JSONだけを返す経路では
-        // ノッチ上は送信済みでもCLIの承認画面が残ることがあった。実画面を読み直して
-        // 選択肢とキーを照合してから、Hookを素通しで解放し、その番号を送る。
-        if session.pendingHookConnection != nil {
-            if let target = session.info.tmuxTarget {
-                var liveChoice: PendingChoice?
-                for _ in 0..<4 {
-                    if let text = await TmuxClient.capturePane(target: target),
-                       let detected = ChoicePrompt.detect(in: text, profile: session.info.profile) {
-                        // ここへ来る時点でHookのPermissionRequestだと確定している。
-                        // Codexは質問文と選択肢の間にEnvironment/Reason/コマンドを挟むため、
-                        // 画面テキストだけの分類結果がquestionでも番号メニューは利用できる。
-                        liveChoice = detected
-                        break
-                    }
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-
-                guard let liveChoice,
-                      let liveOption = liveChoice.options.first(where: {
-                          $0.keystroke.lowercased() == first.keystroke.lowercased()
-                      })
-                else {
-                    // 実際の画面と対応するキーを確認できない限り当て推量で送らない。
-                    throw SessionError.choiceScreenChanged
-                }
-
-                // 送信が一時的に失敗して再試行する場合も実画面のラベルで照合できるよう、
-                // pendingChoiceを検出結果へ差し替えてからHookを解放する。
-                session.pendingChoice = liveChoice
-                session.releasePendingHook(with: .passthrough)
-                try? await Task.sleep(for: .milliseconds(120))
-                try await TmuxClient.sendChoice(
-                    liveOption,
-                    allOptionLabels: liveChoice.options.map(\.screenLabel),
-                    totalOptionCount: liveChoice.options.count,
-                    to: target
-                )
-            } else {
-                // tmuxが無い場合はHookの応答だけが背景へ回答を届けられる経路。
-                let decision: HookDecision = first.isNegative
-                    ? .deny(reason: "Subghostで拒否しました")
-                    : .allow
-                session.releasePendingHook(with: decision)
-            }
-            session.pendingChoice = nil
-            session.state = .thinking
-            return
-        }
-
-        guard let target = session.info.tmuxTarget else {
-            // tmuxもフック接続も無い場合、背景のタブへ入力を届ける手段がない。
-            // キー入力の合成は「前面のタブ」にしか届かず、他を見ている間は送れないため、
-            // 空振りさせずに理由を返す（誤送信も防ぐ）。
-            throw SessionError.backgroundInputUnavailable
-        }
-
-        // フールプルーフ: 表示してから回答するまでの間に画面が別の内容へ進んでいないか、
-        // キーを送る前に確かめる。読めた場合のみ照合し、崩れていれば中止する。
-        // (実機で確認した不具合: 会話が進んだ後の画面に古い前提のままキーを送り誤爆した)
-        let expectedLabels = (session.pendingChoice?.options ?? options).map(\.screenLabel)
-        if let currentText = await TmuxClient.capturePane(target: target),
-           !ChoicePrompt.matchesCurrentScreen(optionLabels: expectedLabels, in: currentText) {
-            throw SessionError.choiceScreenChanged
-        }
-
-        // フォールバック用の総数は「選んだ数」ではなく「この問いの選択肢の総数」。
-        // 選ばなかった項目があると、選んだ数だけでは↓が足りず自由記述欄止まりになる。
-        let totalOptionCount = session.pendingChoice?.options.count ?? options.count
-
-        if isMultiSelect {
-            try await TmuxClient.sendChoices(options, totalOptionCount: totalOptionCount, to: target)
-        } else {
-            try await TmuxClient.sendChoice(
-                first, allOptionLabels: expectedLabels, totalOptionCount: totalOptionCount, to: target)
-        }
-        session.pendingChoice = nil
-
-        // 同じ呼び出しに問いが残っていれば、完了扱いにせず次の1問を出す
-        if !session.questionQueue.isEmpty {
-            presentNextQuestion(in: session)
-            return
-        }
-
-        let event = session.detector.noteUserAnsweredChoice(at: Date())
-        apply(event: event, to: session)
-        if event == .none { session.state = .thinking }
-    }
-
-    /// 残りの質問から次の1問をノッチへ出す。
-    ///
-    /// CLIは前の回答を受け取ってから次の問いを描画するため、すぐに次を出すと
-    /// 送ったキーが前の画面に入ってしまう。描画が追いつく分だけ待ってから表示する。
-    private func presentNextQuestion(in session: MonitoredSession) {
-        guard !session.questionQueue.isEmpty else { return }
-        session.state = .awaitingAnswer
-
-        Task { [weak self] in
-            try? await Task.sleep(for: Self.nextQuestionDelay)
-            guard let self, !session.questionQueue.isEmpty else { return }
-            let next = session.questionQueue.removeFirst()
-            self.apply(event: .becameAwaitingChoice(next), to: session)
-        }
-    }
-
-    // MARK: - フック方式 (追補: ゼロコンフィグ監視)
-
-    /// フック受信サーバを起動する。失敗しても監視自体は続ける（tmux方式が残る）。
+    /// フック受信サーバを起動する。失敗時はプロセス検出だけを続ける。
     func startHookServer() {
         guard hookServer == nil else { return }
 
@@ -864,23 +635,12 @@ final class SessionWatcher {
         session.replaceInfoPreservingState(info)
         session.lastActivityAt = Date()
 
-        // フックが今回初めて繋がったセッションで、直前の状態が「画面解析由来かもしれない
-        // thinking」だった場合、それを信用しない。フック接続後は画面解析(ingest)が
-        // 二度と行われず、フックイベントだけが状態を動かす頼りになるため、ここで
-        // リセットしておかないと、対応するフックイベントが来ない限り Working のまま
-        // 永久に固着してしまう。
-        // (実機で確認した不具合: 開発中に何度も再起動する過程で、起動直後の一瞬に
-        //  画面上のスピナー等の残骸を busyPattern と誤判定し、フック接続後もずっと
-        //  そのまま残り続けていた)
-        if isFirstHookConnection, session.state == .thinking {
-            session.state = .idle
-        }
+        if isFirstHookConnection { session.state = .completed }
         // 一覧に出すため、直近のユーザー発言を記録から拾う
         if let path = event.transcriptPath,
            let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
             session.lastUserPrompt = prompt
         }
-        // 実際に動いているセッションを送信先にする
         preferMonitorableSession()
 
         applyHook(event: event, source: request.source, to: session, connection: connection)
@@ -942,99 +702,9 @@ final class SessionWatcher {
         to session: MonitoredSession,
         connection: HookServer.Connection
     ) {
-        // 直前の承認待ちが未解決なら解放しておく（取りこぼし防止）
-        if event.kind != .permissionRequest {
-            session.releasePendingHook(with: .passthrough)
-
-            // フック接続済みセッションは画面解析(ingest)を行わないため、ターミナル側で
-            // 直接選択肢に回答された場合、それを検知して pendingChoice を解消する手段が
-            // 他に無い。ここで拾わないと、ノッチに古い選択肢が居座り続けてしまう。
-            // (permissionRequest は .becameAwaitingChoice で確実に上書きされるので対象外)
-            //
-            // notification は対象から除く。Claude Codeは無回答が続くと催促のため
-            // notification を繰り返し送ってくることがあり、それを「解消された」と
-            // 誤判定してノッチを閉じてしまっていた（実機で確認した不具合）。
-            // notification 自体は直後の分岐で記録を読み直し、本当に解消したかを
-            // 正しく判定する。
-            if session.pendingChoice != nil, event.kind != .notification {
-                apply(event: .choiceResolved, to: session)
-            }
-        }
-
+        // 監視専用。すべてのフックへ即座に空応答を返し、CLIの入力や承認には介入しない。
+        connection.respondPassthrough()
         switch event.kind {
-        case .permissionRequest:
-            // AskUserQuestion は「ツール実行の許可」ではなく「選択肢への回答」なので、
-            // 許可/拒否の2択で見せるのは誤り。自動で許可し、Claude Codeに本来の
-            // 質問を出させてから、Notification経由で実際の選択肢を表示する。
-            if event.toolName == "AskUserQuestion" {
-                // ツール実行を許可し、Claude Codeに本来の質問を出させる。
-                connection.respond(json: HookDecision.allow.json)
-                // 選択肢は tool_input に入っているので、記録を待たずそのまま表示する。
-                // 複数の問いが含まれる場合は、先頭を出して残りをキューへ積む。
-                if !event.embeddedQuestions.isEmpty {
-                    enqueue(questions: event.embeddedQuestions, in: session)
-                } else {
-                    session.state = .awaitingAnswer
-                    onEvent?(session, .none)
-                    if let path = event.transcriptPath { pollForQuestion(path: path, in: session) }
-                }
-                return
-            }
-
-            session.pendingHookConnection = connection
-            let options: [ChoiceOption]
-            if session.info.tmuxTarget != nil {
-                // tmuxへ実キーを送れる場合は、CLI上の番号と同じ3項目を表示する。
-                // 回答時にはcapture-paneから実メニューを再取得するため、ここでの
-                // screenLabelは表示直後の照合に使わない。
-                if source.lowercased() == "codex" {
-                    options = [
-                        ChoiceOption(number: 1, label: "今回だけ許可", keystroke: "1", needsEnter: false),
-                        ChoiceOption(number: 2, label: "今後この種類の操作を許可", keystroke: "2", needsEnter: false),
-                        ChoiceOption(number: 3, label: "拒否する", keystroke: "3", needsEnter: false),
-                    ]
-                } else {
-                    options = [
-                        ChoiceOption(number: 1, label: "今回だけ許可", keystroke: "1", needsEnter: false),
-                        ChoiceOption(number: 2, label: "このセッション中は許可", keystroke: "2", needsEnter: false),
-                        ChoiceOption(number: 3, label: "拒否する", keystroke: "3", needsEnter: false),
-                    ]
-                }
-            } else {
-                // tmuxが無いセッションではHookが表現できる一回許可/拒否だけを出す。
-                options = [
-                    ChoiceOption(number: 1, label: "今回だけ許可", keystroke: "1", needsEnter: false),
-                    ChoiceOption(number: 2, label: "拒否する", keystroke: "2", needsEnter: false),
-                ]
-            }
-            let choice = PendingChoice(
-                kind: .approval,
-                title: event.title,
-                detail: [],
-                options: options
-            )
-            apply(event: .becameAwaitingChoice(choice), to: session)
-            return   // 応答はユーザーの回答時に返す
-
-        case .notification:
-            // Notificationのペイロードには本文しか入っていないため、
-            // セッション記録から直近の質問と選択肢を復元して選べるようにする。
-            //
-            // 重要: Claude Codeは質問を記録へ書き込む前にNotificationを発火する（実測）。
-            // 発火直後は記録に未回答の質問が無いため、少し待ってから読み直す。
-            //
-            // また、Claude Codeは無回答が続くと催促のためにも Notification を送ってくる。
-            // 質問と無関係なNotificationまで「質問中」として表示すると、実際には
-            // 何も聞かれていないのに状態が変わってしまう（実機で確認した不具合）。
-            // そのため、質問が実際に見つかるまでは状態を変えずポーリングだけ行う。
-            let questions = event.transcriptPath
-                .map { TranscriptReader.latestQuestions(transcriptPath: $0) } ?? []
-            if !questions.isEmpty {
-                enqueue(questions: questions, in: session)
-            } else if let path = event.transcriptPath {
-                pollForQuestion(path: path, in: session)
-            }
-
         case .stop:
             // フックは完了を知らせるだけで本文を持たないため、記録から応答を読み出す
             let answer = event.transcriptPath
@@ -1043,16 +713,16 @@ final class SessionWatcher {
                   to: session)
 
         case .stopFailure:
-            apply(event: .becameError(preview: [event.title]), to: session)
+            apply(event: .becameCompleted(preview: ["タスクが終了しました"]), to: session)
 
         case .sessionStart:
-            session.state = .idle
+            session.state = .completed
             session.pendingChoice = nil
             session.questionQueue = []
             SoundAlerts.shared.play(.sessionStart, session: session.info)
 
         case .sessionEnd:
-            session.state = .idle
+            session.state = .completed
             session.pendingChoice = nil
             session.questionQueue = []
 
@@ -1060,19 +730,17 @@ final class SessionWatcher {
             // コンテキストが逼迫していることを音だけで知らせる（状態は変えない）
             SoundAlerts.shared.play(.contextLimit, session: session.info)
 
-        case .userPromptSubmit, .preToolUse, .postToolUse, .subagentStop:
+        case .userPromptSubmit, .preToolUse, .postToolUse, .subagentStop,
+             .notification, .permissionRequest:
             // サブエージェントの終了では親がまだ作業中なので完了扱いにしない
             if session.state != .thinking {
                 apply(event: .becameThinking, to: session)
             }
         }
-
-        connection.respondPassthrough()
     }
 
-    /// 通知確認などで completed → idle にする
+    /// 完了は次のタスク開始まで保持する。
     func acknowledge(_ session: MonitoredSession) {
-        session.detector.acknowledgeCompletion()
-        if session.state == .completed { session.state = .idle }
+        // 監視表示だけなので、通知を開いても状態は変えない。
     }
 }

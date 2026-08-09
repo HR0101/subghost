@@ -21,38 +21,27 @@ import Foundation
 
 // MARK: - 検出結果
 
-/// psで見つかったAI CLIのプロセス1つ分
+/// psで見つかったAI CLIのプロセス1つ分。
+/// 監視はCLIフックだけで行うため、端末の画面やtmuxペインとは結び付けない。
 nonisolated struct DiscoveredAgent: Sendable, Equatable, Hashable {
     let pid: Int32
-    /// 制御端末（"/dev/ttys004"）。tmux内で動く場合はペインのptyを指す。
+    /// 制御端末（"/dev/ttys004"）。セッションの識別とターミナルへの移動に使う。
     let tty: String
     let profile: CLIProfile
-    /// tmuxのペイン宛先（"session:0.1"）。tmux外で動いている場合は nil。
-    let tmuxTarget: String?
-    /// 所属するtmuxセッション名。tmux外なら nil。
-    let tmuxSession: String?
 }
 
 // MARK: - 検出
 
 nonisolated enum AgentDiscovery {
 
-    /// 実行中のAI CLIを列挙し、tmuxのペインと突き合わせる
+    /// 実行中のAI CLIを列挙する。
     static func discover(profiles: [CLIProfile] = CLIProfile.builtins) async -> [DiscoveredAgent] {
         let processes = agentProcesses(profiles: profiles)
-        guard !processes.isEmpty else { return [] }
-
-        // tmux未導入・未起動でも検出自体は成立させる（監視だけができない状態になる）
-        let panes = await TmuxClient.paneTargetsByTTY()
-
         return processes.map { process in
-            let target = panes[process.tty]
             return DiscoveredAgent(
                 pid: process.pid,
                 tty: process.tty,
-                profile: process.profile,
-                tmuxTarget: target,
-                tmuxSession: target.map { String($0.prefix(while: { $0 != ":" })) }
+                profile: process.profile
             )
         }
         .sorted { ($0.profile.id, $0.tty) < ($1.profile.id, $1.tty) }

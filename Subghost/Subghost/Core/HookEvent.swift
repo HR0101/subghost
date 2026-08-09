@@ -29,16 +29,15 @@ nonisolated enum HookEventKind: String, CaseIterable, Sendable {
     /// このイベントが表すセッション状態。nilなら状態を変えない。
     var resultingState: AIState? {
         switch self {
-        case .sessionStart, .sessionEnd: return .idle
+        case .sessionStart, .sessionEnd: return .completed
         case .userPromptSubmit, .preToolUse, .postToolUse: return .thinking
         // サブエージェントが終わっても親はまだ作業中
         case .subagentStop: return .thinking
         // 圧縮は処理の一部なので状態は変えない
         case .preCompact: return nil
-        case .notification: return .awaitingAnswer
-        case .permissionRequest: return .awaitingApproval
+        case .notification, .permissionRequest: return .thinking
         case .stop: return .completed
-        case .stopFailure: return .error
+        case .stopFailure: return .completed
         }
     }
 
@@ -56,8 +55,8 @@ nonisolated enum HookEventKind: String, CaseIterable, Sendable {
         self = match
     }
 
-    /// 応答を返すまでCLIを待たせる必要があるか
-    var isBlocking: Bool { self == .permissionRequest }
+    /// 監視専用のため、CLIを待たせるイベントはない。
+    var isBlocking: Bool { false }
 }
 
 // MARK: - イベント

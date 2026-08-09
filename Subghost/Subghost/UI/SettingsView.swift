@@ -63,7 +63,6 @@ struct SettingsView: View {
                     settingsLink(.alerts, "通知とサウンド", "bell.badge.fill")
                     settingsLink(.appearance, "外観", "paintbrush.fill")
                     settingsLink(.integration, "統合", "puzzlepiece.extension.fill")
-                    settingsLink(.snippets, "スニペット", "text.badge.plus")
                 }
                 Section("詳細設定") {
                     settingsLink(.shortcuts, "ショートカット", "keyboard.fill")
@@ -86,7 +85,6 @@ struct SettingsView: View {
                 case .alerts: AlertSettingsView()
                 case .appearance: AppearanceSettingsView()
                 case .integration: HookSettingsView()
-                case .snippets: SnippetSettingsView()
                 case .shortcuts: ShortcutSettingsView()
                 case .data: DataSettingsView()
                 case .diagnostics: SetupDiagnosticsView()
@@ -119,7 +117,6 @@ private enum SettingsPage: Hashable {
     case alerts
     case appearance
     case integration
-    case snippets
     case shortcuts
     case data
     case diagnostics
@@ -129,10 +126,8 @@ private enum SettingsPage: Hashable {
 
 private struct GeneralSettingsView: View {
     @AppStorage("pollInterval") private var pollInterval = 0.8
-    @AppStorage("stableInterval") private var stableInterval = 1.5
     @AppStorage(DisplayPreference.userDefaultsKey) private var notchDisplay = ""
     @AppStorage("preferredTerminal") private var preferredTerminal = ""
-    @AppStorage("tmuxPath") private var tmuxPath = ""
     @AppStorage(NotchPreferences.hoverExpansionEnabledKey) private var hoverExpansionEnabled = true
     @AppStorage(NotchPreferences.hoverDelayKey) private var hoverDelay = 0.15
     @AppStorage(NotchPreferences.expansionAnimationDurationKey)
@@ -143,14 +138,11 @@ private struct GeneralSettingsView: View {
     @AppStorage(NotchPreferences.notificationDisplayDurationKey) private var notificationDisplayDuration = 5.0
     @AppStorage(NotchPreferences.collapseOnMouseExitKey) private var collapseOnMouseExit = true
     @AppStorage(NotchPreferences.closeOnOutsideClickKey) private var closeOnOutsideClick = true
-    @AppStorage(NotchPreferences.choiceAutoCloseIntervalKey) private var choiceAutoCloseInterval = 0.0
-    @AppStorage(NotchPreferences.focusChoiceOnAppearKey) private var focusChoiceOnAppear = true
     @AppStorage(NotchPreferences.hideUnmonitorableSessionsKey)
     private var hideUnmonitorableSessions = true
     @AppStorage(NotchPreferences.hideInactiveSessionsKey) private var hideInactiveSessions = true
     @AppStorage(NotchPreferences.inactiveSessionThresholdKey)
     private var inactiveSessionThreshold = 1_800.0
-    @AppStorage(NotchPreferences.suggestsTmuxSetupKey) private var suggestsTmuxSetup = true
     @State private var launchAtLogin = false
     @State private var isChangingLoginItem = false
     @State private var loginItemError: String?
@@ -206,15 +198,14 @@ private struct GeneralSettingsView: View {
             Section("表示") {
                 Toggle("フルスクリーン時に非表示", isOn: $hideInFullScreen)
                 Toggle("アクティブなセッションがない時に自動非表示", isOn: $hideWhenNoSessions)
-                Text("承認待ち・質問・入力中は、見逃しを防ぐため設定に関係なく表示します。")
+                Text("作業途中のセッションは、見逃しを防ぐため設定に関係なく表示します。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("セッション一覧") {
                 Toggle("監視できないセッションを隠す", isOn: $hideUnmonitorableSessions)
-                Text("tmux にもフックにも繋がっていないセッションです。"
-                     + "状態を読むことも、プロンプトを送ることもできません。")
+                Text("フックがまだ届いていないセッションです。状態を読むにはフック連携を有効にしてください。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -227,16 +218,7 @@ private struct GeneralSettingsView: View {
                     Text("動きが無いとみなすまで: \(Int(inactiveSessionThreshold / 60)) 分")
                 }
                 .disabled(!hideInactiveSessions)
-                Text("tmux が記録しているペインの最終出力時刻で判断します。"
-                     + "Subghost を再起動しても引き継がれます。"
-                     + "隠したセッションも監視は続けており、回答が必要になれば必ず表示します。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Toggle("tmux の導入を案内する", isOn: $suggestsTmuxSetup)
-                Text("tmux を使わず「監視のみ」で使う場合は切ってください。"
-                     + "監視・通知・承認への回答は tmux が無くても動きます。"
-                     + "プロンプトの送信だけが tmux を必要とします。")
+                Text("CLIフックから最後に状態が変化した時刻で判断します。隠したセッションも監視は続きます。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -255,33 +237,6 @@ private struct GeneralSettingsView: View {
                 Toggle("外側のクリックで自動表示を閉じる", isOn: $closeOnOutsideClick)
             }
 
-            Section("選択肢（承認/質問）") {
-                Toggle("回答するまで自動で閉じない（既定）", isOn: Binding(
-                    get: { choiceAutoCloseInterval <= 0 },
-                    set: { choiceAutoCloseInterval = $0 ? 0 : max(choiceAutoCloseInterval, 10) }
-                ))
-                if choiceAutoCloseInterval > 0 {
-                    Stepper(value: $choiceAutoCloseInterval, in: 10...120, step: 5) {
-                        LabeledContent("自動で閉じるまでの時間") {
-                            Text("\(choiceAutoCloseInterval, specifier: "%.0f")秒")
-                                .monospacedDigit()
-                        }
-                    }
-                }
-                Text("ノッチから消えてもCLI側は引き続き回答を待っています。ターミナルで直接答えるか、"
-                     + "ノッチにカーソルを合わせると一覧からいつでも選び直せます。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Toggle("回答待ちのときキーボードを受け取る", isOn: $focusChoiceOnAppear)
-                Text("有効だと数字キーだけですぐ回答できますが、他のアプリで入力中に割り込むと"
-                     + "打鍵がノッチへ移ってしまいます。無効にすると、パネルを表示するだけに留め、"
-                     + "ノッチをクリックしてから回答します。対象のターミナルを前面で見ている間は"
-                     + "設定に関係なくキーボードを奪いません。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             SleepSettingsSection()
 
             Section("監視") {
@@ -293,14 +248,9 @@ private struct GeneralSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading) {
-                    Slider(value: $stableInterval, in: 0.5...5.0, step: 0.5) {
-                        Text("完了判定の静止時間: \(stableInterval, specifier: "%.1f")秒")
-                    }
-                    Text("出力がこの時間止まりプロンプトが現れたら「完了」と判定します")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text("状態はAI CLIのフックイベントから取得します。端末画面の文字解析は行いません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("表示先ディスプレイ") {
                 Picker("ノッチを表示する画面", selection: $notchDisplay) {
@@ -343,25 +293,11 @@ private struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Section("できること") {
-                ForEach(SessionCapability.allCases, id: \.self) { capability in
-                    LabeledContent(capability.label) {
-                        Text(capability.requirement)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Text("プロンプトの送信だけが tmux を必要とします。"
-                     + "監視・完了通知・承認への回答はフックだけで動くため、"
-                     + "tmux を使わない簡易的な構成でも利用できます。")
+            Section("監視方式") {
+                LabeledContent("作業途中／完了", value: "CLIフック")
+                Text("Subghostからプロンプト、承認、質問への回答は送信しません。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-            Section("tmux") {
-                TextField("tmuxのパス（空欄で自動検出）", text: $tmuxPath)
-                    .font(.system(.body, design: .monospaced))
-                Text(TmuxClient.resolveTmuxPath().map { "検出: \($0)" } ?? "tmuxが見つかりません")
-                    .font(.caption)
-                    .foregroundStyle(TmuxClient.resolveTmuxPath() == nil ? Color.red : Color.secondary)
             }
         }
         .formStyle(.grouped)
@@ -592,26 +528,16 @@ private struct DataSettingsView: View {
     @AppStorage(ActivityPreferences.recordingEnabledKey) private var activityEnabled = true
     @AppStorage(ActivityPreferences.limitKey)
     private var activityLimit = Double(ActivityPreferences.defaultLimit)
-    @AppStorage(PromptHistoryPreferences.enabledKey) private var historyEnabled = true
-    @AppStorage(PromptHistoryPreferences.limitKey)
-    private var historyLimit = Double(PromptHistoryPreferences.defaultLimit)
-
     @State private var activityKindRevision = 0
     @State private var message: String?
     @State private var isError = false
     @State private var confirmingReset = false
 
     private var activity: ActivityStore { AppCoordinator.shared.activity }
-    private var snippets: SnippetStore { AppCoordinator.shared.snippets }
 
     /// Stepper は Double の範囲を要求するので、Int の設定範囲を変換して持っておく
     private static let activityLimitRange: ClosedRange<Double> = {
         let range = ActivityPreferences.limitRange
-        return Double(range.lowerBound)...Double(range.upperBound)
-    }()
-
-    private static let historyLimitRange: ClosedRange<Double> = {
-        let range = PromptHistoryPreferences.limitRange
         return Double(range.lowerBound)...Double(range.upperBound)
     }()
 
@@ -646,34 +572,6 @@ private struct DataSettingsView: View {
                         .disabled(!activityEnabled)
                 }
                 .id(activityKindRevision)
-            }
-
-            Section("送信履歴") {
-                Toggle("送信したプロンプトを保存する", isOn: $historyEnabled)
-                Stepper(value: $historyLimit, in: Self.historyLimitRange, step: 5) {
-                    LabeledContent("保持する件数") {
-                        Text("\(Int(historyLimit))件")
-                            .monospacedDigit()
-                    }
-                }
-                .disabled(!historyEnabled)
-                .onChange(of: historyLimit) { _, _ in snippets.applyHistoryLimit() }
-
-                LabeledContent("現在の保存件数") {
-                    Text("\(snippets.history.count)件").monospacedDigit()
-                }
-
-                Button("送信履歴を消去", role: .destructive) {
-                    snippets.clearHistory()
-                    message = "送信履歴を消去しました。"
-                    isError = false
-                }
-                .disabled(snippets.history.isEmpty)
-
-                Text("ノッチの入力欄で ⌥↑ / ⌥↓ を押すと呼び出せる履歴です。"
-                     + "アプリケーションサポート内に平文で保存されるため、残したくない場合はオフにしてください。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section("設定の書き出しと読み込み") {
@@ -1126,7 +1024,6 @@ private struct HookSettingsView: View {
     @State private var messages: [HookTarget: (text: String, isError: Bool)] = [:]
     @State private var confirming: HookTarget?
     @State private var statuslineMessage: String?
-    @State private var shellMessage: String?
     @State private var newAliasName = ""
     @State private var newAliasBaseProfileID = CLIProfile.codex.id
     @State private var aliasMessage: String?
@@ -1149,7 +1046,7 @@ private struct HookSettingsView: View {
                 Label(serverRunning ? "動作中" : "停止中",
                       systemImage: serverRunning ? "checkmark.circle.fill" : "xmark.circle")
                     .foregroundStyle(serverRunning ? Color.green : Color.secondary)
-                Text("フックからイベントを直接受け取る方式です。tmuxを使わずに監視・承認ができ、画面の文字解析による誤判定もなくなります。")
+                Text("フックからイベントを直接受け取り、タスクが作業途中か完了したかだけを監視します。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1230,42 +1127,9 @@ private struct HookSettingsView: View {
                 Text("Subghostが起動していない場合、フックは何もせず即座に終了するため、CLIの動作を妨げません。書き換え前には自動でバックアップを取り、既存の設定は残します。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("Antigravityはフック機構を確認できていないため、tmux方式で監視してください。")
+                Text("Antigravityは利用できるフック機構を確認できていないため、現在は状態監視の対象外です。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-
-            Section("自動でtmux内起動") {
-                let on = ShellIntegration.isInstalled()
-                Label(on ? "有効" : "無効",
-                      systemImage: on ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(on ? Color.green : Color.secondary)
-                Text("有効にすると、ターミナルで claude / codex / agy（カスタムエイリアス含む）を起動したとき自動的にtmux内で立ち上がります。既存のシェルエイリアスのオプションもそのまま保持されます。tmuxを介すと、他の画面を見ながらでもノッチから質問の選択肢に回答できます。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("~/.zshrc に読み込み行を1行追加します（書き換え前にバックアップを取ります）。--version などの非対話実行や、すでにtmux内のときは何もしません。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if TmuxClient.resolveTmuxPath() == nil {
-                    Text("tmuxが見つかりません。先に brew install tmux でインストールしてください。")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                if on {
-                    Button("解除する", role: .destructive) {
-                        shellMessage = run { try ShellIntegration.uninstall() } ?? "解除しました。"
-                    }
-                } else {
-                    Button("有効にする") {
-                        let extra = AppCoordinator.shared.customAliasStore.aliases.map(\.name)
-                        shellMessage = run { try ShellIntegration.install(extraCommands: extra) }
-                            ?? "有効にしました。新しいターミナルタブから反映されます（既存タブは source ~/.zshrc）。"
-                    }
-                    .disabled(TmuxClient.resolveTmuxPath() == nil)
-                }
-                if let shellMessage {
-                    Text(shellMessage).font(.caption).foregroundStyle(.secondary)
-                }
             }
 
             Section("カスタムエイリアス") {
@@ -1369,35 +1233,23 @@ private struct SetupGuideView: View {
             Text("セットアップ")
                 .font(.headline)
 
-            Text("特別な設定は不要です。ターミナルで claude / codex / agy を普通に起動すれば、Subghostが自動的に検出します。セッション名の命名規則は要りません。独自の名前で起動している場合は「カスタムエイリアス」から登録してください。")
+            Text("ターミナルで Claude Code または Codex を起動するとSubghostが自動的に検出します。状態監視には「フック連携」を有効にしてください。")
                 .font(.callout)
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("フック連携（Claude Code / Codex）", systemImage: "bolt.horizontal")
                         .font(.callout).fontWeight(.medium)
-                    Text("「フック連携」タブから有効にすると、tmuxなしで状態監視・承認・質問への回答ができます。誤判定もなくなります。")
+                    Text("「フック連携」タブから有効にすると、タスクの作業途中／完了をイベントから監視できます。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            GroupBox {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("tmuxを挟み忘れないようにする", systemImage: "terminal")
-                        .font(.callout).fontWeight(.medium)
-                    Text("「統合」タブの「自動でtmux内起動」を有効にすると、claude / codex / agy を普通に起動するだけで、自動的にtmux内で立ち上がります。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("tmux\ncodex   # 既存のシェルエイリアスのオプションも保持されます")
-                        .font(.system(size: 11, design: .monospaced))
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
-                }
-            }
-
-            Text("\(HotkeyAction.toggleInput.shortcutOrName)：ノッチのプロンプト入力欄を開く／閉じる")
+            Text("SubghostからCLIへプロンプトや回答を送信する機能はありません。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Text("\(HotkeyAction.showSessions.shortcutOrName)：セッション一覧を開く／閉じる")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -1448,18 +1300,6 @@ private struct ShortcutSettingsView: View {
                 }
             }
 
-            Section("ノッチ内の操作") {
-                LabeledContent("プロンプトを送信", value: "⌘Return")
-                LabeledContent("閉じる", value: "Esc")
-                LabeledContent("送信履歴をたどる", value: "⌥↑ / ⌥↓")
-                LabeledContent("送信先を切り替える", value: "Tab")
-                LabeledContent("質問の選択肢を選ぶ", value: "1〜9")
-                LabeledContent("質問の先頭を選ぶ", value: "Return")
-                Text("承認リクエストではReturnに既定を割り当てていません。"
-                     + "誤ってキーを叩いても許可が送られないよう、番号キーかクリックでの明示的な選択だけを受け付けます。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
     }
@@ -1632,16 +1472,6 @@ private struct SetupDiagnosticsView: View {
                 }
 
                 DiagnosticRow(
-                    title: "プロンプトの送信",
-                    detail: TmuxClient.resolveTmuxPath() != nil
-                        ? "tmux があるため、tmux内のセッションへ送信できます"
-                        : "tmux が無いため、監視のみの構成です（送信は行えません）",
-                    health: TmuxClient.resolveTmuxPath() != nil ? .ready : .attention
-                ) {
-                    EmptyView()
-                }
-
-                DiagnosticRow(
                     title: "ターミナル操作",
                     detail: "ターミナル.appのタブ選択は、初回テスト時に自動化の許可を確認します",
                     health: .information
@@ -1681,22 +1511,6 @@ private struct SetupDiagnosticsView: View {
                 )
             }
 
-            Section("tmux") {
-                let tmuxPath = TmuxClient.resolveTmuxPath()
-                DiagnosticRow(
-                    title: "tmux本体",
-                    detail: tmuxPath ?? "tmuxが見つかりません",
-                    health: tmuxPath == nil ? .attention : .ready
-                )
-                DiagnosticRow(
-                    title: "自動tmux起動",
-                    detail: ShellIntegration.isInstalled()
-                        ? "claude / codex / agy（カスタムエイリアス含む）を自動的にtmux内で起動します"
-                        : "未設定です。統合画面から有効にできます",
-                    health: ShellIntegration.isInstalled() ? .ready : .information
-                )
-            }
-
             Section("検出中のセッション") {
                 if watcher.sessions.isEmpty {
                     Text("AI CLIはまだ検出されていません")
@@ -1713,9 +1527,8 @@ private struct SetupDiagnosticsView: View {
             }
 
             Section("記録") {
-                Toggle("画面解析の内容をファイルへ書き出す", isOn: $writeStateDump)
-                Text("状態の誤判定を調べるための記録です。取り込んだ画面の文字と判定結果を保存します。"
-                     + "会話の内容がそのまま含まれるため、普段はオフのままにしてください。")
+                Toggle("状態をファイルへ書き出す", isOn: $writeStateDump)
+                Text("フックの受信状況と現在の状態を診断用に保存します。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("保存先をFinderで開く") {
@@ -1747,7 +1560,6 @@ private struct SetupDiagnosticsView: View {
             "監視: \(session.info.monitoringSource)",
             "TTY: \(session.info.shortName)",
         ]
-        if let target = session.info.tmuxTarget { parts.append("tmux: \(target)") }
         if session.info.isHookConnected { parts.append("Hook接続済み") }
         return parts.joined(separator: " ／ ")
     }
@@ -1760,7 +1572,7 @@ private struct SetupDiagnosticsView: View {
             notificationDetail = "通知の表示が許可されています"
         case .denied:
             notificationHealth = .attention
-            notificationDetail = "通知が拒否されています。完了や承認要求を見逃す可能性があります"
+            notificationDetail = "通知が拒否されています。タスク完了を見逃す可能性があります"
         case .notDetermined:
             notificationHealth = .attention
             notificationDetail = "通知の許可がまだ選択されていません"
@@ -1846,15 +1658,15 @@ private struct InformationSettingsView: View {
             }
 
             Section("対応") {
-                LabeledContent("AI CLI", value: "Claude Code / Codex / Antigravity")
+                LabeledContent("AI CLI", value: "Claude Code / Codex")
                 LabeledContent("ターミナル", value: "Ghostty / ターミナル.app")
-                LabeledContent("監視方式", value: "フック / tmux")
+                LabeledContent("監視方式", value: "CLIフック")
             }
 
             Section("プライバシー") {
                 Text("セッション情報と設定はMac内だけで処理します。Subghost自身が外部サーバーへ会話内容を送信することはありません。")
                     .foregroundStyle(.secondary)
-                Text("ターミナルへの移動とキー入力には、必要な場合だけmacOSの自動化・アクセシビリティ権限を使用します。")
+                Text("ターミナルへの移動には、必要な場合だけmacOSの自動化権限を使用します。CLIへのキー入力は行いません。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
