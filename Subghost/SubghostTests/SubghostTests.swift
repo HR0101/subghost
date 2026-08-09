@@ -1333,6 +1333,12 @@ struct HookRequestTests {
         #expect(HookRequest.normalizeTTY(nil) == nil)
     }
 
+    @Test func 不正なttyヘッダを受け入れない() {
+        #expect(HookRequest.normalizeTTY("/dev/../console") == nil)
+        #expect(HookRequest.normalizeTTY("ttys001\r\nX-Fake: yes") == nil)
+        #expect(HookRequest.normalizeTTY(String(repeating: "a", count: 33)) == nil)
+    }
+
     @Test func ブリッジは祖先をたどってCLI本体を探す() {
         let script = HookInstaller.bridgeScript(socketPath: "/tmp/x.sock")
         // フックの親シェルは制御端末を持たないため、$PPIDだけでは特定できない
@@ -1367,6 +1373,11 @@ struct HTTPParserTests {
 
     @Test func ヘッダ終端が無ければ解析しない() {
         #expect(HTTPRequestParser.parse(Data("POST /hook HTTP/1.1".utf8)) == nil)
+    }
+
+    @Test func POST以外の要求は解析しない() {
+        let raw = Data("GET /hook HTTP/1.1\r\nHost: localhost\r\n\r\n".utf8)
+        #expect(HTTPRequestParser.parse(raw) == nil)
     }
 }
 

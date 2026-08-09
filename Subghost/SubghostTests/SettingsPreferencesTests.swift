@@ -123,7 +123,7 @@ struct HotkeyBindingTests {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        // プロンプト入力だけが既定を持ち、残りは未割り当てで始まる
+        // セッション一覧だけが既定を持ち、残りは未割り当てで始まる
         #expect(HotkeyAction.showSessions.binding(in: defaults)?.displayText == "⌥Space")
     }
 
@@ -230,5 +230,41 @@ struct ActivityRetentionTests {
 
         store.markAllRead()
         #expect(store.unreadCount == 0)
+    }
+}
+
+// MARK: - 設定ファイル
+
+struct SettingsStoreTests {
+
+    @Test func 公開設定だけを書き出し対象にする() {
+        let values: [String: Any] = [
+            "pollInterval": 3.0,
+            NotificationEvent.completed.enabledKey: true,
+            HotkeyAction.showSessions.userDefaultsKey: Data(),
+            "migrationVersion": 99,
+            "activityHistory": Data([1, 2, 3]),
+            "unknown.thirdPartyKey": "value",
+        ]
+
+        let portable = SettingsStore.portableValues(from: values)
+
+        #expect(portable["pollInterval"] as? Double == 3.0)
+        #expect(portable[NotificationEvent.completed.enabledKey] as? Bool == true)
+        #expect(portable[HotkeyAction.showSessions.userDefaultsKey] is Data)
+        #expect(portable["migrationVersion"] == nil)
+        #expect(portable["activityHistory"] == nil)
+        #expect(portable["unknown.thirdPartyKey"] == nil)
+    }
+
+    @Test func 異常に大きい設定ファイルは読み込まない() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SubghostSettings-\(UUID().uuidString).plist")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(count: SettingsStore.maximumImportSize + 1).write(to: url, options: .atomic)
+
+        #expect(throws: SettingsStore.SettingsError.self) {
+            try SettingsStore.importSettings(from: url)
+        }
     }
 }
