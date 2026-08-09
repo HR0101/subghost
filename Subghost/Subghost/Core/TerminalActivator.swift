@@ -88,20 +88,11 @@ enum TerminalActivator {
     /// 指定セッションが動いているターミナルのタブへ移動する。
     /// タブを特定できない場合はアプリの前面化にとどめる。
     static func jump(to session: SessionInfo) async {
-        // tmux内のCLIのttyはtmuxが作ったptyであり、ターミナルのタブとは対応しない。
-        // その場合はアタッチ中クライアントのttyを使う。
-        let terminalTTY: String?
-        if let tmuxSession = session.tmuxSession {
-            terminalTTY = await TmuxClient.clientTTY(session: tmuxSession)
-        } else {
-            terminalTTY = session.tty
-        }
-
-        guard let tty = terminalTTY, isValidTTY(tty) else {
-            // tmuxセッションがデタッチ中などで、対応するタブが存在しない場合
+        guard isValidTTY(session.tty) else {
             activate()
             return
         }
+        let tty = session.tty
 
         let app = hostingTerminal(tty: tty) ?? preferred ?? firstRunning() ?? .ghostty
 
@@ -133,15 +124,7 @@ enum TerminalActivator {
     /// 完了通知をユーザーがすでに見ている画面へ重ねないために使う。
     /// 判定材料が足りない場合は、通知を見逃させないよう false を返す。
     static func isSessionFrontmost(_ session: SessionInfo) async -> Bool {
-        let terminalTTY: String
-        if let tmuxSession = session.tmuxSession {
-            guard let clientTTY = await TmuxClient.clientTTY(session: tmuxSession) else {
-                return false
-            }
-            terminalTTY = clientTTY
-        } else {
-            terminalTTY = session.tty
-        }
+        let terminalTTY = session.tty
 
         guard let app = hostingTerminal(tty: terminalTTY),
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier == app.bundleID
@@ -261,9 +244,6 @@ enum TerminalActivator {
     /// 指定セッションのタブが前面にあると確認できたか。
     /// 確認できない場合は nil を返し、呼び出し側で送信を中止させる。
     static func isFrontmostTab(session: SessionInfo) -> Bool? {
-        // tmux配下なら送信はtmux経由で行うため、この検証は不要
-        guard session.tmuxTarget == nil else { return true }
-
         // ターミナル.appは tty で厳密に照合できる
         if let focused = frontmostTTY() { return focused == session.tty }
 

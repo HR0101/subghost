@@ -47,11 +47,11 @@ struct NotchPreferencesTests {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        #expect(HotkeyAction.toggleInput.binding(in: defaults)?.displayText == "⌥Space")
+        #expect(HotkeyAction.showSessions.binding(in: defaults)?.displayText == "⌥Space")
 
         // 壊れた値が入っていても既定へ倒れる（クラッシュしない）
-        defaults.set(Data("not a binding".utf8), forKey: HotkeyAction.toggleInput.userDefaultsKey)
-        #expect(HotkeyAction.toggleInput.binding(in: defaults) == nil)
+        defaults.set(Data("not a binding".utf8), forKey: HotkeyAction.showSessions.userDefaultsKey)
+        #expect(HotkeyAction.showSessions.binding(in: defaults) == nil)
     }
 
     @Test func 展開アニメーション時間を安全な範囲へ補正する() {
@@ -551,16 +551,6 @@ struct StateDetectorTests {
 }
 
 struct TextProcessingTests {
-
-    @Test func sanitizeは改行を空白にし制御文字を除去する() {
-        let input = "行1\n行2\r\n行3\t終わり\u{1B}[31m"
-        let output = TmuxClient.sanitize(input)
-        #expect(!output.contains("\n"))
-        #expect(!output.contains("\u{1B}"))
-        #expect(output.contains("行1"))
-        #expect(output.contains("行2"))
-    }
-
     @Test func プレビューは枠線とプロンプト行を除いた本文を返す() {
         let raw = """
         古い出力
@@ -696,43 +686,6 @@ struct AgentDiscoveryTests {
         #expect(!CustomAlias.isValidName(name))
     }
 
-    @Test func tmuxのペイン宛先を解析する() {
-        let output = """
-        /dev/ttys006|work:0.0
-        /dev/ttys007|work:0.1
-        /dev/ttys008|other:1.0
-        """
-        let map = TmuxClient.parsePaneTargets(output)
-        #expect(map["/dev/ttys006"] == "work:0.0")
-        #expect(map["/dev/ttys007"] == "work:0.1")
-        #expect(map["/dev/ttys008"] == "other:1.0")
-        #expect(map.count == 3)
-    }
-
-    @Test func tmuxのペイン活動時刻を解析する() {
-        let output = """
-        /dev/ttys006|1784624104
-        /dev/ttys012|1784621713
-        """
-        let map = TmuxClient.parsePaneActivity(output)
-        #expect(map["/dev/ttys006"] == Date(timeIntervalSince1970: 1_784_624_104))
-        #expect(map["/dev/ttys012"] == Date(timeIntervalSince1970: 1_784_621_713))
-        #expect(map.count == 2)
-    }
-
-    /// 時刻が読めない行を「1970年」として扱うと、すべて放置扱いになってしまう
-    @Test func 活動時刻が解釈できない行は捨てる() {
-        let output = """
-        /dev/ttys006|
-        /dev/ttys007|0
-        /dev/ttys008|なにか
-        /dev/ttys009|1784624104
-        """
-        let map = TmuxClient.parsePaneActivity(output)
-        #expect(map.count == 1)
-        #expect(map["/dev/ttys009"] != nil)
-    }
-
     // MARK: - 一覧に出すかどうか
 
     private func 表示判断入力(
@@ -834,62 +787,32 @@ struct AgentDiscoveryTests {
 
     // MARK: - できることの区分
 
-    private func セッション(tmux: String?, hookID: String?) -> SessionInfo {
+    private func セッション(hookID: String?) -> SessionInfo {
         var info = SessionInfo(agent: DiscoveredAgent(
-            pid: 1, tty: "/dev/ttys006", profile: .claude,
-            tmuxTarget: tmux, tmuxSession: tmux.map { _ in "work" }))
+            pid: 1, tty: "/dev/ttys006", profile: .claude))
         info.hookSessionID = hookID
         return info
     }
 
-    @Test func tmuxがあれば送信までできる() {
-        let info = セッション(tmux: "work:0.0", hookID: nil)
-        #expect(info.capability == .full)
-        #expect(info.canSendPrompt)
-        #expect(info.isMonitorable)
-    }
-
-    /// tmuxを使わない簡易構成。監視と承認への回答は動くが、プロンプトは送れない。
-    @Test func フックのみなら監視できるが送信はできない() {
-        let info = セッション(tmux: nil, hookID: "abc")
+    @Test func フック接続なら状態を監視できるが送信はできない() {
+        let info = セッション(hookID: "abc")
         #expect(info.capability == .monitorOnly)
         #expect(!info.canSendPrompt)
         #expect(info.isMonitorable)
     }
 
-    @Test func tmuxもフックも無ければ検出のみ() {
-        let info = セッション(tmux: nil, hookID: nil)
+    @Test func フックが無ければ検出のみ() {
+        let info = セッション(hookID: nil)
         #expect(info.capability == .detectedOnly)
         #expect(!info.canSendPrompt)
         #expect(!info.isMonitorable)
     }
 
-    /// フック接続済みでもtmuxが無ければ送信経路は無い。
-    /// ここが崩れると「入力欄は出るのに送信時に断られる」状態に戻る。
-    @Test func フック接続だけでは送信経路にならない() {
-        let hookOnly = セッション(tmux: nil, hookID: "abc")
-        let both = セッション(tmux: "work:0.0", hookID: "abc")
-        #expect(!hookOnly.canSendPrompt)
-        #expect(both.canSendPrompt)
-    }
-
-    @Test func できることの区分は段階順に並ぶ() {
-        #expect(SessionCapability.detectedOnly < SessionCapability.monitorOnly)
-        #expect(SessionCapability.monitorOnly < SessionCapability.full)
-    }
-
-    @Test func tmux外のセッションは監視不可として扱う() {
-        let inTmux = SessionInfo(agent: DiscoveredAgent(
-            pid: 1, tty: "/dev/ttys006", profile: .claude,
-            tmuxTarget: "work:0.0", tmuxSession: "work"))
+    @Test func 検出したセッションは端末に直接対応する() {
         let outside = SessionInfo(agent: DiscoveredAgent(
-            pid: 2, tty: "/dev/ttys003", profile: .claude,
-            tmuxTarget: nil, tmuxSession: nil))
+            pid: 2, tty: "/dev/ttys003", profile: .claude))
 
-        #expect(inTmux.isMonitorable)
         #expect(!outside.isMonitorable)
-        // 作業ディレクトリが未解決なら、tmuxセッション名 → tty の順にフォールバック
-        #expect(inTmux.displayName == "work")
         #expect(outside.displayName == "ttys003")
 
         // 作業ディレクトリが分かればフォルダ名を主体にする
@@ -1263,8 +1186,8 @@ struct HookEventTests {
         #expect(event.projectName == "subghost")
         #expect(event.toolSummary == "rm -rf build")
         #expect(event.title.contains("Bash"))
-        #expect(event.kind.isBlocking)
-        #expect(event.kind.resultingState == .awaitingApproval)
+        #expect(!event.kind.isBlocking)
+        #expect(event.kind.resultingState == .thinking)
     }
 
     @Test func AskUserQuestionの権限リクエストから選択肢を取り出す() {
@@ -1311,8 +1234,8 @@ struct HookEventTests {
 
     @Test func 各イベントが状態に対応する() {
         #expect(HookEventKind.stop.resultingState == .completed)
-        #expect(HookEventKind.stopFailure.resultingState == .error)
-        #expect(HookEventKind.notification.resultingState == .awaitingAnswer)
+        #expect(HookEventKind.stopFailure.resultingState == .completed)
+        #expect(HookEventKind.notification.resultingState == .thinking)
         #expect(HookEventKind.preToolUse.resultingState == .thinking)
         // ブロックするのは権限リクエストだけ
         #expect(!HookEventKind.stop.isBlocking)
@@ -1420,7 +1343,7 @@ struct HookInstallerTests {
         let root = HookInstaller.addHooks(to: [:], scriptPath: "/tmp/b", target: .codex)
         let hooks = root["hooks"] as? [String: Any]
 
-        #expect(hooks?["PermissionRequest"] != nil)
+        #expect(hooks?["PermissionRequest"] == nil)
         #expect(hooks?["SubagentStop"] != nil)
         // CodexにはNotification / PreToolUse / SessionEnd が無い
         #expect(hooks?["Notification"] == nil)
@@ -1453,8 +1376,7 @@ struct HookInstallerTests {
         #expect(!command.contains("[ -x \"/Users/"))
     }
 
-    @Test func ブリッジへ渡す待ち時間はイベントの種類に合わせる() {
-        // 承認以外が長時間ぶら下がると、Subghostが応答不能なときCLIが待たされる
+    @Test func ブリッジへ渡す待ち時間は全イベントで短い() {
         let root = HookInstaller.addHooks(to: [:], scriptPath: "/tmp/b", target: .claude)
         let hooks = root["hooks"] as? [String: Any]
 
@@ -1463,8 +1385,7 @@ struct HookInstallerTests {
             let inner = matchers?.first?["hooks"] as? [[String: Any]]
             return inner?.first?["command"] as? String
         }
-        #expect(command("PermissionRequest")?
-            .contains("'\(HookInstaller.permissionTimeoutSeconds)'") == true)
+        #expect(command("PermissionRequest") == nil)
         #expect(command("SessionStart")?
             .contains("'\(HookInstaller.normalTimeoutSeconds)'") == true)
     }
@@ -1495,7 +1416,7 @@ struct HookInstallerTests {
         #expect(inner?.first?["command"] as? String == "echo ユーザーのフック")
     }
 
-    @Test func 承認だけ長いタイムアウトを設定する() {
+    @Test func 監視イベントは短いタイムアウトを設定する() {
         let root = HookInstaller.addHooks(to: [:], scriptPath: "/tmp/b", target: .codex)
         let hooks = root["hooks"] as? [String: Any]
 
@@ -1504,8 +1425,7 @@ struct HookInstallerTests {
             let inner = matchers?.first?["hooks"] as? [[String: Any]]
             return inner?.first?["timeout"] as? Int
         }
-        // 承認は応答があるまで接続を保持するため長く、他は短く
-        #expect(timeout("PermissionRequest") == HookInstaller.permissionTimeoutSeconds)
+        #expect(timeout("PermissionRequest") == nil)
         #expect(timeout("Stop") == HookInstaller.normalTimeoutSeconds)
     }
 
@@ -1538,36 +1458,6 @@ struct HookInstallerTests {
         let script = HookInstaller.bridgeScript(socketPath: "/tmp/x.sock")
         #expect(script.contains("[ -S \"$SOCK\" ] || exit 0"))
         #expect(script.contains("--unix-socket"))
-    }
-}
-
-struct KeystrokeSenderTests {
-
-    @Test func 長い文字列を送信可能な単位に分割する() {
-        let text = String(repeating: "a", count: 40)
-        let chunks = KeystrokeSender.chunked(text, size: 16)
-        #expect(chunks.count == 3)
-        #expect(chunks.joined() == text)
-        #expect(chunks.allSatisfy { $0.utf16.count <= 16 })
-    }
-
-    @Test func 空文字は分割しない() {
-        #expect(KeystrokeSender.chunked("").isEmpty)
-    }
-
-    @Test func 絵文字を含んでも文字を壊さずに分割する() {
-        // サロゲートペアの途中で切ると文字化けするため、文字単位で区切る
-        let text = "あ🎉い🎉う🎉え🎉お🎉か🎉"
-        let chunks = KeystrokeSender.chunked(text, size: 8)
-        #expect(chunks.joined() == text)
-    }
-
-    @Test func 改行は空白にし制御文字を落とす() {
-        let cleaned = KeystrokeSender.sanitize("一行目\n二行目\tタブ\u{1B}[31m")
-        #expect(!cleaned.contains("\n"))
-        #expect(!cleaned.contains("\u{1B}"))
-        #expect(cleaned.contains("一行目"))
-        #expect(cleaned.contains("二行目"))
     }
 }
 
@@ -1739,195 +1629,7 @@ struct TranscriptReaderTests {
     }
 }
 
-/// 複数選択UIの確定ボタンまでの距離を測るロジック
-/// 画面テキストは実際の tmux capture-pane の出力から起こしている
-struct SubmitNavigationTests {
-
-    /// 先頭の選択肢にカーソルがある状態
-    private let atFirstOption = """
-    ←  ☒ 送信検証  ✔ Submit  →
-
-    【複数選択の検証】
-
-    ❯ 1. [ ] 項目A
-      1番目の項目です.
-      2. [✔] 項目B
-      2番目の項目です.
-      3. [✔] 項目C
-      3番目の項目です.
-      4. [✔] 項目D
-      4番目の項目です.
-      5. [ ] Type something
-         Submit
-
-    Enter to select · ↑/↓ to navigate · Esc to cancel
-    """
-
-    @Test func 説明文を飛ばして選択肢の数だけ数える() {
-        // 項目B・C・D・Type something・Submit の5回で届く（説明文は数えない）
-        #expect(TmuxClient.stepsToSubmit(inPaneText: atFirstOption) == 5)
-    }
-
-    @Test func カーソルが自由記述欄にあれば1回で届く() {
-        let atTypeSomething = atFirstOption
-            .replacingOccurrences(of: "❯ 1. [ ] 項目A", with: "  1. [ ] 項目A")
-            .replacingOccurrences(of: "  5. [ ] Type something", with: "❯ 5. [ ] Type something")
-        #expect(TmuxClient.stepsToSubmit(inPaneText: atTypeSomething) == 1)
-    }
-
-    @Test func 上部のタブ表示をSubmitと取り違えない() {
-        // "✔ Submit" を含むタブ行が上にあるが、確定ボタンは一覧の末尾だけ
-        #expect(TmuxClient.stepsToSubmit(inPaneText: atFirstOption) != 0)
-    }
-
-    @Test func 確定ボタンが無ければnilを返す() {
-        let withoutSubmit = """
-        ❯ 1. [ ] 項目A
-          2. [ ] 項目B
-        """
-        #expect(TmuxClient.stepsToSubmit(inPaneText: withoutSubmit) == nil)
-    }
-
-    @Test func カーソルが見つからなければnilを返す() {
-        let withoutCursor = """
-          1. [ ] 項目A
-             Submit
-        """
-        #expect(TmuxClient.stepsToSubmit(inPaneText: withoutCursor) == nil)
-    }
-
-    /// 複数の問いが1画面にタブでまとまっている場合の実際の画面
-    /// (実機テストで再現した不具合: 最終問以外は確定ボタンが "Next" と表示される)
-    private let atFirstOptionOfTabbedQuestion = """
-    ←  ☒ 複数選択  ☐ 4択  ☐ 長文ラベル  ✔ Submit  →
-
-    【テスト1・複数選択】有効にしたい機能をすべて選んでください.
-
-    ❯ 1. [✔] ノッチ表示
-      ノッチ領域にパネルを表示します.
-      2. [✔] 効果音
-      イベント発生時にサウンドを鳴らします.
-      3. [✔] 自動監視
-      送信時に自動でセッション監視を開始します.
-      4. [ ] 使用量表示
-      トークン使用量をパネルに表示します.
-      5. [ ] Type something
-         Next
-
-    Enter to select · Tab/Arrow keys to navigate · Esc to cancel
-    """
-
-    @Test func 最終問以外の確定ボタンNextも認識する() {
-        // 4項目中3つしか選ばなくても、総数4を基準にした5回で正しくNextへ届く
-        #expect(TmuxClient.stepsToSubmit(inPaneText: atFirstOptionOfTabbedQuestion) == 5)
-    }
-
-    @Test func 選んだ数ではなく総数を基準にしないと自由記述欄で止まる() {
-        // 実際に起きた不具合の再現: 選択済み3件を基準にすると4回しか↓を送らず、
-        // Next の1つ手前「Type something」で止まってしまう
-        let wrongStepsBasedOnSelectedCount = 3 + 1
-        #expect(wrongStepsBasedOnSelectedCount != TmuxClient.stepsToSubmit(inPaneText: atFirstOptionOfTabbedQuestion))
-    }
-
-    /// 最終問でSubmitを押した直後に実際に現れた確認画面
-    /// (実機テストで再現した不具合: ここでもう一段 "1" を送らないと確定しないまま止まる)
-    private let reviewScreenAfterSubmit = """
-    ←  ☒ 提出検証2  ✔ Submit  →
-
-    Review your answers
-
-     ● 【提出検証、2回目】複数の項目にチェックを入れてから「決定」を押してください.
-       → 項目B, 項目D
-
-    Ready to submit your answers?
-
-    ❯ 1. Submit answers
-      2. Cancel
-    """
-
-    @Test func Submit直後の確認画面を検知する() {
-        #expect(TmuxClient.isReviewScreen(reviewScreenAfterSubmit))
-    }
-
-    @Test func 通常の選択肢画面は確認画面と誤認しない() {
-        #expect(!TmuxClient.isReviewScreen(atFirstOptionOfTabbedQuestion))
-    }
-}
-
 struct ShellIntegrationTests {
-
-    @Test func 対象コマンドを包む関数を生成する() {
-        let body = ShellIntegration.scriptBody()
-        #expect(body.contains("claude() { _subghost_run claude"))
-        #expect(body.contains("codex() { _subghost_run codex"))
-        #expect(body.contains("agy() { _subghost_run agy"))
-        // codexA/codexBは既存エイリアスのまま残し、展開先のcodexを包む。
-        #expect(!body.contains("codexA()"))
-        #expect(!body.contains("codexB()"))
-        // agyy="agy --dangerously-skip-permissions" は既存のまま残し、
-        // 展開先のagyだけを包むことでオプションを失わない。
-        #expect(!body.contains("agyy()"))
-        // tmux内・tmux未導入では素通しする条件が入っていること
-        #expect(body.contains("[ -z \"$TMUX\" ] || return 1"))
-        #expect(body.contains("command -v tmux"))
-        // Subghost未起動（監視ソケットが無い）ときも素通しすること。
-        // これがないとアプリを終了・削除しても claude が tmux 起動に化けたまま残る。
-        #expect(body.contains("[ -S \"$_subghost_sock\" ] || return 1"))
-        #expect(body.contains(HookInstaller.socketPath))
-    }
-
-    @Test func 端末が揃っていなければtmuxを経由しない() {
-        // 入力・出力・エラーのどれかが端末でないと tmux は
-        // "open terminal failed" で失敗し、CLIごと起動できなくなる。
-        // 例: `claude < /dev/null`、エディタ組み込み端末、CI。
-        let body = ShellIntegration.scriptBody()
-        #expect(body.contains("[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || return 1"))
-    }
-
-    @Test func 画面制御できない端末ではtmuxを経由しない() {
-        // TERM=dumb では tmux が "terminal does not support clear" で失敗する
-        let body = ShellIntegration.scriptBody()
-        #expect(body.contains("\"\" | dumb | unknown | emacs) return 1"))
-    }
-
-    @Test func 対話セッションを開かない使い方は包まない() {
-        // 包むと tmux 終了時に画面が復元され、出力が消えてしまう
-        let body = ShellIntegration.scriptBody()
-        #expect(body.contains("-p | --print | -v | --version | -h | --help"))
-        #expect(body.contains("_subghost_is_interactive_use"))
-    }
-
-    @Test func tmuxが失敗しても必ず素の実行へ戻す() {
-        // ここが最重要。tmux 側の失敗でCLIが起動しなくなることは許されない。
-        let body = ShellIntegration.scriptBody()
-        // 切り離しで作る = 失敗時点ではCLIは未実行なので二重実行にならない
-        #expect(body.contains("tmux new-session -d -s \"$_sg_sess\""))
-        // 繋げなかったときはセッションを畳んでから素の実行へ落ちる
-        #expect(body.contains("tmux kill-session -t \"$_sg_sess\""))
-        // 判定を通らなかった場合も含め、最後は必ず素の実行に到達する
-        #expect(body.contains("command \"$_sg_cmd\" \"$@\""))
-    }
-
-    @Test func カスタムエイリアス名も対象コマンドとして包む() {
-        // 設定画面で登録した独自の実行ファイル名（例: 独自のラッパースクリプト）
-        let body = ShellIntegration.scriptBody(extraCommands: ["codexA", "codexB"])
-        #expect(body.contains("codexA() { _subghost_run codexA"))
-        #expect(body.contains("codexB() { _subghost_run codexB"))
-    }
-
-    @Test func ビルトインと重複するカスタムエイリアス名は二重に包まない() {
-        let body = ShellIntegration.scriptBody(extraCommands: ["codex", "Codex"])
-        #expect(body.components(separatedBy: "codex() {").count - 1 == 1)
-    }
-
-    @Test func 危険な文字を含むエイリアス名はスクリプトへ埋め込まない() {
-        // CustomAliasStore側のバリデーションをすり抜けても、ここで多層防御する
-        // （実機レビューで指摘されたシェルインジェクションへの対策）
-        let body = ShellIntegration.scriptBody(extraCommands: ["codex; rm -rf ~", "$(whoami)", "codexA"])
-        #expect(!body.contains("rm -rf"))
-        #expect(!body.contains("whoami"))
-        #expect(body.contains("codexA() { _subghost_run codexA"))
-    }
 
     @Test func 目印で囲んだブロックだけを取り除く() {
         let zshrc = """
@@ -2204,7 +1906,7 @@ struct TerminalJumpTests {
 
     @Test func Ghosttyのタイトルでセッションを照合する() {
         var info = SessionInfo(agent: DiscoveredAgent(
-            pid: 1, tty: "/dev/ttys003", profile: .claude, tmuxTarget: nil, tmuxSession: nil))
+            pid: 1, tty: "/dev/ttys003", profile: .claude))
         info.hookSessionID = "dd7867b0-0cbc-4857-8ae6-e36e2fc2e292"
         info.workingDirectory = "/Users/me/Create App/subghost"
 

@@ -134,8 +134,7 @@ struct HotkeyBindingTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         // プロンプト入力だけが既定を持ち、残りは未割り当てで始まる
-        #expect(HotkeyAction.toggleInput.binding(in: defaults)?.displayText == "⌥Space")
-        #expect(HotkeyAction.approveChoice.binding(in: defaults) == nil)
+        #expect(HotkeyAction.showSessions.binding(in: defaults)?.displayText == "⌥Space")
     }
 
     /// 「既定に戻す」と「無効にする」は別の状態として保存し分ける必要がある
@@ -144,11 +143,11 @@ struct HotkeyBindingTests {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        HotkeyAction.toggleInput.setBinding(nil, in: defaults)
-        #expect(HotkeyAction.toggleInput.binding(in: defaults) == nil)
+        HotkeyAction.showSessions.setBinding(nil, in: defaults)
+        #expect(HotkeyAction.showSessions.binding(in: defaults) == nil)
 
-        HotkeyAction.toggleInput.resetBinding(in: defaults)
-        #expect(HotkeyAction.toggleInput.binding(in: defaults)?.displayText == "⌥Space")
+        HotkeyAction.showSessions.resetBinding(in: defaults)
+        #expect(HotkeyAction.showSessions.binding(in: defaults)?.displayText == "⌥Space")
     }
 
     @Test func 保存した割り当てを読み戻せる() {
@@ -174,7 +173,7 @@ struct HotkeyBindingTests {
         defaults.set("commandShiftSpace", forKey: HotkeyPreset.userDefaultsKey)
         HotkeyPreset.migrateIfNeeded(defaults: defaults)
 
-        #expect(HotkeyAction.toggleInput.binding(in: defaults)?.displayText == "⇧⌘Space")
+        #expect(HotkeyAction.showSessions.binding(in: defaults)?.displayText == "⇧⌘Space")
         #expect(defaults.bool(forKey: HotkeyPreset.migratedKey))
     }
 
@@ -192,10 +191,10 @@ struct HotkeyBindingTests {
             carbonModifiers: UInt32(cmdKey),
             keyLabel: "P"
         )
-        HotkeyAction.toggleInput.setBinding(chosen, in: defaults)
+        HotkeyAction.showSessions.setBinding(chosen, in: defaults)
         HotkeyPreset.migrateIfNeeded(defaults: defaults)
 
-        #expect(HotkeyAction.toggleInput.binding(in: defaults) == chosen)
+        #expect(HotkeyAction.showSessions.binding(in: defaults) == chosen)
     }
 }
 

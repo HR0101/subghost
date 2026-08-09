@@ -111,6 +111,8 @@ final class AppCoordinator {
     // MARK: - 初回起動の案内
 
     @ObservationIgnored private static let hasCompletedOnboardingKey = "hasCompletedOnboarding"
+    @ObservationIgnored private static let removedLegacyTmuxKey = "removedLegacyTmuxIntegration"
+    @ObservationIgnored private static let migratedMonitoringHooksKey = "migratedMonitoringOnlyHooks"
     private(set) var onboardingStep: OnboardingStep = .welcome
     /// フック有効化ボタンを押した結果（成功メッセージ／エラー）。ステップごとに保持する。
     var onboardingHookMessage: [HookTarget: String] = [:]
@@ -141,6 +143,7 @@ final class AppCoordinator {
     // MARK: - 起動
 
     func start() {
+        migrateRemovedFeaturesIfNeeded()
         NotificationManager.shared.setup()
         SoundAlerts.shared.play(.appLaunched)
 
@@ -169,9 +172,11 @@ final class AppCoordinator {
         soundDefaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            let current = !SoundAlerts.isEnabled
-            if self.isMuted != current { self.isMuted = current }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let current = !SoundAlerts.isEnabled
+                if self.isMuted != current { self.isMuted = current }
+            }
         }
 
         // 初回起動時だけ、案内をノッチへ自動で出す。
@@ -179,6 +184,31 @@ final class AppCoordinator {
         // 重要な設定に自分から気づいてもらう手段がノッチの外に無い。
         if !UserDefaults.standard.bool(forKey: Self.hasCompletedOnboardingKey) {
             setMode(.onboarding)
+        }
+    }
+
+    /// 旧版がユーザー環境へ追加した自動tmux起動と回答用フックを一度だけ片付ける。
+    private func migrateRemovedFeaturesIfNeeded() {
+        let defaults = UserDefaults.standard
+
+        if !defaults.bool(forKey: Self.removedLegacyTmuxKey) {
+            do {
+                if ShellIntegration.isInstalled() { try ShellIntegration.uninstall() }
+                defaults.set(true, forKey: Self.removedLegacyTmuxKey)
+            } catch {
+                NSLog("Subghost: 旧tmux自動起動設定を解除できませんでした: \(error.localizedDescription)")
+            }
+        }
+
+        if !defaults.bool(forKey: Self.migratedMonitoringHooksKey) {
+            do {
+                for target in HookTarget.allCases where HookInstaller.isInstalled(target) {
+                    try HookInstaller.install(target)
+                }
+                defaults.set(true, forKey: Self.migratedMonitoringHooksKey)
+            } catch {
+                NSLog("Subghost: 監視専用フックへ移行できませんでした: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -270,18 +300,12 @@ final class AppCoordinator {
     /// 回答系は、回答待ちのセッションが無ければ何もしない（押し間違いで誤送信しないため）。
     func perform(_ action: HotkeyAction) {
         switch action {
-        case .toggleInput:
-            toggleInput()
         case .showSessions:
-            showSessions()
+            displayMode == .sessions ? collapse() : showSessions()
         case .showActivity:
             showActivity()
         case .jumpToTerminal:
             jumpToTerminal()
-        case .approveChoice:
-            respondToPendingChoice(affirmative: true)
-        case .denyChoice:
-            respondToPendingChoice(affirmative: false)
         case .toggleMute:
             toggleMute()
         }
@@ -474,27 +498,10 @@ final class AppCoordinator {
         respond(with: [option])
     }
 
-    /// 複数選択の回答をまとめて送る（チェックした項目と決定ボタンから呼ばれる）
+    /// 旧UIから呼ばれてもCLIへは何も送らない。
     func respond(with options: [ChoiceOption]) {
-        guard let session = choiceSession, !isSendingChoice, !options.isEmpty else { return }
-        lastChoiceError = nil
-        isSendingChoice = true
-        Task {
-            defer { isSendingChoice = false }
-            do {
-                try await watcher.respond(with: options, in: session)
-                // 同じ呼び出しに問いが残っていれば、畳まずに次の問いを待つ
-                let hasMoreQuestions = !session.questionQueue.isEmpty
-                // 送信できたことを一瞬見せてから畳む（いきなり一覧へ飛ばさない）
-                choiceSentLabel = options.map(\.label).joined(separator: "、")
-                try? await Task.sleep(for: .milliseconds(700))
-                choiceSentLabel = nil
-                if !hasMoreQuestions { collapse() }
-            } catch {
-                // 失敗は選択肢を出したまま理由を見せる（畳まない）
-                lastChoiceError = error.localizedDescription
-            }
-        }
+        guard !options.isEmpty else { return }
+        lastChoiceError = "Subghostからの回答送信機能は廃止されました。ターミナルで直接回答してください。"
     }
 
     /// 回答せずにノッチだけ閉じる（CLIへは何も送らない、Escキー等ユーザーの明示操作）
@@ -611,30 +618,7 @@ final class AppCoordinator {
     }
 
     func sendPrompt() {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        guard let session = watcher.activeSession else {
-            lastSendError = "AI CLI が見つかりません。ターミナルで claude / codex / agy を起動してください。"
-            return
-        }
-        let submittedDraftKey = promptDraftKey
-        guard session.info.canSendPrompt else {
-            lastSendError = SessionError.notMonitorable.localizedDescription
-            return
-        }
-        lastSendError = nil
-        Task {
-            do {
-                try await watcher.sendPrompt(text, to: session)
-                SoundAlerts.shared.play(.promptSent)
-                snippets.recordHistory(text)
-                // 送信中にPickerが切り替わっても、送信したセッションの下書きだけを消す。
-                promptDrafts.setText("", for: submittedDraftKey)
-                collapse()
-            } catch {
-                lastSendError = error.localizedDescription
-            }
-        }
+        lastSendError = "Subghostからの送信機能は廃止されました。"
     }
 
     private var promptDraftKey: String {
@@ -780,14 +764,11 @@ final class AppCoordinator {
     // MARK: - カスタムエイリアス
 
     /// 追加後、watcherの参照済みリストも同期する（次回ポーリングから反映）。
-    /// 自動tmux起動が既に導入済みなら、スクリプトも最新のエイリアスで再生成する
-    /// （でないと導入後に追加したエイリアスが自動tmux起動へ反映されない）。
     @discardableResult
     func addCustomAlias(name: String, baseProfileID: String) -> Bool {
         let added = customAliasStore.add(name: name, baseProfileID: baseProfileID)
         if added {
             watcher.customAliases = customAliasStore.aliases
-            ShellIntegration.refreshScriptIfInstalled(extraCommands: customAliasStore.aliases.map(\.name))
         }
         return added
     }
@@ -795,7 +776,6 @@ final class AppCoordinator {
     func removeCustomAlias(_ alias: CustomAlias) {
         customAliasStore.remove(alias)
         watcher.customAliases = customAliasStore.aliases
-        ShellIntegration.refreshScriptIfInstalled(extraCommands: customAliasStore.aliases.map(\.name))
     }
 
     /// ビューが実際に描画した高さを伝える。

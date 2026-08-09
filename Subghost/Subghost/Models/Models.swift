@@ -25,12 +25,11 @@ nonisolated enum AIState: String, Codable, Sendable {
 
     var displayName: String {
         switch self {
-        case .idle: return "Stand-by"
+        case .idle: return "Done"
         case .thinking: return "Working"
-        case .awaitingApproval: return "Approval"
-        case .awaitingAnswer: return "Question"
+        case .awaitingApproval, .awaitingAnswer: return "Working"
         case .completed: return "Done"
-        case .error: return "Error"
+        case .error: return "Done"
         }
     }
 
@@ -39,12 +38,11 @@ nonisolated enum AIState: String, Codable, Sendable {
     /// 混ざると意味が伝わらないため、支援技術にはこちらを渡す。
     var accessibilityDescription: String {
         switch self {
-        case .idle: return "待機中"
+        case .idle: return "完了"
         case .thinking: return "生成中"
-        case .awaitingApproval: return "承認待ち"
-        case .awaitingAnswer: return "質問への回答待ち"
+        case .awaitingApproval, .awaitingAnswer: return "作業途中"
         case .completed: return "完了"
-        case .error: return "エラー"
+        case .error: return "完了"
         }
     }
 
@@ -204,7 +202,7 @@ nonisolated struct Snippet: Codable, Sendable, Identifiable, Hashable {
 
 /// Subghostがそのセッションに対して何をできるかの区分。
 ///
-/// tmux を使う構成と使わない構成で、できることがはっきり違う。
+/// 監視はフック接続の有無だけで決まる。
 /// 画面のあちこちで `tmuxTarget != nil` を個別に判定すると
 /// 「入力欄は出るのに送れない」といった食い違いが生まれるため、
 /// 判断はこの型に集約し、UIはこれを見て出し分ける。
@@ -224,8 +222,7 @@ nonisolated enum SessionCapability: Int, Sendable, Comparable, CaseIterable {
     var label: String {
         switch self {
         case .detectedOnly: return "検出のみ"
-        case .monitorOnly: return "監視のみ"
-        case .full: return "送信可"
+        case .monitorOnly, .full: return "監視中"
         }
     }
 
@@ -233,8 +230,7 @@ nonisolated enum SessionCapability: Int, Sendable, Comparable, CaseIterable {
     var requirement: String {
         switch self {
         case .detectedOnly: return "設定不要"
-        case .monitorOnly: return "フック登録"
-        case .full: return "フック登録 ＋ tmux"
+        case .monitorOnly, .full: return "フック登録"
         }
     }
 
@@ -242,13 +238,10 @@ nonisolated enum SessionCapability: Int, Sendable, Comparable, CaseIterable {
     var summary: String {
         switch self {
         case .detectedOnly:
-            return "起動は検出できていますが、状態の取得も送信もできません。"
+            return "起動は検出できていますが、状態はまだ取得できません。"
                 + "フックを登録すると状態が分かるようになります。"
-        case .monitorOnly:
-            return "状態の監視と承認への回答ができます。"
-                + "プロンプトの送信には tmux が必要です。"
-        case .full:
-            return "状態の監視、プロンプトの送信、質問への回答がすべて行えます。"
+        case .monitorOnly, .full:
+            return "AI CLIの作業途中／完了を監視しています。"
         }
     }
 }
@@ -262,9 +255,9 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
     let tty: String
     let profile: CLIProfile
     let pid: Int32
-    /// tmuxのペイン宛先（"work:0.1"）。tmux外で動いている場合は nil。
+    /// 旧設定とのソース互換用。tmux方式は使用しないため常に nil。
     let tmuxTarget: String?
-    /// 所属するtmuxセッション名。tmux外なら nil。
+    /// 旧設定とのソース互換用。tmux方式は使用しないため常に nil。
     let tmuxSession: String?
     /// フックが届いている場合のCLI側セッションID。tmuxなしでも監視できる。
     var hookSessionID: String?
@@ -283,7 +276,6 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
     /// このセッションに対してSubghostが何をできるか。
     /// UIの出し分けは必ずここを見る（tmuxの有無を画面ごとに個別判定しない）。
     var capability: SessionCapability {
-        if tmuxTarget != nil { return .full }
         if isHookConnected { return .monitorOnly }
         return .detectedOnly
     }
@@ -297,7 +289,7 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
     /// 送信経路は tmux の pty 書き込みだけ。キー入力の合成（KeystrokeSender）は
     /// 対象タブを前面に出す必要があり、「裏で動いているCLIへ送る」という
     /// この機能の前提を満たせないため、送信経路には数えない。
-    var canSendPrompt: Bool { capability == .full }
+    var canSendPrompt: Bool { false }
 
     /// "ttys004" のような短い表示名
     var shortName: String {
@@ -314,13 +306,12 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
 
     /// ノッチやメニューに出す表示名。ttyではなくフォルダ名を主体にする。
     var displayName: String {
-        folderName ?? tmuxSession ?? shortName
+        folderName ?? shortName
     }
 
     /// 監視の経路（表示・診断用）
     var monitoringSource: String {
         if isHookConnected { return "フック" }
-        if tmuxTarget != nil { return "tmux" }
         return "なし"
     }
 
@@ -331,7 +322,7 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
         self.tty = agent.tty
         self.profile = agent.profile
         self.pid = agent.pid
-        self.tmuxTarget = agent.tmuxTarget
-        self.tmuxSession = agent.tmuxSession
+        self.tmuxTarget = nil
+        self.tmuxSession = nil
     }
 }

@@ -13,7 +13,7 @@
 //
 
 import Foundation
-import UserNotifications
+@preconcurrency import UserNotifications
 
 /// 通知を発行した時点のCLIプロセスを特定する情報。
 /// ttyは再利用されるため、PIDも一致した場合だけ同じセッションとみなす。
@@ -248,75 +248,15 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let actionIdentifier = response.actionIdentifier
         let userInfo = response.notification.request.content.userInfo
 
         // userInfoはSendableでないため、Taskへ渡す前に必要な値だけ取り出す
         let sessionReference = NotificationSessionReference(userInfo: userInfo)
-        let choiceToken = userInfo[UserInfoKey.choiceToken] as? String
-        let optionIndex = Category.optionIndex(from: actionIdentifier)
-
         Task { @MainActor in
-            if let optionIndex {
-                Self.respondFromNotification(
-                    sessionReference: sessionReference,
-                    choiceToken: choiceToken,
-                    optionIndex: optionIndex
-                )
-            } else {
-                // 本体タップ：通知を発行したセッションのタブへ移動する (設計書 4.2)
-                Self.jumpFromNotification(to: sessionReference)
-            }
+            // 旧版の回答ボタンを含め、通知操作は対象ターミナルを開くだけにする。
+            // SubghostからCLIへ文字列や選択肢を送信しない。
+            Self.jumpFromNotification(to: sessionReference)
             completionHandler()
-        }
-    }
-
-    /// 通知アクションから選択肢へ回答する
-    @MainActor
-    private static func respondFromNotification(
-        sessionReference: NotificationSessionReference?,
-        choiceToken: String?,
-        optionIndex: Int
-    ) {
-        guard let sessionReference, let choiceToken else {
-            NSLog("Subghost: 通知アクションに必要な情報が欠けています")
-            return
-        }
-
-        let watcher = AppCoordinator.shared.watcher
-        guard let session = watcher.sessions.first(where: { sessionReference.matches($0.info) }) else {
-            NSLog("Subghost: 通知の対象セッション \(sessionReference.tty) が見つかりません")
-            return
-        }
-        guard shared.choiceRegistry.isCurrent(choiceToken, for: sessionReference),
-              let choice = session.pendingChoice
-        else {
-            NSLog("Subghost: 古い、または解決済みの通知アクションを無視しました")
-            return
-        }
-        guard choice.options.indices.contains(optionIndex) else {
-            NSLog("Subghost: 通知のボタンに対応する選択肢がありません")
-            return
-        }
-        let option = choice.options[optionIndex]
-        guard shared.choiceRegistry.consume(choiceToken, for: sessionReference) else { return }
-
-        Task { @MainActor in
-            do {
-                try await watcher.respond(with: option, in: session)
-                UNUserNotificationCenter.current().removeDeliveredNotifications(
-                    withIdentifiers: [shared.notificationIdentifier(
-                        prefix: "subghost-choice",
-                        session: session.info
-                    )]
-                )
-            } catch {
-                // 送信失敗時は、同じ質問がまだ待機中なら再試行できるように戻す。
-                if session.pendingChoice == choice {
-                    shared.choiceRegistry.restore(choiceToken, for: sessionReference)
-                }
-                NSLog("Subghost: 通知からの回答送信に失敗しました: \(error.localizedDescription)")
-            }
         }
     }
 
