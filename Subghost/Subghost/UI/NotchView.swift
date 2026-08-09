@@ -2,11 +2,11 @@
 //  NotchView.swift
 //  Subghost
 //
-//  設計書 6. UI/UX仕様（コンパクト / 展開(通知) / 展開(入力)）
+//  設計書 6. UI/UX仕様（コンパクト / 通知 / セッション一覧 / 履歴）
 //
 //  ノッチパネルの中身を描くSwiftUIビュー一式。
 //  AppCoordinator.displayMode に従って、状態ドットだけのコンパクト表示から、
-//  応答のチラ見せ・セッション一覧・選択肢（承認/質問）・プロンプト入力までを切り替える。
+//  完了通知・セッション一覧・履歴・初回案内を切り替える。
 //
 //  物理ノッチと展開部分は NotchSurfaceShape が1本の連続したパスとして描く。
 //  形状の寸法は NotchLayout に集約されており、パネル側のサイズ計算と
@@ -119,9 +119,6 @@ struct NotchView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(NotchPreferences.expansionAnimationDurationKey)
     private var expansionAnimationDuration = NotchPreferences.defaultExpansionAnimationDuration
-    @FocusState private var inputFocused: Bool
-    @FocusState private var choiceFocused: Bool
-    @State private var historyIndex: Int?
     @State private var showAllUsage = false
     /// 黒いノッチ面の内側に表示する内容。輪郭の変形と時間差を付ける。
     @State private var renderedMode: NotchMode = .compact
@@ -130,8 +127,6 @@ struct NotchView: View {
     @State private var contentOpacity: Double = 1
     /// 短時間に開閉が反転した場合、古い遅延処理を無効化する。
     @State private var transitionID = UUID()
-    /// 複数選択でチェックした選択肢の番号
-    @State private var multiSelection: Set<Int> = []
     /// ゴーストへの「覗き込み」合図（コンパクト表示にマウスが乗るたびに+1）
     @State private var ghostPeekTrigger = 0
 
@@ -208,20 +203,6 @@ struct NotchView: View {
         }
         .onChange(of: requestedMode) { _, newMode in
             transition(to: newMode)
-            historyIndex = newMode == .input ? nil : historyIndex
-            inputFocused = false
-            choiceFocused = false
-            // パネルがキーウインドウになるのを待ってからフォーカスを与える
-            guard newMode == .input || newMode == .choice else { return }
-            let focusDelay = max(0.08, animationDuration(to: newMode) * 0.42)
-            DispatchQueue.main.asyncAfter(deadline: .now() + focusDelay) {
-                guard coordinator.displayMode == newMode else { return }
-                if newMode == .input {
-                    inputFocused = true
-                } else {
-                    choiceFocused = true
-                }
-            }
         }
     }
 
@@ -310,8 +291,6 @@ struct NotchView: View {
         switch mode {
         case .compact: compactContent
         case .notification: notificationContent
-        case .input: inputContent
-        case .choice: choiceContent
         case .sessions: sessionsContent
         case .activity: activityContent
         case .onboarding: onboardingContent
@@ -323,8 +302,6 @@ struct NotchView: View {
         switch mode {
         case .compact: return notchWidth + NotchLayout.sideWidth * 2
         case .notification: return max(notchWidth + 280, 620)
-        case .input: return max(notchWidth + 280, 640)
-        case .choice: return max(notchWidth + 320, 680)
         case .sessions: return max(notchWidth + 420, 760)
         case .activity: return max(notchWidth + 420, 760)
         case .onboarding: return max(notchWidth + 320, 680)
@@ -357,7 +334,6 @@ struct NotchView: View {
                 let visible = coordinator.watcher.visibleSessions
                 if let countdown = coordinator.sleepScheduler.countdown {
                     // まもなく寝ることは、どの表示に切り替わっていても目に入るようにする。
-                    // 承認待ちなどで案内が隠れても、ここで気づいて取り消せる。
                     HStack(spacing: 2) {
                         Image(systemName: "zzz")
                             .font(.system(size: 9, weight: .bold))
@@ -406,8 +382,6 @@ struct NotchView: View {
 
         var text = "Subghost。\(active.info.profile.displayName) "
             + "\(active.info.displayName) は\(active.state.accessibilityDescription)"
-        let waiting = sessions.filter { $0.state.needsUserResponse }.count
-        if waiting > 0 { text += "。\(waiting)件が応答待ちです" }
         if sessions.count > 1 { text += "。ほかに\(sessions.count - 1)件を監視中" }
         return text
     }
@@ -589,7 +563,7 @@ struct NotchView: View {
                 .help("設定を開く")
                 .accessibilityLabel("設定を開く")
 
-                // メニューバー項目を置かないため、終了もここから行えるようにする
+                // ノッチからもすぐ終了できるようにする
                 Button {
                     NSApp.terminate(nil)
                 } label: {
@@ -620,7 +594,7 @@ struct NotchView: View {
                         ForEach(visible) { session in
                             SessionRow(
                                 session: session,
-                                isActive: session.info.tty == coordinator.watcher.activeSessionName,
+                                isActive: session.info.id == coordinator.watcher.activeSessionName,
                                 isSleepReserved: coordinator.sleepScheduler.isReservedSession(
                                     tty: session.info.tty, pid: session.info.pid
                                 ),
@@ -761,7 +735,7 @@ struct NotchView: View {
                 ContentUnavailableView {
                     Label("履歴はまだありません", systemImage: "clock")
                 } description: {
-                    Text("完了・エラー・承認待ち・質問がここに表示されます")
+                    Text("完了とエラーがここに表示されます")
                 }
                 .foregroundStyle(.white.opacity(0.6))
                 .frame(maxWidth: .infinity)
@@ -844,6 +818,7 @@ struct NotchView: View {
                 Text("👻 Subghostへようこそ")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
+                    .accessibilityIdentifier("onboarding.title")
                 Text("ノッチにAI CLIのタスクが作業途中か完了したかを表示します。"
                      + "最初にフック連携を確認しましょう。")
                     .font(.system(size: 12))
@@ -865,21 +840,30 @@ struct NotchView: View {
 
         case .permissions:
             VStack(alignment: .leading, spacing: 8) {
-                Text("監視専用モード")
+                Text("完了通知")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
-                Text("Subghostは状態の監視と完了通知だけを行います。プロンプト、承認、質問への回答はCLIのターミナルで直接操作してください。")
+                Text("作業中に別のアプリを使っていても、タスクが終了したことを通知できます。通知本文は初期設定では非表示です。")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.7))
 
                 HStack(spacing: 8) {
-                    Image(systemName: "eye.fill")
+                    Image(systemName: "bell.badge.fill")
                         .foregroundStyle(.green)
-                    Text("CLIへの入力は一切送信しません")
+                    Button("通知を有効にする") { coordinator.requestNotificationPermission() }
+                        .buttonStyle(.plain)
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.8))
                     Spacer()
                 }
+                if let message = coordinator.onboardingNotificationMessage {
+                    Text(message)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.65))
+                }
+                Text("SubghostはCLIへの入力を一切送信しません。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.6))
             }
 
         case .done:
@@ -887,7 +871,7 @@ struct NotchView: View {
                 Text("準備ができました")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
-                Text("歯車アイコン（ノッチにカーソルを合わせると出てきます）からいつでも設定を開けます。")
+                Text("ノッチまたはメニューバーのゴーストアイコンから、いつでも設定を開けます。")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.7))
                 Text("\(HotkeyAction.showSessions.shortcutOrName) でセッション一覧を開閉できます。")
@@ -1040,437 +1024,6 @@ struct NotchView: View {
         return text
     }
 
-    // MARK: - 展開（承認/質問）：Approve / Ask
-
-    private var choiceContent: some View {
-        let session = coordinator.choiceSession
-        let choice = coordinator.pendingChoice
-
-        return VStack(alignment: .leading, spacing: 10) {
-            Color.clear.frame(height: topInset)   // ノッチ本体を避ける
-
-            HStack(spacing: 8) {
-                Image(systemName: choice?.kind == .question
-                      ? "questionmark.circle.fill" : "hand.raised.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(choice?.kind == .question ? Color.yellow : Color.orange)
-                Text(session?.info.profile.displayName ?? "")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                if let name = session?.info.displayName {
-                    Text(name)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                Spacer()
-                // 複数の問いが続く場合は「2 / 3」で残りが分かるようにする
-                if let progress = choice?.progressLabel {
-                    Text(progress)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(RoundedRectangle(cornerRadius: 4).fill(.white.opacity(0.12)))
-                }
-                Text(choice?.kind.displayName ?? "")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-
-            if let choice {
-                // 問いかけの文脈（差分の要約など）
-                if !choice.detail.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(choice.detail.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.55))
-                                .lineLimit(1)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Text(choice.title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                VStack(spacing: 5) {
-                    ForEach(choice.options) { option in
-                        ChoiceOptionRow(
-                            option: option,
-                            isDefault: isEnterDefault(option, in: choice),
-                            isMultiSelect: choice.isMultiSelect,
-                            isSelected: multiSelection.contains(option.number)
-                        ) {
-                            if choice.isMultiSelect {
-                                toggleSelection(option)
-                            } else {
-                                coordinator.respond(with: option)
-                            }
-                        }
-                    }
-                }
-
-                // 複数選択は選び終えてから確定する
-                if choice.isMultiSelect {
-                    Button { submitMultiSelection(choice) } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle.fill")
-                            Text(multiSelection.isEmpty
-                                 ? "1つ以上選んでください"
-                                 : "\(multiSelection.count)件を決定")
-                            Spacer()
-                            Text("⏎")
-                                .foregroundStyle(.white.opacity(0.6))
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(multiSelection.isEmpty ? .white.opacity(0.55) : .white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(multiSelection.isEmpty ? .white.opacity(0.06) : .accentColor.opacity(0.5))
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(multiSelection.isEmpty)
-                }
-
-                // 背景で回答できないセッションは、その理由と対処を明示する
-                if session?.canRespondToChoice == false {
-                    HStack(spacing: 5) {
-                        Image(systemName: "info.circle")
-                        Text("他の画面を見ながら回答するには tmux 内で起動してください。今はターミナルのタブで直接お選びください")
-                    }
-                    .font(.system(size: 10))
-                    .foregroundStyle(.orange.opacity(0.9))
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                Text("回答待ちの問い合わせはありません")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-
-            if let sent = coordinator.choiceSentLabel {
-                Label("「\(sent)」を送信しました", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.green)
-            } else if coordinator.isSendingChoice {
-                Label("送信中…", systemImage: "paperplane")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.6))
-            } else if let error = coordinator.lastChoiceError {
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            } else {
-                HStack {
-                    Text(choiceKeyHint(for: choice))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.65))
-                    Spacer()
-                    Button("ターミナルで開く") { coordinator.jumpToTerminal() }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.75))
-                    Text("Esc で閉じる")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.65))
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
-        .focusable()
-        // 数字キー入力のためフォーカスは維持しつつ、パネル全体を囲うmacOS標準の青枠は出さない。
-        .focusEffectDisabled()
-        .focused($choiceFocused)
-        .onKeyPress { press in handleChoiceKey(press) }
-        .onExitCommand { coordinator.dismissChoice() }
-        // 次の問いへ移ったらチェックを持ち越さない
-        .onChange(of: choice) { multiSelection = [] }
-        // 選択肢はキーボード操作が主なので、パネル全体を1つの通知として読み上げる。
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(choiceAccessibilityLabel(for: choice))
-    }
-
-    /// ⏎ で選ばれる既定の選択肢か。
-    ///
-    /// 承認リクエストの先頭は通常「はい／許可」で、⏎ を既定に割り当てると
-    /// 誤打鍵がそのまま許可になってしまう。承認では既定を置かず、
-    /// 数字キーかクリックによる明示的な選択だけを受け付ける。
-    private func isEnterDefault(_ option: ChoiceOption, in choice: PendingChoice) -> Bool {
-        guard !choice.isMultiSelect, choice.kind != .approval else { return false }
-        return option == choice.options.first
-    }
-
-    /// 画面下のキー操作ヒント。実装している操作だけを出す。
-    private func choiceKeyHint(for choice: PendingChoice?) -> String {
-        guard let choice else { return "" }
-        if choice.isMultiSelect { return "数字キーで選択・解除 / ⏎ で決定" }
-        if choice.kind == .approval { return "数字キーで回答（誤操作防止のため ⏎ の既定はありません）" }
-        return "数字キーで回答 / ⏎ で先頭を選択"
-    }
-
-    private func choiceAccessibilityLabel(for choice: PendingChoice?) -> String {
-        guard let choice else { return "回答待ちの問い合わせはありません" }
-        return "\(choice.kind.displayName)。\(choice.title)。"
-            + "選択肢\(choice.options.count)件。数字キーで回答できます"
-    }
-
-    /// 数字キー・y/n・Enterで選択肢へ回答する
-    private func handleChoiceKey(_ press: KeyPress) -> KeyPress.Result {
-        guard let choice = coordinator.pendingChoice else { return .ignored }
-
-        if press.key == .return {
-            // 複数選択では⏎は「決定」。先頭を選ぶ動作にはしない。
-            if choice.isMultiSelect {
-                submitMultiSelection(choice)
-                return .handled
-            }
-            // 承認リクエストでは⏎に既定を割り当てない（isEnterDefault と同じ理由）。
-            guard let first = choice.options.first,
-                  isEnterDefault(first, in: choice)
-            else { return .ignored }
-            coordinator.respond(with: first)
-            return .handled
-        }
-
-        let typed = String(press.characters).lowercased()
-        guard let option = choice.options.first(where: { $0.keystroke.lowercased() == typed }) else {
-            return .ignored
-        }
-        if choice.isMultiSelect {
-            toggleSelection(option)
-        } else {
-            coordinator.respond(with: option)
-        }
-        return .handled
-    }
-
-    /// 複数選択のチェックを付け外しする
-    private func toggleSelection(_ option: ChoiceOption) {
-        if multiSelection.contains(option.number) {
-            multiSelection.remove(option.number)
-        } else {
-            multiSelection.insert(option.number)
-        }
-    }
-
-    /// チェックした選択肢をまとめて送信する
-    private func submitMultiSelection(_ choice: PendingChoice) {
-        let selected = choice.options.filter { multiSelection.contains($0.number) }
-        guard !selected.isEmpty else { return }
-        coordinator.respond(with: selected)
-        multiSelection = []
-    }
-
-    // MARK: - 展開（入力）：クイックプロンプト (設計書 4.3 / 4.4)
-
-    private var inputContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Color.clear.frame(height: topInset)
-
-            HStack(spacing: 8) {
-                Button {
-                    coordinator.showSessions()
-                } label: {
-                    Label("一覧", systemImage: "chevron.left")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
-                }
-                .buttonStyle(.plain)
-                .help("セッション一覧へ戻る")
-                .accessibilityLabel("セッション一覧へ戻る")
-
-                Image(systemName: "terminal")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .accessibilityHidden(true)
-
-                // 送信先セッション選択 (設計書 4.3: 複数ある場合はドロップダウン)
-                if let active = coordinator.watcher.activeSession {
-                    // ドット自体は装飾。状態は下の送信先ラベルが読み上げる。
-                    StateDot(state: active.state, pulsing: active.state.shouldPulse, size: 7)
-                }
-                // 送信先の候補は「実際に送れるセッション」だけに絞る。
-                // 選べるのに送れない相手が並んでいると、書いてから断られることになる。
-                let selectable = coordinator.watcher.visibleSessions.filter {
-                    $0.info.canSendPrompt
-                }
-                if selectable.count > 1 {
-                    Picker("送信先", selection: activeSessionBinding) {
-                        ForEach(selectable) { session in
-                            Text("\(session.info.displayName)（\(session.state.displayName)）")
-                                .tag(Optional(session.info.tty))
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .environment(\.colorScheme, .dark)
-                    .frame(maxWidth: 220)
-                    .accessibilityLabel("送信先セッション")
-                } else {
-                    Text(coordinator.watcher.activeSession?.info.displayName ?? "セッションなし")
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .accessibilityLabel("送信先")
-                        .accessibilityValue(activeSessionAccessibilityValue)
-                }
-                Spacer()
-                Text("⌘↩ 送信")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.65))
-                Text("Esc で閉じる")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.65))
-            }
-
-            ZStack(alignment: .topLeading) {
-                if coordinator.inputText.isEmpty {
-                    Text("プロンプトを入力…")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 13)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
-
-                TextEditor(text: $coordinator.inputText)
-                    .scrollContentBackground(.hidden)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .focused($inputFocused)
-                    .accessibilityLabel("プロンプト")
-                    .accessibilityHint("コマンド・リターンで送信します")
-            }
-            .frame(minHeight: 88, maxHeight: 140)
-            .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.1)))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)
-            )
-            .onKeyPress(.return, phases: .down) { press in
-                guard press.modifiers.contains(.command) else { return .ignored }
-                historyIndex = nil
-                coordinator.sendPrompt()
-                return .handled
-            }
-                .onExitCommand { coordinator.collapse() }
-                .onKeyPress(.upArrow, phases: .down) { press in
-                    guard press.modifiers.contains(.option) else { return .ignored }
-                    historyUp()
-                    return .handled
-                }
-                .onKeyPress(.downArrow, phases: .down) { press in
-                    guard press.modifiers.contains(.option) else { return .ignored }
-                    historyDown()
-                    return .handled
-                }
-                // 設定画面に「Tabで送信先を切り替える」と書かれていたが、
-                // SessionWatcher.cycleActiveSession() に呼び出し元が無く未実装だった。
-                .onKeyPress(.tab, phases: .down) { _ in
-                    guard coordinator.watcher.sessions.count > 1 else { return .ignored }
-                    coordinator.watcher.cycleActiveSession()
-                    return .handled
-                }
-
-            // スニペットチップ (設計書 4.4)
-            if !coordinator.snippets.snippets.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(coordinator.snippets.snippets) { snippet in
-                            Button {
-                                coordinator.insertSnippet(snippet)
-                            } label: {
-                                Text(snippet.title)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.white.opacity(0.85))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .background(Capsule().fill(.white.opacity(0.12)))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-
-            HStack {
-                Text(coordinator.watcher.sessions.count > 1
-                     ? "⌥↑ / ⌥↓ で送信履歴 ・ Tab で送信先切替"
-                     : "⌥↑ / ⌥↓ で送信履歴")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.6))
-                Spacer()
-                Text("下書きは送信先ごとに保存されます")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-
-            if let error = coordinator.lastSendError {
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
-            } else if coordinator.watcher.sessions.isEmpty {
-                Text("AI CLI が見つかりません。ターミナルで claude / codex / agy を起動してください")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-            } else if coordinator.watcher.activeSession?.info.canSendPrompt == false {
-                // 入力欄は送れる相手がいるときにしか出さないので、通常ここには来ない。
-                // Pickerで送れない相手へ切り替えた場合の保険。
-                Text(coordinator.watcher.tmuxAvailable
-                     ? "このセッションはtmuxの外で動いているため送信できません。tmux内で起動し直してください"
-                     : "tmuxが見つかりません。設定でパスを指定するかインストールしてください")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
-    }
-
-    /// 送信先が1件のときの読み上げ内容。状態ドットは装飾なので、状態もここに含める。
-    private var activeSessionAccessibilityValue: String {
-        guard let active = coordinator.watcher.activeSession else { return "セッションなし" }
-        return "\(active.info.displayName)、\(active.state.accessibilityDescription)"
-    }
-
-    /// watcherはletプロパティのため@Bindable経由でBindingを作れず、手動で用意する
-    private var activeSessionBinding: Binding<String?> {
-        Binding(
-            get: { coordinator.watcher.activeSessionName },
-            set: { if let tty = $0 { coordinator.watcher.chooseActiveSession(tty) } }
-        )
-    }
-
-    // MARK: - 履歴呼び出し (設計書 4.4: 上矢印キー)
-
-    private func historyUp() {
-        let history = coordinator.snippets.history
-        guard !history.isEmpty else { return }
-        let next = historyIndex.map { min($0 + 1, history.count - 1) } ?? 0
-        historyIndex = next
-        coordinator.inputText = history[next]
-    }
-
-    private func historyDown() {
-        guard let index = historyIndex else { return }
-        if index <= 0 {
-            historyIndex = nil
-            coordinator.inputText = ""
-        } else {
-            historyIndex = index - 1
-            coordinator.inputText = coordinator.snippets.history[index - 1]
-        }
-    }
 }
 
 // MARK: - セッション一覧の1行
@@ -1511,7 +1064,7 @@ struct SessionRow: View {
     }
 
     var body: some View {
-        // 入れ子のButtonは正しく動作しないため、移動と送信を並べて配置する
+        // 行全体の移動ボタンと、右側の補助操作を分けて配置する
         HStack(alignment: .top, spacing: 8) {
             Button(action: onJump) {
                 HStack(alignment: .top, spacing: 10) {
@@ -1528,9 +1081,7 @@ struct SessionRow: View {
                             Spacer(minLength: 4)
                             TagBadge(text: session.info.profile.displayName, tint: agentTint)
                             TagBadge(text: session.state.displayName, tint: stateTint)
-                            // tmuxの有無でできることが変わるので、それを明示する。
-                            // 「送信可」は既定の状態なので、欠けているときだけ出す。
-                            if session.info.capability < .full {
+                            if !session.info.isMonitorable {
                                 TagBadge(
                                     text: session.info.capabilityLabel,
                                     tint: .orange.opacity(0.35)
@@ -1654,11 +1205,10 @@ struct SessionRow: View {
             session.info.displayName,
             session.state.accessibilityDescription,
         ]
-        // 送信ボタンの有無は見た目でしか分からないため、できることを言葉でも伝える
-        if session.info.capability < .full {
+        if !session.info.isMonitorable {
             parts.append(session.info.capability.summary)
         }
-        if isActive { parts.append("現在の送信先") }
+        if isActive { parts.append("選択中") }
         if isSleepReserved { parts.append("完了後にスリープを予約中") }
         if let prompt = session.lastUserPrompt, !prompt.isEmpty {
             parts.append("直近の指示 \(prompt)")
@@ -1681,8 +1231,6 @@ struct SessionRow: View {
         switch session.state {
         case .idle: return Color.gray.opacity(0.3)
         case .thinking: return Color.blue.opacity(0.55)
-        case .awaitingApproval: return Color.orange.opacity(0.5)
-        case .awaitingAnswer: return Color.yellow.opacity(0.45)
         case .completed: return Color.green.opacity(0.45)
         case .error: return Color.red.opacity(0.5)
         }
@@ -1792,8 +1340,6 @@ private struct ActivityRow: View {
         switch entry.kind {
         case .completed: return "checkmark.circle.fill"
         case .error: return "exclamationmark.triangle.fill"
-        case .approval: return "hand.raised.fill"
-        case .question: return "questionmark.circle.fill"
         }
     }
 
@@ -1801,107 +1347,11 @@ private struct ActivityRow: View {
         switch entry.kind {
         case .completed: return .green
         case .error: return .red
-        case .approval: return .orange
-        case .question: return .yellow
         }
     }
 }
 
-// MARK: - 選択肢の1行 (Approve / Ask)
-
-struct ChoiceOptionRow: View {
-    let option: ChoiceOption
-    /// Enterで選ばれる既定の選択肢か
-    let isDefault: Bool
-    /// 複数選択の問いか（チェックボックスで表示する）
-    var isMultiSelect: Bool = false
-    /// 複数選択でチェック済みか
-    var isSelected: Bool = false
-    let action: () -> Void
-
-    @State private var isHovering = false
-
-    /// 「はい」系は緑、「いいえ」系は赤、それ以外は無彩色で示す
-    private var tint: Color {
-        if option.isAffirmative { return .green }
-        if option.isNegative { return .red }
-        return .white
-    }
-
-    /// 枠線の濃さ。複数選択では選択中を強調する。
-    private var borderOpacity: Double {
-        if isMultiSelect { return isSelected ? 0.7 : 0 }
-        return isDefault ? 0.5 : 0
-    }
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Text(option.keystroke.uppercased())
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.black.opacity(0.8))
-                    .frame(width: 18, height: 18)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(tint.opacity(0.85)))
-
-                if isMultiSelect {
-                    Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 12))
-                        .foregroundStyle(isSelected ? Color.accentColor : .white.opacity(0.45))
-                }
-
-                Text(option.label)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.9))
-                    // 長いラベルは途中で切らず2行まで折り返す
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.leading)
-
-                Spacer(minLength: 4)
-
-                if isDefault {
-                    Text("⏎")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(.white.opacity(backgroundOpacity))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(tint.opacity(borderOpacity), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
-        // 肯定/否定を緑・赤で塗り分けているが、色だけでは伝わらないため言葉でも示す。
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityHint("キー \(option.keystroke.uppercased()) でも選べます")
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-    }
-
-    private var accessibilityLabel: String {
-        var parts = ["\(option.number > 0 ? "選択肢\(option.number)、" : "")\(option.label)"]
-        if option.isAffirmative { parts.append("肯定の選択肢") }
-        if option.isNegative { parts.append("否定の選択肢") }
-        if isMultiSelect { parts.append(isSelected ? "チェック済み" : "未チェック") }
-        if isDefault { parts.append("リターンキーの既定") }
-        return parts.joined(separator: "、")
-    }
-
-    /// 背景の濃さ。選択中とホバー中を段階的に示す。
-    private var backgroundOpacity: Double {
-        if isMultiSelect, isSelected { return 0.22 }
-        return isHovering ? 0.18 : 0.08
-    }
-}
-
-// MARK: - 状態ドット (設計書 4.1: グレー/青パルス/緑/赤 ＋ 回答待ちの橙/黄)
+// MARK: - 状態ドット (設計書 4.1: グレー/青パルス/緑/赤)
 
 struct StateDot: View {
     let state: AIState
@@ -1915,8 +1365,6 @@ struct StateDot: View {
         switch state {
         case .idle: return .gray
         case .thinking: return .blue
-        case .awaitingApproval: return .orange
-        case .awaitingAnswer: return .yellow
         case .completed: return .green
         case .error: return .red
         }

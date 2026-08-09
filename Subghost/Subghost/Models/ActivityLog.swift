@@ -2,7 +2,7 @@
 //  ActivityLog.swift
 //  Subghost
 //
-//  完了・エラー・回答待ちをローカルに記録する軽量なアクティビティ履歴。
+//  完了・エラーをローカルに記録する軽量なアクティビティ履歴。
 //
 
 import Foundation
@@ -11,15 +11,11 @@ import Observation
 nonisolated enum ActivityKind: String, Codable, Sendable, CaseIterable {
     case completed
     case error
-    case approval
-    case question
 
     var displayName: String {
         switch self {
         case .completed: return "応答完了"
         case .error: return "エラー"
-        case .approval: return "承認待ち"
-        case .question: return "質問"
         }
     }
 }
@@ -63,7 +59,7 @@ nonisolated struct ActivityEntry: Codable, Identifiable, Equatable, Sendable {
     let agentID: String
     let agentName: String
     let sessionName: String
-    let summary: String
+    var summary: String
     var isRead: Bool
 
     init(
@@ -180,6 +176,16 @@ final class ActivityStore {
     func clear() {
         entries = []
         defaults.removeObject(forKey: storageKey)
+    }
+
+    /// プライバシー設定を有効にした時点で、保存済み本文も後から復元できない形へ置き換える。
+    func redactSummaries() {
+        var changed = false
+        for index in entries.indices where entries[index].summary != "（本文は非表示）" {
+            entries[index].summary = "（本文は非表示）"
+            changed = true
+        }
+        if changed { persist() }
     }
 
     private func persist() {

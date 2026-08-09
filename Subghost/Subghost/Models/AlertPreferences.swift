@@ -19,15 +19,11 @@ import Foundation
 nonisolated enum NotificationEvent: String, CaseIterable, Sendable {
     case completed
     case error
-    case approval
-    case question
 
     var displayName: String {
         switch self {
         case .completed: return "応答完了"
         case .error: return "エラー"
-        case .approval: return "承認リクエスト"
-        case .question: return "質問"
         }
     }
 
@@ -35,14 +31,8 @@ nonisolated enum NotificationEvent: String, CaseIterable, Sendable {
         switch self {
         case .completed: return "AI がターンを完了したとき"
         case .error: return "ツールエラーまたは API エラーが起きたとき"
-        case .approval: return "権限の承認を求められたとき（バナーから承認・拒否できます）"
-        case .question: return "AI が質問を投げて入力を待っているとき"
         }
     }
-
-    /// 回答しないとCLIの処理が止まるイベントか。
-    /// 静穏時間の例外や、割り込みレベルの判断に使う。
-    var isBlocking: Bool { self == .approval || self == .question }
 
     var enabledKey: String { "notification.\(rawValue).enabled" }
 
@@ -55,8 +45,6 @@ nonisolated enum NotificationEvent: String, CaseIterable, Sendable {
         switch state {
         case .completed: return .completed
         case .error: return .error
-        case .awaitingApproval: return .approval
-        case .awaitingAnswer: return .question
         case .idle, .thinking: return nil
         }
     }
@@ -72,10 +60,6 @@ nonisolated enum QuietHours {
     static let enabledKey = "quietHoursEnabled"
     static let startKey = "quietHoursStartMinutes"
     static let endKey = "quietHoursEndMinutes"
-    /// 承認・質問だけは静穏時間でも通す（既定で有効）。
-    /// 答えないとCLIが止まったままになるため、こちらを既定にしている。
-    static let allowBlockingKey = "quietHoursAllowBlocking"
-
     static let defaultStartMinutes = 22 * 60
     static let defaultEndMinutes = 7 * 60
 
@@ -89,10 +73,6 @@ nonisolated enum QuietHours {
 
     static var endMinutes: Int {
         Int(NotchPreferences.number(forKey: endKey, default: Double(defaultEndMinutes)))
-    }
-
-    static var allowsBlockingEvents: Bool {
-        NotchPreferences.bool(forKey: allowBlockingKey, default: true)
     }
 
     /// 現在が静穏時間内か
@@ -203,7 +183,7 @@ enum AlertGate {
     }
 
     /// アラート音を鳴らしてよいか。
-    /// セッションに紐づかない音（アプリ起動・送信音）は session に nil を渡す。
+    /// セッションに紐づかない音（アプリ起動など）は session に nil を渡す。
     static func allowsSound(
         _ sound: AlertSound,
         session: SessionInfo?,
@@ -211,11 +191,7 @@ enum AlertGate {
     ) -> Bool {
         guard SoundAlerts.isEnabled, sound.isEnabled else { return false }
         if let session, isSilenced(session: session) { return false }
-        // 静穏時間では、答えないと止まるイベントの音だけ設定に応じて通す
-        if QuietHours.isQuietNow(now) {
-            guard let event = sound.notificationEvent else { return false }
-            return event.isBlocking && QuietHours.allowsBlockingEvents
-        }
+        if QuietHours.isQuietNow(now) { return false }
         return true
     }
 
@@ -240,9 +216,7 @@ enum AlertGate {
         _ event: NotificationEvent,
         now: Date
     ) -> Bool {
-        guard QuietHours.isQuietNow(now) else { return false }
-        // 承認・質問は放置するとCLIが止まるため、設定で通すことを選べる
-        return !(event.isBlocking && QuietHours.allowsBlockingEvents)
+        QuietHours.isQuietNow(now)
     }
 }
 
@@ -250,15 +224,9 @@ enum AlertGate {
 
 nonisolated enum NotificationPreferences {
     static let masterKey = "notificationsEnabled"
-    /// 承認・質問の通知を集中モードでも割り込ませるか
-    static let timeSensitiveKey = "notificationTimeSensitive"
 
     static var masterEnabled: Bool {
         NotchPreferences.bool(forKey: masterKey, default: true)
-    }
-
-    static var timeSensitiveEnabled: Bool {
-        NotchPreferences.bool(forKey: timeSensitiveKey, default: true)
     }
 }
 
@@ -270,9 +238,7 @@ extension AlertSound {
         switch self {
         case .completed: return .completed
         case .error: return .error
-        case .approval: return .approval
-        case .question: return .question
-        case .appLaunched, .sessionStart, .promptSent, .contextLimit: return nil
+        case .appLaunched, .sessionStart, .contextLimit: return nil
         }
     }
 }

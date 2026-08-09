@@ -78,7 +78,7 @@ nonisolated enum AppearancePreferences {
     /// 応答本文のプレビューをノッチと履歴で伏せる。
     /// 画面共有や録画のときに、会話の中身が映り込まないようにするため。
     static var hidePreviewText: Bool {
-        NotchPreferences.bool(forKey: hidePreviewTextKey, default: false)
+        NotchPreferences.bool(forKey: hidePreviewTextKey, default: true)
     }
 
     /// 伏せ字にすべきときはプレースホルダを返す
