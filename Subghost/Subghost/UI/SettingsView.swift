@@ -867,6 +867,8 @@ private struct MinutePicker: View {
 
 /// フック連携の導入・解除 (追補: フック方式)
 private struct HookSettingsView: View {
+    @AppStorage(UsagePreferences.codexCollectionEnabledKey)
+    private var codexUsageCollectionEnabled = false
     @State private var installed: [HookTarget: Bool] = [:]
     @State private var messages: [HookTarget: (text: String, isError: Bool)] = [:]
     @State private var confirming: HookTarget?
@@ -995,7 +997,10 @@ private struct HookSettingsView: View {
 
                 if installed {
                     Button("解除して元に戻す", role: .destructive) {
-                        statuslineMessage = run { try HookInstaller.uninstallStatusline() }
+                        statuslineMessage = run {
+                            try HookInstaller.uninstallStatusline()
+                            watcher.clearUsage(for: CLIProfile.claude.id)
+                        }
                             ?? "元の statusline に戻しました。"
                     }
                 } else {
@@ -1009,6 +1014,16 @@ private struct HookSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                Divider()
+                Toggle("Codexの使用量を取得する", isOn: $codexUsageCollectionEnabled)
+                    .onChange(of: codexUsageCollectionEnabled) { _, enabled in
+                        if !enabled { watcher.clearUsage(for: CLIProfile.codex.id) }
+                    }
+                Text("有効にした場合だけ、CodexがMac内へ保存した直近のセッション記録から"
+                     + "レート制限の数値を読みます。会話本文は使用量の解析対象にしません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {

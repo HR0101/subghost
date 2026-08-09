@@ -267,8 +267,10 @@ enum TerminalActivator {
         else { return nil }
 
         var title: CFTypeRef?
+        guard CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
+        let axWindow = unsafeBitCast(window, to: AXUIElement.self)
         guard AXUIElementCopyAttributeValue(
-            window as! AXUIElement, kAXTitleAttribute as CFString, &title) == .success
+            axWindow, kAXTitleAttribute as CFString, &title) == .success
         else { return nil }
         return title as? String
     }

@@ -407,34 +407,6 @@ final class AppCoordinator {
         watcher.hide(session)
     }
 
-    /// CLIごと終了させる。取り消せない操作なので必ず確認を取る。
-    ///
-    /// ノッチのパネルは statusBar より上にいるため、パネル内にシートを出すと
-    /// 隠れてしまう。アプリモーダルの NSAlert で確実に前へ出す。
-    func confirmTerminate(_ session: MonitoredSession) {
-        NSApp.activate()
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText =
-            "\(session.info.displayName) の \(session.info.profile.displayName) を終了しますか？"
-        alert.informativeText =
-            "作業中だった場合、途中の内容は失われることがあります。"
-            + "終了させず、一覧から隠すだけにもできます。"
-        alert.addButton(withTitle: "終了する")
-        alert.addButton(withTitle: "キャンセル")
-        alert.addButton(withTitle: "隠すだけ")
-
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            watcher.terminate(session)
-        case .alertThirdButtonReturn:
-            watcher.hide(session)
-        default:
-            break
-        }
-    }
-
     /// 一覧から選んだセッションのタブへ移動する
     func jump(to session: MonitoredSession) {
         watcher.chooseActiveSession(session.info.id)

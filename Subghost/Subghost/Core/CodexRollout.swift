@@ -31,7 +31,11 @@ nonisolated enum CodexRollout {
         var newestPath: String?
         for case let url as URL in walker {
             guard url.pathExtension == "jsonl" else { continue }
-            if newestPath == nil || url.path > newestPath! { newestPath = url.path }
+            if let current = newestPath {
+                if url.path > current { newestPath = url.path }
+            } else {
+                newestPath = url.path
+            }
         }
         return newestPath
     }

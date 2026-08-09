@@ -105,6 +105,16 @@ nonisolated enum HookInstaller {
         supportDirectory.appendingPathComponent("bin/subghost-bridge").path
     }
 
+    private static func preparePrivateDirectory(_ url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: url.path
+        )
+    }
+
     /// ローカル受信サーバまでの疎通を確認する。CLI設定やセッションは変更しない。
     static func sendHealthCheck() throws {
         let process = Process()
@@ -177,9 +187,8 @@ nonisolated enum HookInstaller {
     /// スクリプトを設置し、実行権限を与える
     static func installBridgeScript() throws {
         let binDirectory = supportDirectory.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: binDirectory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
+        try preparePrivateDirectory(supportDirectory)
+        try preparePrivateDirectory(binDirectory)
 
         let script = bridgeScript(socketPath: socketPath)
         try script.write(toFile: bridgeScriptPath, atomically: true, encoding: .utf8)
@@ -310,16 +319,16 @@ nonisolated enum HookInstaller {
         } else {
             previous = current
             if let current {
-                try FileManager.default.createDirectory(
-                    at: supportDirectory, withIntermediateDirectories: true)
+                try preparePrivateDirectory(supportDirectory)
                 try current.write(to: previousStatuslinePath, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: previousStatuslinePath.path)
             }
         }
 
         let binDirectory = supportDirectory.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: binDirectory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
+        try preparePrivateDirectory(supportDirectory)
+        try preparePrivateDirectory(binDirectory)
         try statuslineScript(socketPath: socketPath, next: previous)
             .write(toFile: statuslineScriptPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(

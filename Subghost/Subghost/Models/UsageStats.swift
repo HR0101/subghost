@@ -15,12 +15,18 @@ import Foundation
 /// 何%から色を変えて知らせるか。
 /// 5時間枠を意識して使う人ほど、余裕のあるうちに気づきたい度合いが違うため設定へ出す。
 nonisolated enum UsagePreferences {
+    static let codexCollectionEnabledKey = "codexUsageCollectionEnabled"
     static let warningKey = "usageWarningThreshold"
     static let criticalKey = "usageCriticalThreshold"
 
     static let defaultWarning: Double = 70
     static let defaultCritical: Double = 90
     static var thresholdRange: ClosedRange<Double> { 50...99 }
+
+    /// Codexのセッション記録を使用量取得のために読むか。状態監視には不要なので既定は無効。
+    static var isCodexCollectionEnabled: Bool {
+        NotchPreferences.bool(forKey: codexCollectionEnabledKey, default: false)
+    }
 
     static var warningThreshold: Double {
         let stored = NotchPreferences.number(forKey: warningKey, default: defaultWarning)

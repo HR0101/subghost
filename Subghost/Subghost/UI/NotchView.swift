@@ -600,8 +600,7 @@ struct NotchView: View {
                                 ),
                                 onJump: { coordinator.jump(to: session) },
                                 onHide: { coordinator.hideSession(session) },
-                                onToggleSleep: { coordinator.toggleSleepReservation(for: session) },
-                                onTerminate: { coordinator.confirmTerminate(session) }
+                                onToggleSleep: { coordinator.toggleSleepReservation(for: session) }
                             )
                         }
                     }
@@ -1040,8 +1039,6 @@ struct SessionRow: View {
     let onHide: () -> Void
     /// 完了後スリープの予約を入り切りするとき
     let onToggleSleep: () -> Void
-    /// CLIごと終了させるとき（確認は呼び出し側で取る）
-    let onTerminate: () -> Void
 
     @State private var isHovering = false
     @State private var isMuteHovering = false
@@ -1153,19 +1150,15 @@ struct SessionRow: View {
             )
 
             // 使い終わったセッションを一覧から片付ける。
-            // 既定は「隠すだけ」。プロセスの終了は取り消せないので、
-            // 誤って作業中のCLIを消さないよう長押し相当のメニューの奥に置く。
+            // 監視専用なので、CLIプロセスそのものは操作しない。
             Menu {
                 Button("一覧から隠す", action: onHide)
-                Divider()
                 Button(
                     isSleepReserved
                         ? "完了後のスリープ予約を解除"
                         : "このタスクが終わったらMacをスリープ",
                     action: onToggleSleep
                 )
-                Divider()
-                Button("CLIを終了する…", role: .destructive, action: onTerminate)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))

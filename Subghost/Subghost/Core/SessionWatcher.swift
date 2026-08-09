@@ -234,18 +234,6 @@ final class SessionWatcher {
         for session in sessions { session.hiddenAtActivity = nil }
     }
 
-    /// セッションのCLIプロセスを終了させる。
-    ///
-    /// 取り消せない操作なので、呼び出し側で必ず確認を取ること。
-    /// SIGKILLではなくSIGTERMを送り、CLIに後始末（記録の書き出し等）をさせる。
-    func terminate(_ session: MonitoredSession) {
-        guard session.info.pid > 0 else { return }
-        kill(session.info.pid, SIGTERM)
-        // 次の巡回でプロセスが消えていれば reconcile が一覧から外す。
-        // 終了を待たずに一覧から消して、押した手応えを返す。
-        session.hiddenAtActivity = session.effectiveActivityAt
-    }
-
     /// いずれかのセッションが生成中か（アイコンのパルス用）
     var anyThinking: Bool { sessions.contains { $0.state == .thinking } }
 
@@ -308,6 +296,10 @@ final class SessionWatcher {
     @ObservationIgnored private var lastCodexUsageRefreshAt: Date?
 
     private func refreshCodexUsageIfNeeded(at now: Date = Date()) {
+        guard UsagePreferences.isCodexCollectionEnabled else {
+            usageByAgent.removeValue(forKey: CLIProfile.codex.id)
+            return
+        }
         guard sessions.contains(where: { $0.info.profile.id == "codex" }) else { return }
         guard lastCodexUsageRefreshAt.map({ now.timeIntervalSince($0) >= 30 }) ?? true else { return }
         lastCodexUsageRefreshAt = now
@@ -316,6 +308,12 @@ final class SessionWatcher {
         if let stats = UsageParser.parseCodexRateLimits(inJSONLines: text) {
             usageByAgent[stats.agentID] = stats
         }
+    }
+
+    /// 使用量の取得を切った直後に、前回値も画面から取り除く。
+    func clearUsage(for agentID: String) {
+        usageByAgent.removeValue(forKey: agentID)
+        if agentID == CLIProfile.codex.id { lastCodexUsageRefreshAt = nil }
     }
 
     /// 内部状態をJSONで書き出す（診断用）。
@@ -510,6 +508,7 @@ final class SessionWatcher {
             if let stats = UsageParser.parse(request.body) { usageByAgent[stats.agentID] = stats }
             return
         }
+        guard request.path == "/hook", HookTarget(rawValue: request.source) != nil else { return }
         guard let event = HookEventDecoder.decode(request.body) else {
             return
         }
