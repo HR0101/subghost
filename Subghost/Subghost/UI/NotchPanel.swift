@@ -159,6 +159,7 @@ final class NotchPanel: NSPanel {
 
 // MARK: - コントローラ
 
+@MainActor
 final class NotchPanelController {
 
     private unowned let coordinator: AppCoordinator

@@ -123,6 +123,7 @@ final class MonitoredSession: Identifiable {
 }
 
 /// ai-* セッションの検出・ポーリング・状態遷移イベントの発火を担う。
+@MainActor
 @Observable
 final class SessionWatcher {
 

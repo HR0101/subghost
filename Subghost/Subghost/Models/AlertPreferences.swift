@@ -165,6 +165,7 @@ final class SessionMuteStore {
 ///
 /// 呼び出し側（AppCoordinator / SessionWatcher）はここだけを見ればよく、
 /// 設定項目が増えても分岐が各所へ散らばらない。
+@MainActor
 enum AlertGate {
 
     /// セッション個別のミュート状態。AppCoordinator が保持する実体を指す。

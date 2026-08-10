@@ -34,6 +34,7 @@ enum OnboardingStep: Int, CaseIterable {
     case done
 }
 
+@MainActor
 @Observable
 final class AppCoordinator {
 
