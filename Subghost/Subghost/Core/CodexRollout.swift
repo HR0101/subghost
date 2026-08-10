@@ -18,24 +18,25 @@ nonisolated enum CodexRollout {
             .appendingPathComponent(".codex/sessions", isDirectory: true)
     }
 
-    /// 直近に更新されたセッション記録のパス
+    /// 日付階層とISO日時を含むファイル名から、直近のセッション記録を選ぶ。
+    /// ファイル時刻APIを使わず、Codexの命名規則どおりの辞書順で比較する。
     static func latestPath() -> String? {
         let manager = FileManager.default
         guard let walker = manager.enumerator(
             at: sessionsDirectory,
-            includingPropertiesForKeys: [.contentModificationDateKey],
+            includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else { return nil }
 
-        var newest: (path: String, date: Date)?
+        var newestPath: String?
         for case let url as URL in walker {
             guard url.pathExtension == "jsonl" else { continue }
-            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? .distantPast
-            if newest == nil || modified > newest!.date {
-                newest = (url.path, modified)
+            if let current = newestPath {
+                if url.path > current { newestPath = url.path }
+            } else {
+                newestPath = url.path
             }
         }
-        return newest?.path
+        return newestPath
     }
 }

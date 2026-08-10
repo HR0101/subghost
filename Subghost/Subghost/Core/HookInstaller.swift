@@ -50,9 +50,11 @@ nonisolated enum HookTarget: String, CaseIterable, Identifiable, Sendable {
                     "PreToolUse", "PostToolUse",
                     "Notification", "Stop", "StopFailure", "PreCompact"]
         case .codex:
-            // 状態監視に必要なイベントだけを登録し、承認処理には介入しない。
-            return ["SessionStart", "UserPromptSubmit", "PostToolUse",
-                    "Stop", "SubagentStop"]
+            // 状態監視に必要なライフサイクルだけを登録し、承認処理には介入しない。
+            return ["SessionStart", "SessionEnd", "UserPromptSubmit",
+                    "PreToolUse", "PermissionRequest",
+                    "PostToolUse", "PreCompact", "PostCompact",
+                    "SubagentStart", "SubagentStop", "Stop"]
         }
     }
 
@@ -60,7 +62,7 @@ nonisolated enum HookTarget: String, CaseIterable, Identifiable, Sendable {
     var matcherEvents: Set<String> {
         switch self {
         case .claude: return ["PreToolUse", "PostToolUse", "Notification"]
-        case .codex: return ["PostToolUse"]
+        case .codex: return ["PreToolUse", "PermissionRequest", "PostToolUse"]
         }
     }
 
@@ -82,11 +84,8 @@ nonisolated enum HookInstaller {
     /// Subghostが追加したフックを見分けるための目印
     static let marker = "subghost-bridge"
 
-    /// 承認待ちでCLIを待たせる上限（秒）。これを超えるとCLI本来の確認画面に戻る。
-    static let permissionTimeoutSeconds = 1800
-
-    /// 承認以外のイベントは即座に返るため、短い上限で十分
-    static let normalTimeoutSeconds = 5
+    /// ローカル受信が詰まってもCLIを待たせないための上限（秒）。
+    static let normalTimeoutSeconds = 1
 
     // MARK: - パス
 
@@ -106,6 +105,35 @@ nonisolated enum HookInstaller {
         supportDirectory.appendingPathComponent("bin/subghost-bridge").path
     }
 
+    private static func preparePrivateDirectory(_ url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: url.path
+        )
+    }
+
+    /// ローカル受信サーバまでの疎通を確認する。CLI設定やセッションは変更しない。
+    static func sendHealthCheck() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = [
+            "-s", "-m", "2", "--unix-socket", socketPath,
+            "-H", "Content-Type: application/json",
+            "--data-binary", "{}", "http://localhost/health",
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw CocoaError(.fileReadUnknown)
+        }
+    }
+
 
     // MARK: - ブリッジスクリプト
 
@@ -119,8 +147,7 @@ nonisolated enum HookInstaller {
         SOCK="\(socketPath)"
         [ -S "$SOCK" ] || exit 0
 
-        # 待ち時間の上限はフック側から渡される（承認だけ長い）。
-        # ここで必ず上限を設けることで、Subghostが応答不能でもCLIを止め続けない。
+        # ここで必ず短い上限を設け、Subghostが応答不能でもCLIを止め続けない。
         TIMEOUT="${2:-\(normalTimeoutSeconds)}"
         case "$TIMEOUT" in *[!0-9]* | "") TIMEOUT=\(normalTimeoutSeconds) ;; esac
 
@@ -160,9 +187,8 @@ nonisolated enum HookInstaller {
     /// スクリプトを設置し、実行権限を与える
     static func installBridgeScript() throws {
         let binDirectory = supportDirectory.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: binDirectory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
+        try preparePrivateDirectory(supportDirectory)
+        try preparePrivateDirectory(binDirectory)
 
         let script = bridgeScript(socketPath: socketPath)
         try script.write(toFile: bridgeScriptPath, atomically: true, encoding: .utf8)
@@ -293,16 +319,16 @@ nonisolated enum HookInstaller {
         } else {
             previous = current
             if let current {
-                try FileManager.default.createDirectory(
-                    at: supportDirectory, withIntermediateDirectories: true)
+                try preparePrivateDirectory(supportDirectory)
                 try current.write(to: previousStatuslinePath, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: previousStatuslinePath.path)
             }
         }
 
         let binDirectory = supportDirectory.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: binDirectory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
+        try preparePrivateDirectory(supportDirectory)
+        try preparePrivateDirectory(binDirectory)
         try statuslineScript(socketPath: socketPath, next: previous)
             .write(toFile: statuslineScriptPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(

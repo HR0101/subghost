@@ -4,7 +4,7 @@
 //
 //  設定そのものを扱う操作（初期化・書き出し・読み込み）と、開発用の記録フラグ。
 //
-//  フック導入や ~/.zshrc の書き換えまで行うアプリなので、設定を一度まっさらに
+//  フック導入のようにアプリ外の設定も持つため、アプリ内設定を一度まっさらに
 //  戻せる導線を用意しておく。書き出し／読み込みは、環境を移すときと、
 //  不具合の報告に設定内容を添えたいときのため。
 //
@@ -19,7 +19,7 @@ nonisolated enum DiagnosticsPreferences {
     static let writeStateDumpKey = "writeStateDump"
     static let logDisplaySelectionKey = "logDisplaySelection"
 
-    /// 画面解析の入力と判定結果をファイルへ書き出す（状態判定の誤りを調べるため）
+    /// フック受信とセッション状態をファイルへ書き出す
     static var writeStateDump: Bool {
         NotchPreferences.bool(forKey: writeStateDumpKey, default: false)
     }
@@ -31,8 +31,7 @@ nonisolated enum DiagnosticsPreferences {
 
     /// 状態ダンプの書き出し先（診断画面から開けるようにする）
     static var stateDumpDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Subghost", isDirectory: true)
+        HookInstaller.supportDirectory.appendingPathComponent("run", isDirectory: true)
     }
 }
 
@@ -43,34 +42,81 @@ enum SettingsStore {
     enum SettingsError: LocalizedError {
         case noDomain
         case unreadable
+        case tooLarge
         case malformed
 
         var errorDescription: String? {
             switch self {
             case .noDomain: return "設定の保存領域を特定できませんでした。"
             case .unreadable: return "ファイルを読み込めませんでした。"
+            case .tooLarge: return "設定ファイルが大きすぎます。"
             case .malformed: return "設定ファイルの形式が正しくありません。"
             }
         }
     }
 
+    /// 設定ファイルは小さなplistのため、異常なファイルを丸ごとメモリへ載せない。
+    static let maximumImportSize = 1_048_576
+
     private static var domainName: String? {
         Bundle.main.bundleIdentifier
     }
 
-    /// 書き出し・読み込みの対象外にするキー。
-    ///
-    /// 案内の完了状態を持ち回ると、別のMacへ移したときに初回案内が出ずに
-    /// フック連携へ気づけなくなる。フック導入の有無はこのMacの実ファイルが持っており、
-    /// 設定ファイルで移しても実体が伴わない。
-    private static let nonPortableKeys: Set<String> = [
-        "hasCompletedOnboarding",
-        "activityHistory",
-        "activeSessionName",
+    /// Subghostが公開設定として扱う固定キー。
+    /// 案内、移行番号、履歴、選択中セッションなどの端末固有状態は含めない。
+    private static let fixedPortableKeys: Set<String> = [
+        "pollInterval", "preferredTerminal", DisplayPreference.userDefaultsKey,
+        NotchPreferences.hoverExpansionEnabledKey,
+        NotchPreferences.hoverDelayKey,
+        NotchPreferences.expansionAnimationDurationKey,
+        NotchPreferences.smartNotificationSuppressionKey,
+        NotchPreferences.hideInFullScreenKey,
+        NotchPreferences.hideWhenNoSessionsKey,
+        NotchPreferences.notificationDisplayDurationKey,
+        NotchPreferences.collapseOnMouseExitKey,
+        NotchPreferences.closeOnOutsideClickKey,
+        NotchPreferences.hideUnmonitorableSessionsKey,
+        NotchPreferences.hideInactiveSessionsKey,
+        NotchPreferences.inactiveSessionThresholdKey,
+        SleepPreferences.countdownKey,
+        SleepPreferences.includesErrorKey,
+        SleepPreferences.repeatsKey,
+        AppearancePreferences.panelOpacityKey,
+        AppearancePreferences.ghostAnimationEnabledKey,
+        AppearancePreferences.sessionListMaxRowsKey,
+        AppearancePreferences.expandedCornerRadiusKey,
+        AppearancePreferences.hidePreviewTextKey,
+        ActivityPreferences.limitKey,
+        ActivityPreferences.recordingEnabledKey,
+        NotificationPreferences.masterKey,
+        "soundEnabled", "soundVolume",
+        QuietHours.enabledKey, QuietHours.startKey, QuietHours.endKey,
+        UsagePreferences.codexCollectionEnabledKey,
+        UsagePreferences.warningKey, UsagePreferences.criticalKey,
+        DiagnosticsPreferences.writeStateDumpKey,
+        DiagnosticsPreferences.logDisplaySelectionKey,
     ]
 
+    /// イベントやCLIごとに生成されるキーも、現在サポートしている値だけを許可する。
+    static func isPortableKey(_ key: String) -> Bool {
+        if fixedPortableKeys.contains(key) { return true }
+        if HotkeyAction.allCases.contains(where: { $0.userDefaultsKey == key }) { return true }
+        if NotificationEvent.allCases.contains(where: { $0.enabledKey == key }) { return true }
+        if AlertSound.allCases.contains(where: { $0.enabledKey == key }) { return true }
+        if ActivityKind.allCases.contains(where: { ActivityPreferences.kindKey($0) == key }) {
+            return true
+        }
+        return CLIProfile.builtins.contains {
+            AgentMutePreferences.key(profileID: $0.id) == key
+        }
+    }
+
+    static func portableValues(from domain: [String: Any]) -> [String: Any] {
+        domain.filter { isPortableKey($0.key) }
+    }
+
     /// すべての設定を消して初期状態へ戻す。
-    /// フックの導入や ~/.zshrc の変更といったアプリ外への変更には触れない。
+    /// フックの導入といったアプリ外への変更には触れない。
     static func resetAll() throws {
         guard let domainName else { throw SettingsError.noDomain }
         UserDefaults.standard.removePersistentDomain(forName: domainName)
@@ -84,7 +130,7 @@ enum SettingsStore {
               let domain = UserDefaults.standard.persistentDomain(forName: domainName)
         else { throw SettingsError.noDomain }
 
-        let portable = domain.filter { !nonPortableKeys.contains($0.key) }
+        let portable = portableValues(from: domain)
         let data = try PropertyListSerialization.data(
             fromPropertyList: portable,
             format: .xml,
@@ -97,7 +143,12 @@ enum SettingsStore {
     /// 既存の設定へ上書きで重ねる（ファイルに無いキーは今の値のまま残す）。
     @discardableResult
     static func importSettings(from url: URL) throws -> Int {
-        guard let data = try? Data(contentsOf: url) else { throw SettingsError.unreadable }
+        guard let resourceValues = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let size = resourceValues.fileSize
+        else { throw SettingsError.unreadable }
+        guard size <= maximumImportSize else { throw SettingsError.tooLarge }
+        guard let data = try? Data(contentsOf: url), data.count <= maximumImportSize
+        else { throw SettingsError.unreadable }
         guard let plist = try? PropertyListSerialization.propertyList(
                 from: data, options: [], format: nil),
               let values = plist as? [String: Any]
@@ -105,7 +156,7 @@ enum SettingsStore {
 
         let defaults = UserDefaults.standard
         var applied = 0
-        for (key, value) in values where !nonPortableKeys.contains(key) {
+        for (key, value) in values where isPortableKey(key) {
             defaults.set(value, forKey: key)
             applied += 1
         }

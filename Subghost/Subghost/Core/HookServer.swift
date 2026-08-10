@@ -30,16 +30,20 @@ nonisolated struct HookRequest: Sendable {
         guard let raw else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, trimmed != "??", trimmed != "unknown" else { return nil }
-        return trimmed.hasPrefix("/dev/") ? trimmed : "/dev/" + trimmed
+        let device = trimmed.hasPrefix("/dev/") ? String(trimmed.dropFirst(5)) : trimmed
+        guard !device.isEmpty, device.count <= 32,
+              device.unicodeScalars.allSatisfy(CharacterSet.alphanumerics.contains)
+        else { return nil }
+        return "/dev/" + device
     }
 }
 
 // MARK: - サーバ
 
-/// フック接続を待ち受ける。応答は非同期に返せる（承認待ちのあいだ接続を保持するため）。
+/// フック接続を待ち受ける。監視専用のため、受信後は直ちに空応答を返す。
 final class HookServer: @unchecked Sendable {
 
-    /// 接続1本を表す。応答を返すまでフック側（＝CLI）は待ち続ける。
+    /// 接続1本を表す。
     final class Connection: @unchecked Sendable {
         private let fd: Int32
         private let lock = NSLock()
@@ -53,6 +57,7 @@ final class HookServer: @unchecked Sendable {
             defer { lock.unlock() }
             guard !responded else { return }
             responded = true
+            defer { close(fd) }
 
             let body = Array(json.utf8)
             let header = """
@@ -63,9 +68,26 @@ final class HookServer: @unchecked Sendable {
             \r
 
             """
-            _ = Array(header.utf8).withUnsafeBufferPointer { write(fd, $0.baseAddress, $0.count) }
-            _ = body.withUnsafeBufferPointer { write(fd, $0.baseAddress, $0.count) }
-            close(fd)
+            guard Self.writeAll(Array(header.utf8), to: fd) else { return }
+            _ = Self.writeAll(body, to: fd)
+        }
+
+        private static func writeAll(_ bytes: [UInt8], to fd: Int32) -> Bool {
+            bytes.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return true }
+                var offset = 0
+                while offset < buffer.count {
+                    let written = write(fd, base.advanced(by: offset), buffer.count - offset)
+                    if written > 0 {
+                        offset += written
+                    } else if written < 0, errno == EINTR {
+                        continue
+                    } else {
+                        return false
+                    }
+                }
+                return true
+            }
         }
 
         /// 介入しない（CLI本来の挙動に任せる）
@@ -95,6 +117,7 @@ final class HookServer: @unchecked Sendable {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        chmod(directory, 0o700)
         // 前回のソケットファイルが残っていると bind に失敗する
         try? FileManager.default.removeItem(atPath: socketPath)
 
@@ -155,7 +178,19 @@ final class HookServer: @unchecked Sendable {
                 if errno == EINTR { continue }
                 return
             }
-            // 1接続ずつ独立に処理する（承認待ちで長時間ブロックするため）
+            // 相手が途中で切断してもSIGPIPEでアプリ全体を終了させない。
+            var enabled: Int32 = 1
+            setsockopt(
+                clientFD, SOL_SOCKET, SO_NOSIGPIPE,
+                &enabled, socklen_t(MemoryLayout.size(ofValue: enabled))
+            )
+            // 不完全なローカル接続が読み取りスレッドを永久に保持しないようにする。
+            var timeout = timeval(tv_sec: 2, tv_usec: 0)
+            setsockopt(
+                clientFD, SOL_SOCKET, SO_RCVTIMEO,
+                &timeout, socklen_t(MemoryLayout.size(ofValue: timeout))
+            )
+            // 接続ごとに独立して読み、遅いクライアントが他のイベントを妨げないようにする
             Thread.detachNewThread { [weak self] in
                 self?.handle(clientFD: clientFD)
             }
@@ -188,6 +223,8 @@ final class HookServer: @unchecked Sendable {
 
     /// ヘッダを読み、Content-Length分の本文まで読み切る
     private static func readRequest(fd: Int32) -> Data? {
+        let maximumHeaderSize = 65_536
+        let maximumBodySize = 1_048_576
         var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
         // ヘッダ終端まで
@@ -195,15 +232,22 @@ final class HookServer: @unchecked Sendable {
             let n = read(fd, &chunk, chunk.count)
             guard n > 0 else { return buffer.isEmpty ? nil : buffer }
             buffer.append(contentsOf: chunk[0..<n])
-            if buffer.count > 1_048_576 { return buffer }   // 異常に大きい入力は打ち切る
+            if buffer.count > maximumHeaderSize { return nil }
         }
         guard let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) else { return buffer }
 
         let headerText = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
-        let contentLength = headerText
-            .split(separator: "\r\n")
-            .first { $0.lowercased().hasPrefix("content-length:") }
-            .flatMap { Int($0.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+        var contentLength = 0
+        for line in headerText.split(separator: "\r\n") {
+            let fields = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard fields.first?.lowercased() == "content-length" else { continue }
+            guard fields.count == 2,
+                  let parsed = Int(fields[1].trimmingCharacters(in: .whitespaces))
+            else { return nil }
+            contentLength = parsed
+            break
+        }
+        guard contentLength >= 0, contentLength <= maximumBodySize else { return nil }
 
         var bodyCount = buffer.count - headerEnd.upperBound
         while bodyCount < contentLength {
@@ -211,8 +255,10 @@ final class HookServer: @unchecked Sendable {
             guard n > 0 else { break }
             buffer.append(contentsOf: chunk[0..<n])
             bodyCount += n
+            if bodyCount > maximumBodySize { return nil }
         }
-        return buffer
+        guard bodyCount >= contentLength else { return nil }
+        return Data(buffer.prefix(headerEnd.upperBound + contentLength))
     }
 }
 
@@ -253,7 +299,10 @@ nonisolated enum HTTPRequestParser {
 
         // リクエスト行: "POST /hook?source=claude HTTP/1.1"
         let requestLine = lines.removeFirst().split(separator: " ")
-        guard requestLine.count >= 2 else { return nil }
+        guard requestLine.count == 3,
+              requestLine[0] == "POST",
+              requestLine[2].hasPrefix("HTTP/1.")
+        else { return nil }
         let target = String(requestLine[1])
 
         let parts = target.split(separator: "?", maxSplits: 1)

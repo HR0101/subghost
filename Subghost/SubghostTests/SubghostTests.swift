@@ -107,42 +107,20 @@ struct PixelGhostAnimationTests {
         #expect(!GhostSprite.shouldAnimate(for: .idle))
         #expect(!GhostSprite.shouldAnimate(for: .completed))
         #expect(!GhostSprite.shouldAnimate(for: .error))
-        #expect(!GhostSprite.shouldAnimate(for: .awaitingApproval))
-        #expect(!GhostSprite.shouldAnimate(for: .awaitingAnswer))
     }
 }
 
 struct SessionsListLayoutTests {
     @Test func 少数のセッションでは行数に合わせた高さになる() {
         #expect(NotchLayout.sessionsListHeight(count: 0) == 0)
-        #expect(NotchLayout.sessionsListHeight(count: 2) == 136)
+        #expect(
+            NotchLayout.sessionsListHeight(count: 2)
+                == NotchLayout.sessionRowEstimatedHeight * 2
+        )
     }
 
     @Test func 多数のセッションでも一覧の最大高を超えない() {
         #expect(NotchLayout.sessionsListHeight(count: 100) == NotchLayout.sessionsListMaxHeight)
-    }
-}
-
-struct PromptDraftStoreTests {
-    @Test func セッションを切り替えても下書きが混ざらない() {
-        var drafts = PromptDraftStore()
-
-        drafts.setText("Claudeへの質問", for: "101:/dev/ttys001")
-        drafts.setText("Codexへの依頼\n二行目", for: "202:/dev/ttys002")
-
-        #expect(drafts.text(for: "101:/dev/ttys001") == "Claudeへの質問")
-        #expect(drafts.text(for: "202:/dev/ttys002") == "Codexへの依頼\n二行目")
-    }
-
-    @Test func 送信したセッションの下書きだけを消せる() {
-        var drafts = PromptDraftStore()
-        drafts.setText("送信する内容", for: "101:/dev/ttys001")
-        drafts.setText("残す内容", for: "202:/dev/ttys002")
-
-        drafts.setText("", for: "101:/dev/ttys001")
-
-        #expect(drafts.text(for: "101:/dev/ttys001").isEmpty)
-        #expect(drafts.text(for: "202:/dev/ttys002") == "残す内容")
     }
 }
 
@@ -184,6 +162,20 @@ struct ActivityStoreTests {
         #expect(store.entries.isEmpty)
     }
 
+    @Test func プライバシー設定時は保存済み本文を復元不能にする() {
+        let suiteName = "SubghostTests.Activity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ActivityStore(defaults: defaults, storageKey: "history")
+        store.append(makeEntry(summary: "秘密の本文"))
+
+        store.redactSummaries()
+
+        #expect(store.entries.first?.summary == "（本文は非表示）")
+        let restored = ActivityStore(defaults: defaults, storageKey: "history")
+        #expect(restored.entries.first?.summary == "（本文は非表示）")
+    }
+
     private func makeEntry(summary: String) -> ActivityEntry {
         ActivityEntry(
             createdAt: Date(timeIntervalSince1970: 100),
@@ -202,376 +194,24 @@ struct ActivityStoreTests {
 
 struct NotificationRoutingTests {
 
-    @Test func 通知ペイロードからセッション情報を復元できる() {
-        let original = NotificationSessionReference(tty: "/dev/ttys004", pid: 100)
-
-        let restored = NotificationSessionReference(userInfo: original.userInfo)
-
-        #expect(restored == original)
+    private func session(pid: Int32 = 42, tty: String = "/dev/ttys001") -> SessionInfo {
+        SessionInfo(agent: DiscoveredAgent(pid: pid, tty: tty, profile: .claude))
     }
 
-    @Test func 同じTTYでもPIDが違えば別セッションとして管理する() {
-        let oldSession = NotificationSessionReference(tty: "/dev/ttys004", pid: 100)
-        let newSession = NotificationSessionReference(tty: "/dev/ttys004", pid: 200)
-
-        #expect(oldSession != newSession)
+    @Test func 通知はPIDとTTYの両方が一致したセッションだけを指す() {
+        let original = session()
+        let reference = NotificationSessionReference(session: original)
+        #expect(reference.matches(original))
+        #expect(!reference.matches(session(pid: 99)))
+        #expect(!reference.matches(session(tty: "/dev/ttys009")))
     }
 
-    @Test func 新しい質問通知を発行すると古いトークンは無効になる() {
-        let session = NotificationSessionReference(tty: "/dev/ttys004", pid: 100)
-        var registry = ChoiceNotificationRegistry()
-
-        let oldToken = registry.issue(for: session, token: "old")
-        let newToken = registry.issue(for: session, token: "new")
-
-        #expect(!registry.isCurrent(oldToken, for: session))
-        #expect(registry.isCurrent(newToken, for: session))
-    }
-
-    @Test func 通知トークンは一度だけ使用できる() {
-        let session = NotificationSessionReference(tty: "/dev/ttys004", pid: 100)
-        var registry = ChoiceNotificationRegistry()
-        let token = registry.issue(for: session, token: "single-use")
-
-        let firstResult = registry.consume(token, for: session)
-        let secondResult = registry.consume(token, for: session)
-
-        #expect(firstResult)
-        #expect(!secondResult)
+    @Test func 通知情報を安全に往復できる() {
+        let reference = NotificationSessionReference(session: session())
+        #expect(NotificationSessionReference(userInfo: reference.userInfo) == reference)
+        #expect(NotificationSessionReference(userInfo: [:]) == nil)
     }
 }
-
-struct StateDetectorTests {
-
-    private func makeDetector() -> StateDetector {
-        var detector = StateDetector(profile: .claude)
-        detector.stableInterval = 1.5
-        detector.completedHoldInterval = 8.0
-        return detector
-    }
-
-    @Test func 初回取り込みは基準値でありイベントを出さない() {
-        var detector = makeDetector()
-        let event = detector.ingest(rawText: "何らかの初期画面", at: Date(timeIntervalSince1970: 0))
-        #expect(event == .none)
-        #expect(detector.state == .idle)
-    }
-
-    @Test func 出力伸長でthinkingへ遷移する() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "画面A", at: t0)
-        let event = detector.ingest(rawText: "画面A\n新しい出力", at: t0.addingTimeInterval(0.8))
-        #expect(event == .becameThinking)
-        #expect(detector.state == .thinking)
-    }
-
-    @Test func 静止しプロンプト記号が現れたらcompletedになる() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "画面A", at: t0)
-        _ = detector.ingest(rawText: "画面A\n応答本文です", at: t0.addingTimeInterval(0.8))
-        // まだ静止時間が足りない
-        let final = "画面A\n応答本文です\n╭──╮\n│ > │\n╰──╯"
-        let early = detector.ingest(rawText: final, at: t0.addingTimeInterval(1.6))
-        #expect(early == .becameThinking || early == .none)  // テキスト変化→thinking維持
-        // 1.5秒静止後
-        let event = detector.ingest(rawText: final, at: t0.addingTimeInterval(3.5))
-        guard case .becameCompleted(let preview) = event else {
-            Issue.record("completedにならなかった: \(event)")
-            return
-        }
-        #expect(detector.state == .completed)
-        #expect(preview.contains { $0.contains("応答本文です") })
-    }
-
-    @Test func busy表示が残っている間はthinkingを維持する() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "画面A", at: t0)
-        let busy = "画面A\n✻ Thinking… (esc to interrupt)\n│ > │"
-        _ = detector.ingest(rawText: busy, at: t0.addingTimeInterval(0.8))
-        let event = detector.ingest(rawText: busy, at: t0.addingTimeInterval(5.0))
-        #expect(event == .none)
-        #expect(detector.state == .thinking)
-    }
-
-    @Test func 過去のWorking表示が画面上部に残っていても入力待ちなら完了になる() {
-        var detector = StateDetector(profile: .codex)
-        detector.stableInterval = 1.5
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "初期画面", at: t0)
-
-        // capture-paneの可視領域上部に以前の作業表示が残り、末尾は現在の入力待ち。
-        // 画面全体へbusyPatternを当てると、先頭のWorkingを拾って永久にthinkingになる。
-        let final = (["• Working (12s • Esc to interrupt)"]
-            + (1...12).map { "完了した応答の行\($0)" }
-            + ["›"])
-            .joined(separator: "\n")
-
-        _ = detector.ingest(rawText: final, at: t0.addingTimeInterval(0.8))
-        let event = detector.ingest(rawText: final, at: t0.addingTimeInterval(3.0))
-        guard case .becameCompleted = event else {
-            Issue.record("過去のWorking表示に引きずられた: \(event)")
-            return
-        }
-        #expect(detector.state == .completed)
-    }
-
-    @Test func エラーパターンでerrorへ遷移する() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "画面A", at: t0)
-        _ = detector.ingest(rawText: "画面A\n出力中", at: t0.addingTimeInterval(0.8))
-        let event = detector.ingest(rawText: "画面A\nAPI Error: rate limited", at: t0.addingTimeInterval(1.6))
-        guard case .becameError = event else {
-            Issue.record("errorにならなかった: \(event)")
-            return
-        }
-        #expect(detector.state == .error)
-    }
-
-    @Test func completedは一定時間後にidleへ戻る() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "A", at: t0)
-        _ = detector.ingest(rawText: "A\n本文", at: t0.addingTimeInterval(0.8))
-        let final = "A\n本文\n│ > │"
-        _ = detector.ingest(rawText: final, at: t0.addingTimeInterval(1.6))
-        _ = detector.ingest(rawText: final, at: t0.addingTimeInterval(4.0))
-        #expect(detector.state == .completed)
-        let event = detector.ingest(rawText: final, at: t0.addingTimeInterval(13.0))
-        #expect(event == .becameIdle)
-        #expect(detector.state == .idle)
-    }
-
-    /// 完了後の画面は、ステータス行やヒント行が差し替わるだけでも「変化」する。
-    /// それを作業再開とみなして再び完了判定すると、1回の応答に対して通知が
-    /// 何度も出てしまう（実機で確認した不具合）。
-    @Test func 完了後の再描画で同じ応答を二度完了として知らせない() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "A", at: t0)
-        _ = detector.ingest(rawText: "A\n応答本文です", at: t0.addingTimeInterval(0.8))
-        let final = "A\n応答本文です\n│ > │"
-        _ = detector.ingest(rawText: final, at: t0.addingTimeInterval(1.6))
-        let first = detector.ingest(rawText: final, at: t0.addingTimeInterval(4.0))
-        guard case .becameCompleted = first else {
-            Issue.record("1回目が完了にならなかった: \(first)")
-            return
-        }
-
-        // ステータス行だけが差し替わる（本文は同じ）。busy表示は出ない。
-        let redrawn = "A\n応答本文です\n│ > │\n  ⏸ manual mode on · gh auth login for PR status"
-        let resumed = detector.ingest(rawText: redrawn, at: t0.addingTimeInterval(5.0))
-        #expect(resumed == .becameThinking)
-
-        // 通常の静止時間では完了に戻さない
-        #expect(detector.ingest(rawText: redrawn, at: t0.addingTimeInterval(7.0)) == .none)
-
-        // 十分に静止しても、本文が同じなら完了としては知らせず待機へ戻すだけ
-        let again = detector.ingest(rawText: redrawn, at: t0.addingTimeInterval(20.0))
-        #expect(again == .becameIdle)
-        #expect(detector.state == .idle)
-    }
-
-    /// 再描画ではなく本当に次の応答が来た場合は、通常どおり完了を知らせる。
-    @Test func 完了後に新しい応答が来たら改めて完了を知らせる() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "A", at: t0)
-        _ = detector.ingest(rawText: "A\n1つ目の応答", at: t0.addingTimeInterval(0.8))
-        let first = "A\n1つ目の応答\n│ > │"
-        _ = detector.ingest(rawText: first, at: t0.addingTimeInterval(1.6))
-        _ = detector.ingest(rawText: first, at: t0.addingTimeInterval(4.0))
-        #expect(detector.state == .completed)
-
-        // busy表示＝実際に作業している裏付けがあるので、再描画扱いにはしない
-        let busy = "A\n1つ目の応答\n✻ Thinking… (esc to interrupt)\n│ > │"
-        _ = detector.ingest(rawText: busy, at: t0.addingTimeInterval(5.0))
-        #expect(detector.state == .thinking)
-
-        let second = "A\n1つ目の応答\n2つ目の応答\n│ > │"
-        _ = detector.ingest(rawText: second, at: t0.addingTimeInterval(6.0))
-        let event = detector.ingest(rawText: second, at: t0.addingTimeInterval(8.0))
-        guard case .becameCompleted(let preview) = event else {
-            Issue.record("2つ目の応答が完了にならなかった: \(event)")
-            return
-        }
-        #expect(preview.contains { $0.contains("2つ目の応答") })
-    }
-
-    @Test func プロンプト送信でthinkingへ遷移する() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "A", at: t0)
-        let event = detector.noteUserSentPrompt(at: t0.addingTimeInterval(1.0))
-        #expect(event == .becameThinking)
-        #expect(detector.state == .thinking)
-    }
-
-    @Test func プロンプト記号が検出できなくても長時間静止でidleへ戻る() {
-        var detector = makeDetector()
-        detector.idleFallbackInterval = 30.0
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "画面A", at: t0)
-        let stuck = "画面A\nプロンプト記号のない出力"
-        _ = detector.ingest(rawText: stuck, at: t0.addingTimeInterval(0.8))
-        #expect(detector.state == .thinking)
-        // 30秒未満はthinkingのまま
-        let early = detector.ingest(rawText: stuck, at: t0.addingTimeInterval(20.0))
-        #expect(early == .none)
-        #expect(detector.state == .thinking)
-        // 30秒静止でidleへ
-        let event = detector.ingest(rawText: stuck, at: t0.addingTimeInterval(31.0))
-        #expect(event == .becameIdle)
-        #expect(detector.state == .idle)
-    }
-
-    @Test func 新UIの山括弧プロンプトとステータスバーでも完了を検出する() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "初期画面", at: t0)
-        _ = detector.ingest(
-            rawText: "初期画面\n✻ Baking… (esc to interrupt · 12s)",
-            at: t0.addingTimeInterval(0.8))
-        #expect(detector.state == .thinking)
-
-        // 実機のClaude Code画面: ❯プロンプト＋横罫線＋ステータスバー
-        let final = """
-        ⏺ 修正が完了しました。
-          テストも追加済みです。
-
-        ✢ Worked for 6m 23s
-
-        ──────────────────────────────
-        ❯
-        ──────────────────────────────
-          Sonnet 5 · effort xhigh in subghost │ 5h [██████░░░░] 27% → 15:40
-          ⏵⏵ auto mode on (shift+tab to cycle) · gh auth login for PR status
-        """
-        _ = detector.ingest(rawText: final, at: t0.addingTimeInterval(1.6))
-        let event = detector.ingest(rawText: final, at: t0.addingTimeInterval(3.5))
-        guard case .becameCompleted(let preview) = event else {
-            Issue.record("completedにならなかった: \(event)")
-            return
-        }
-        #expect(detector.state == .completed)
-        #expect(preview.contains { $0.contains("修正が完了しました") })
-        #expect(!preview.contains { $0.contains("Worked for") })
-        #expect(!preview.contains { $0.contains("Sonnet") })
-        #expect(!preview.contains { $0.contains("auto mode") })
-    }
-
-    /// 実機のClaude Codeの作業中画面（capture-paneの実出力）。
-    /// 動詞はランダムで "esc to interrupt" は出ない。経過時間とトークン数だけが動くが、
-    /// それらは clean() で除去されるため画面は静止して見える。
-    private func 作業中画面(経過: String, トークン: String) -> String {
-        """
-        ⏺ Reading 1 file, running 2 shell commands · 2s…
-          ⎿  $ for s in 0 1 2; do echo hi; done
-
-        ✢ Drizzling… (\(経過) · ↓ \(トークン) tokens)
-          ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
-                                                                 ◉ xhigh · /effort
-        ─────────────────────────────────────────────
-        ❯
-        ─────────────────────────────────────────────
-          Opus 4.8 · effort xhigh in subghost  │  5h [█░░░░░░░░░]  14% → 18:00
-          ⏵⏵ auto mode on (shift+tab to cycle) · gh auth login for PR status
-        """
-    }
-
-    @Test func ランダムな動詞の作業中表示でも完了と誤判定しない() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "初期画面", at: t0)
-        _ = detector.ingest(rawText: 作業中画面(経過: "35s", トークン: "1.3k"), at: t0.addingTimeInterval(0.8))
-        #expect(detector.state == .thinking)
-
-        // ツール実行の待ち時間中は経過秒数しか動かず、cleanすると前回と同一のテキストになる。
-        // ❯プロンプトは常時表示されているため、busyを取りこぼすと completed へ倒れてしまう。
-        let 静止 = 作業中画面(経過: "58s", トークン: "1.3k")
-        #expect(StateDetector.clean(静止, profile: .claude)
-            == StateDetector.clean(作業中画面(経過: "35s", トークン: "1.3k"), profile: .claude))
-
-        #expect(detector.ingest(rawText: 静止, at: t0.addingTimeInterval(3.0)) == .none)
-        #expect(detector.ingest(rawText: 静止, at: t0.addingTimeInterval(8.0)) == .none)
-        #expect(detector.state == .thinking)
-    }
-
-    @Test func 誤ってcompletedになっても作業中表示で生成中へ戻る() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "初期画面", at: t0)
-        _ = detector.ingest(rawText: "初期画面\n応答本文です\n❯", at: t0.addingTimeInterval(0.8))
-        _ = detector.ingest(rawText: "初期画面\n応答本文です\n❯", at: t0.addingTimeInterval(3.0))
-        #expect(detector.state == .completed)
-
-        let event = detector.ingest(
-            rawText: 作業中画面(経過: "5s", トークン: "0.2k"), at: t0.addingTimeInterval(4.0))
-        #expect(event == .becameThinking)
-        #expect(detector.state == .thinking)
-    }
-
-    @Test func 作業中の状態表示行はチラ見せに含めない() {
-        let preview = StateDetector.extractPreview(
-            from: 作業中画面(経過: "35s", トークン: "1.3k"), profile: .claude)
-        #expect(!preview.contains { $0.contains("Drizzling") })
-        #expect(!preview.contains { $0.contains("Tip:") })
-        #expect(!preview.contains { $0.contains("/effort") })
-    }
-
-    @Test func Claudeの新規タスク案内を返信として表示しない() {
-        let screen = """
-        ⏺ 修正が完了しました。
-          日本語の返信本文です。
-
-        ─────────────────────────────────────────────
-        new task? /clear to save 499.5k tokens
-        ❯
-        ─────────────────────────────────────────────
-          Opus 4.8 · effort xhigh in subghost
-        """
-        let preview = StateDetector.extractPreview(from: screen, profile: .claude)
-        #expect(preview.contains { $0.contains("修正が完了しました") })
-        #expect(preview.contains { $0.contains("日本語の返信本文です") })
-        #expect(!preview.contains { $0.contains("new task?") })
-        #expect(!preview.contains { $0.contains("tokens") })
-    }
-
-    @Test func スピナーの変化だけではthinkingにならない() {
-        var detector = makeDetector()
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "画面 ⠋", at: t0)
-        let event = detector.ingest(rawText: "画面 ⠙", at: t0.addingTimeInterval(0.8))
-        #expect(event == .none)
-        #expect(detector.state == .idle)
-    }
-}
-
-struct TextProcessingTests {
-    @Test func プレビューは枠線とプロンプト行を除いた本文を返す() {
-        let raw = """
-        古い出力
-
-        これが応答の本文です。
-        二行目の内容。
-
-        ╭────────────╮
-        │ >          │
-        ╰────────────╯
-          ? for shortcuts
-        """
-        let preview = StateDetector.extractPreview(from: raw, profile: .claude)
-        #expect(!preview.isEmpty)
-        #expect(preview.contains { $0.contains("これが応答の本文です") })
-        #expect(!preview.contains { $0.contains("shortcuts") })
-    }
-
-}
-
-// MARK: - ゼロコンフィグ検出
 
 struct AgentDiscoveryTests {
 
@@ -689,14 +329,12 @@ struct AgentDiscoveryTests {
     // MARK: - 一覧に出すかどうか
 
     private func 表示判断入力(
-        needsUserResponse: Bool = false,
         isActiveTarget: Bool = false,
         isMonitorable: Bool = true,
         activityAt: Date,
         hiddenAtActivity: Date? = nil
     ) -> SessionVisibility.Input {
         SessionVisibility.Input(
-            needsUserResponse: needsUserResponse,
             isActiveTarget: isActiveTarget,
             isMonitorable: isMonitorable,
             activityAt: activityAt,
@@ -728,19 +366,7 @@ struct AgentDiscoveryTests {
         #expect(!SessionVisibility.isVisible(input, rules: 既定ルール, at: now))
     }
 
-    /// 隠す設定より見逃し防止を優先する。答えるまでCLIが止まってしまうため。
-    @Test func 回答待ちのセッションは放置扱いでも必ず表示する() {
-        let now = Date(timeIntervalSince1970: 100_000)
-        let input = 表示判断入力(
-            needsUserResponse: true,
-            isMonitorable: false,
-            activityAt: now.addingTimeInterval(-100_000),
-            hiddenAtActivity: now
-        )
-        #expect(SessionVisibility.isVisible(input, rules: 既定ルール, at: now))
-    }
-
-    @Test func 送信先に選んでいるセッションは必ず表示する() {
+    @Test func 選択中のセッションは必ず表示する() {
         let now = Date(timeIntervalSince1970: 100_000)
         let input = 表示判断入力(
             isActiveTarget: true,
@@ -797,14 +423,33 @@ struct AgentDiscoveryTests {
     @Test func フック接続なら状態を監視できるが送信はできない() {
         let info = セッション(hookID: "abc")
         #expect(info.capability == .monitorOnly)
-        #expect(!info.canSendPrompt)
         #expect(info.isMonitorable)
+    }
+
+    @Test func 同じTTYでもPIDが違えば別セッションとして識別する() {
+        let first = SessionInfo(agent: DiscoveredAgent(
+            pid: 101, tty: "/dev/ttys006", profile: .claude))
+        let second = SessionInfo(agent: DiscoveredAgent(
+            pid: 202, tty: "/dev/ttys006", profile: .claude))
+        #expect(first.id != second.id)
+    }
+
+    @Test func TTYなしのフックセッションも一意に識別する() {
+        let info = SessionInfo(
+            hookSource: "codex",
+            sessionID: "session-123",
+            pid: nil,
+            tty: nil,
+            cwd: "/tmp/work"
+        )
+        #expect(info.id == "codex:hook:session-123")
+        #expect(info.shortName == "バックグラウンド")
+        #expect(info.capability == .monitorOnly)
     }
 
     @Test func フックが無ければ検出のみ() {
         let info = セッション(hookID: nil)
         #expect(info.capability == .detectedOnly)
-        #expect(!info.canSendPrompt)
         #expect(!info.isMonitorable)
     }
 
@@ -1170,83 +815,38 @@ struct HookEventTests {
         try! JSONSerialization.data(withJSONObject: dict)
     }
 
-    @Test func 権限リクエストを解釈する() {
+    @Test func フック本文は状態監視に必要な最小情報だけを解釈する() {
         let data = payload([
             "hook_event_name": "PermissionRequest",
             "session_id": "abc-123",
             "cwd": "/Users/me/Create App/subghost",
             "tool_name": "Bash",
-            "tool_input": ["command": "rm -rf build", "description": "ビルド成果物を削除"],
+            "tool_input": ["command": "secret command"],
+            "transcript_path": "/tmp/transcript.jsonl",
         ])
         guard let event = HookEventDecoder.decode(data) else {
-            Issue.record("解釈できなかった"); return
+            Issue.record("解釈できなかった")
+            return
         }
         #expect(event.kind == .permissionRequest)
         #expect(event.sessionID == "abc-123")
         #expect(event.projectName == "subghost")
-        #expect(event.toolSummary == "rm -rf build")
-        #expect(event.title.contains("Bash"))
-        #expect(!event.kind.isBlocking)
+        #expect(event.transcriptPath == "/tmp/transcript.jsonl")
         #expect(event.kind.resultingState == .thinking)
     }
 
-    @Test func AskUserQuestionの権限リクエストから選択肢を取り出す() {
-        // tool_input に questions/options が入っているため、記録を読まずに選択肢を作れる
-        let data = payload([
-            "hook_event_name": "PermissionRequest",
-            "session_id": "s1",
-            "tool_name": "AskUserQuestion",
-            "tool_input": ["questions": [[
-                "question": "どうしますか?",
-                "options": [["label": "続ける"], ["label": "やめる"]],
-            ]]],
-        ])
-        guard let event = HookEventDecoder.decode(data) else {
-            Issue.record("解釈できなかった"); return
-        }
-        #expect(event.toolName == "AskUserQuestion")
-        #expect(event.embeddedQuestion?.title == "どうしますか?")
-        #expect(event.embeddedQuestion?.options.map(\.label) == ["続ける", "やめる"])
-    }
-
-    @Test func AskUserQuestionの複数の問いを全て取り出す() {
-        // 1問目だけ取り出すと、2問目以降がノッチに出ないまま終わってしまう
-        let data = payload([
-            "hook_event_name": "PermissionRequest",
-            "session_id": "s1",
-            "tool_name": "AskUserQuestion",
-            "tool_input": ["questions": [
-                ["question": "1問目", "options": [["label": "A"], ["label": "B"]]],
-                ["question": "2問目",
-                 "multiSelect": true,
-                 "options": [["label": "C"], ["label": "D"]]],
-            ]],
-        ])
-        guard let event = HookEventDecoder.decode(data) else {
-            Issue.record("解釈できなかった"); return
-        }
-        #expect(event.embeddedQuestions.count == 2)
-        #expect(event.embeddedQuestions.map(\.title) == ["1問目", "2問目"])
-        #expect(event.embeddedQuestions[1].isMultiSelect)
-        // 先頭を返す互換プロパティは1問目を指したまま
-        #expect(event.embeddedQuestion?.title == "1問目")
-    }
-
-    @Test func 各イベントが状態に対応する() {
+    @Test func 完了と失敗を別の状態として扱う() {
         #expect(HookEventKind.stop.resultingState == .completed)
-        #expect(HookEventKind.stopFailure.resultingState == .completed)
-        #expect(HookEventKind.notification.resultingState == .thinking)
+        #expect(HookEventKind.stopFailure.resultingState == .error)
         #expect(HookEventKind.preToolUse.resultingState == .thinking)
-        // ブロックするのは権限リクエストだけ
-        #expect(!HookEventKind.stop.isBlocking)
-        #expect(!HookEventKind.notification.isBlocking)
+        #expect(HookEventKind.subagentStop.resultingState == .thinking)
+        #expect(HookEventKind.preCompact.resultingState == nil)
     }
 
-    @Test func イベント名の表記ゆれを吸収する() {
-        // CodexのようにスネークケースでもPascalCaseでも解釈できること
-        #expect(HookEventKind(normalizing: "PermissionRequest") == .permissionRequest)
+    @Test func 現行Codexイベントを正規化できる() {
         #expect(HookEventKind(normalizing: "permission_request") == .permissionRequest)
-        #expect(HookEventKind(normalizing: "subagent_stop") == .subagentStop)
+        #expect(HookEventKind(normalizing: "post_compact") == .postCompact)
+        #expect(HookEventKind(normalizing: "subagent_start") == .subagentStart)
         #expect(HookEventKind(normalizing: "STOP") == .stop)
     }
 
@@ -1255,48 +855,37 @@ struct HookEventTests {
         #expect(HookEventDecoder.decode(alternative)?.kind == .stop)
     }
 
-    @Test func サブエージェント終了では完了扱いにしない() {
-        // 親エージェントはまだ作業中のため、通知を出してはいけない
-        #expect(HookEventKind.subagentStop.resultingState == .thinking)
-    }
-
-    @Test func 未知のイベント名は解釈しない() {
-        let data = payload(["hook_event_name": "SomethingNew", "session_id": "x"])
-        #expect(HookEventDecoder.decode(data) == nil)
-    }
-
-    @Test func 壊れたJSONは解釈しない() {
-        #expect(HookEventDecoder.decode(Data("これはJSONではない".utf8)) == nil)
+    @Test func 未知または壊れたイベントは解釈しない() {
+        #expect(HookEventDecoder.decode(payload([
+            "hook_event_name": "SomethingNew", "session_id": "x"
+        ])) == nil)
+        #expect(HookEventDecoder.decode(Data("not json".utf8)) == nil)
         #expect(HookEventDecoder.decode(Data()) == nil)
     }
 
-    @Test func 長すぎる要約は切り詰める() {
-        let long = String(repeating: "a", count: 300)
-        let summary = HookEventDecoder.summarize(toolInput: ["command": long], maxLength: 50)
-        #expect(summary?.count == 51)   // 50文字 + 省略記号
-        #expect(summary?.hasSuffix("…") == true)
-    }
-
-    @Test func 判定JSONを生成する() {
-        #expect(HookDecision.passthrough.json == "{}")
-
-        let allowData = Data(HookDecision.allow.json.utf8)
-        let allowRoot = try? JSONSerialization.jsonObject(with: allowData) as? [String: Any]
-        let allowOutput = allowRoot?["hookSpecificOutput"] as? [String: Any]
-        let allowDecision = allowOutput?["decision"] as? [String: Any]
-        #expect(allowDecision?["behavior"] as? String == "allow")
-        #expect(allowOutput?["permissionDecision"] == nil)
-
-        let denyData = Data(HookDecision.deny(reason: "危険").json.utf8)
-        let denyRoot = try? JSONSerialization.jsonObject(with: denyData) as? [String: Any]
-        let denyOutput = denyRoot?["hookSpecificOutput"] as? [String: Any]
-        let denyDecision = denyOutput?["decision"] as? [String: Any]
-        #expect(denyDecision?["behavior"] as? String == "deny")
-        #expect(denyDecision?["message"] as? String == "危険")
+    @Test func 監視フックはCLIの判断をブロックしない() {
+        #expect(HookEventKind.allCases.allSatisfy { !$0.isBlocking })
     }
 }
 
 struct HookInstallerTests {
+
+    @Test func ブリッジはtmuxも入力送信も起動しない() {
+        let script = HookInstaller.bridgeScript(socketPath: "/tmp/subghost.sock")
+        #expect(!script.contains("tmux"))
+        #expect(!script.contains("send-keys"))
+        #expect(!script.contains(".zshrc"))
+        #expect(script.contains("curl"))
+        #expect(script.contains("${2:-\(HookInstaller.normalTimeoutSeconds)}"))
+    }
+
+    @Test func Codexには現行の監視イベントだけを登録する() {
+        #expect(HookTarget.codex.events.contains("SessionStart"))
+        #expect(HookTarget.codex.events.contains("SessionEnd"))
+        #expect(HookTarget.codex.events.contains("Stop"))
+        #expect(HookTarget.codex.events.contains("PermissionRequest"))
+        #expect(HookTarget.codex.events.contains("UserPromptSubmit"))
+    }
 
     @Test func フックを追記しても既存設定を壊さない() {
         let original: [String: Any] = [
@@ -1343,21 +932,21 @@ struct HookInstallerTests {
         let root = HookInstaller.addHooks(to: [:], scriptPath: "/tmp/b", target: .codex)
         let hooks = root["hooks"] as? [String: Any]
 
-        #expect(hooks?["PermissionRequest"] == nil)
+        #expect(hooks?["PermissionRequest"] != nil)
         #expect(hooks?["SubagentStop"] != nil)
-        // CodexにはNotification / PreToolUse / SessionEnd が無い
+        // NotificationはCodexの設定イベントではない
         #expect(hooks?["Notification"] == nil)
-        #expect(hooks?["PreToolUse"] == nil)
-        #expect(hooks?["SessionEnd"] == nil)
+        #expect(hooks?["PreToolUse"] != nil)
+        #expect(hooks?["SessionEnd"] != nil)
         #expect(hooks?.count == HookTarget.codex.events.count)
     }
 
     @Test func CLIごとにsourceを渡し分ける() {
         // ブリッジは第1引数でどのCLI由来かを判別するため、渡し分けが必須
         #expect(HookInstaller.hookCommand(scriptPath: "/tmp/b", source: "claude")
-            .hasSuffix("subghost '/tmp/b' 'claude' '5' # subghost-bridge"))
+            .hasSuffix("subghost '/tmp/b' 'claude' '\(HookInstaller.normalTimeoutSeconds)' # subghost-bridge"))
         #expect(HookInstaller.hookCommand(scriptPath: "/tmp/b", source: "codex")
-            .hasSuffix("subghost '/tmp/b' 'codex' '5' # subghost-bridge"))
+            .hasSuffix("subghost '/tmp/b' 'codex' '\(HookInstaller.normalTimeoutSeconds)' # subghost-bridge"))
 
         // 実際に登録されるコマンドにも反映されていること
         let codex = HookInstaller.addHooks(to: [:], scriptPath: "/tmp/b", target: .codex)
@@ -1425,7 +1014,7 @@ struct HookInstallerTests {
             let inner = matchers?.first?["hooks"] as? [[String: Any]]
             return inner?.first?["timeout"] as? Int
         }
-        #expect(timeout("PermissionRequest") == nil)
+        #expect(timeout("PermissionRequest") == HookInstaller.normalTimeoutSeconds)
         #expect(timeout("Stop") == HookInstaller.normalTimeoutSeconds)
     }
 
@@ -1477,155 +1066,39 @@ struct ConversationLocatorTests {
         #expect(ConversationLocator.parseWorkingDirectory("p3514\nfcwd\n") == nil)
     }
 
-    @Test func 作業ディレクトリをClaudeのプロジェクト名へ変換する() {
-        // スラッシュと空白を "-" に置換する（実測の命名規則）
-        #expect(ConversationLocator.claudeProjectDirName(cwd: "/Users/Rhara/Create App/subghost")
-                == "-Users-Rhara-Create-App-subghost")
-        #expect(ConversationLocator.claudeProjectDirName(cwd: "/tmp/x")
-                == "-tmp-x")
-    }
 }
 
 struct TranscriptReaderTests {
 
-    /// 実際のセッション記録と同じ形
-    private let jsonl = """
-    {"type":"user","message":{"role":"user","content":[{"type":"text","text":"やって"}]}}
-    {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"question":"どれから手をつけますか?","header":"次の作業","options":[{"label":"コミットする","description":"未コミットの変更を区切る"},{"label":"不具合を直す","description":"表示先の問題"},{"label":"検証する","description":"Codexで確認"}]}]}}]}}
-    """
-
-    @Test func 記録から質問と選択肢を復元する() {
-        guard let choice = TranscriptReader.latestQuestion(inJSONLines: jsonl) else {
-            Issue.record("復元できなかった"); return
-        }
-        #expect(choice.kind == .question)
-        #expect(choice.title == "どれから手をつけますか?")
-        #expect(choice.options.map(\.label) == ["コミットする", "不具合を直す", "検証する"])
-        #expect(choice.options.map(\.keystroke) == ["1", "2", "3"])
-    }
-
-    @Test func 記録から応答本文を取り出す() {
+    @Test func 最新のAI応答をJSONLから読む() {
         let text = """
-        {"type":"user","message":{"role":"user","content":[{"type":"text","text":"やって"}]}}
-        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}
-        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"修正しました。\\n\\n\\nテストも通っています。"}]}}
+        {"type":"assistant","message":{"content":[{"type":"text","text":"古い応答"}]}}
+        {"type":"assistant","message":{"content":[{"type":"text","text":"最新の応答\\n2行目"}]}}
         """
-        let answer = TranscriptReader.latestAssistantText(inJSONLines: text)
-        // ツール実行だけのレコードは飛ばし、本文を持つものを拾う
-        #expect(answer.first == "修正しました。")
-        #expect(answer.contains("テストも通っています。"))
-        // 空行の連続は1行にまとめる
-        #expect(answer.filter(\.isEmpty).count <= 1)
+        #expect(TranscriptReader.latestAssistantText(inJSONLines: text) == ["最新の応答", "2行目"])
     }
 
-    @Test func 本文が無ければ空を返す() {
-        let toolOnly = """
-        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}
+    @Test func ツール呼び出しだけの記録は本文として扱わない() {
+        let text = """
+        {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}
         """
-        #expect(TranscriptReader.latestAssistantText(inJSONLines: toolOnly).isEmpty)
+        #expect(TranscriptReader.latestAssistantText(inJSONLines: text).isEmpty)
     }
 
-    @Test func 長すぎる応答は行数を制限する() {
-        let long = (1...200).map { "行\($0)" }.joined(separator: "\\n")
-        let record = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\","
-            + "\"content\":[{\"type\":\"text\",\"text\":\"\(long)\"}]}}"
-        let answer = TranscriptReader.latestAssistantText(inJSONLines: record)
-        #expect(answer.count <= TranscriptReader.maxAnswerLines)
-    }
-
-    @Test func 回答済みの質問は復元しない() {
-        // tool_use の後に、同じ tool_use_id の tool_result があれば回答済み
-        let jsonl = """
-        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"古い質問","options":[{"label":"A"},{"label":"B"}]}]}}]}}
-        {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"回答しました"}]}}
+    @Test func 最新のユーザー本文を読む() {
+        let text = """
+        {"type":"user","message":{"content":"最初"}}
+        {"type":"user","message":{"content":[{"type":"text","text":"最後"}]}}
         """
-        #expect(TranscriptReader.latestQuestion(inJSONLines: jsonl) == nil)
+        #expect(TranscriptReader.latestUserText(inJSONLines: text) == "最後")
     }
 
-    @Test func 未回答の質問だけを返す() {
-        // 古い質問は回答済み、新しい質問は未回答
-        let jsonl = """
-        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"古い質問","options":[{"label":"A"},{"label":"B"}]}]}}]}}
-        {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"回答済み"}]}}
-        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"q2","name":"AskUserQuestion","input":{"questions":[{"question":"新しい質問","options":[{"label":"はい"},{"label":"いいえ"}]}]}}]}}
+    @Test func 壊れた行を含んでも読める() {
+        let text = """
+        broken
+        {"type":"assistant","message":{"content":[{"type":"text","text":"OK"}]}}
         """
-        let choice = TranscriptReader.latestQuestion(inJSONLines: jsonl)
-        #expect(choice?.title == "新しい質問")
-    }
-
-    @Test func 質問が無ければnilを返す() {
-        let plain = """
-        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"完了しました"}]}}
-        """
-        #expect(TranscriptReader.latestQuestion(inJSONLines: plain) == nil)
-    }
-
-    @Test func 選択肢が1つ以下なら質問とみなさない() {
-        let input: [String: Any] = ["questions": [["question": "？", "options": [["label": "はい"]]]]]
-        #expect(TranscriptReader.parseQuestion(input: input) == nil)
-    }
-
-    @Test func 壊れた行があっても他の行から復元する() {
-        let broken = "これはJSONではない\n" + jsonl
-        #expect(TranscriptReader.latestQuestion(inJSONLines: broken)?.options.count == 3)
-    }
-
-    @Test func 複数の問いを順番どおり全件取り出す() {
-        // AskUserQuestion は複数の問いを1回にまとめる。1問目で打ち切らないこと。
-        let input: [String: Any] = ["questions": [
-            ["question": "1問目", "options": [["label": "A"], ["label": "B"]]],
-            ["question": "2問目", "options": [["label": "C"], ["label": "D"]]],
-            ["question": "3問目", "options": [["label": "E"], ["label": "F"]]],
-        ]]
-        let questions = TranscriptReader.parseQuestions(input: input)
-
-        #expect(questions.map(\.title) == ["1問目", "2問目", "3問目"])
-        #expect(questions.map(\.questionIndex) == [1, 2, 3])
-        #expect(questions.allSatisfy { $0.questionCount == 3 })
-        #expect(questions[1].progressLabel == "2 / 3")
-    }
-
-    @Test func 単一の問いには進捗表示を付けない() {
-        let input: [String: Any] = ["questions": [
-            ["question": "1問だけ", "options": [["label": "A"], ["label": "B"]]],
-        ]]
-        #expect(TranscriptReader.parseQuestions(input: input).first?.progressLabel == nil)
-    }
-
-    @Test func 複数選択の問いを見分けて確定キーを分ける() {
-        let input: [String: Any] = ["questions": [
-            ["question": "複数選べます",
-             "multiSelect": true,
-             "options": [["label": "A"], ["label": "B"], ["label": "C"]]],
-        ]]
-        guard let choice = TranscriptReader.parseQuestions(input: input).first else {
-            Issue.record("解釈できなかった"); return
-        }
-        #expect(choice.isMultiSelect)
-        // 複数選択では番号キーはトグルなので、選択肢ごとにEnterを送ってはいけない
-        #expect(choice.options.allSatisfy { !$0.needsEnter })
-    }
-
-    @Test func 単一選択は番号のあとにEnterを送る() {
-        let input: [String: Any] = ["questions": [
-            ["question": "1つ選んでください", "options": [["label": "A"], ["label": "B"]]],
-        ]]
-        guard let choice = TranscriptReader.parseQuestions(input: input).first else {
-            Issue.record("解釈できなかった"); return
-        }
-        #expect(!choice.isMultiSelect)
-        #expect(choice.options.allSatisfy { $0.needsEnter })
-    }
-
-    @Test func 選択肢が1つ以下の問いだけ除いて残りを返す() {
-        let input: [String: Any] = ["questions": [
-            ["question": "不正", "options": [["label": "はい"]]],
-            ["question": "正しい", "options": [["label": "A"], ["label": "B"]]],
-        ]]
-        // 除外しても、元の並びに基づく問番号は保つ
-        let questions = TranscriptReader.parseQuestions(input: input)
-        #expect(questions.map(\.title) == ["正しい"])
-        #expect(questions.first?.questionIndex == 2)
+        #expect(TranscriptReader.latestAssistantText(inJSONLines: text) == ["OK"])
     }
 }
 
@@ -1863,6 +1336,12 @@ struct HookRequestTests {
         #expect(HookRequest.normalizeTTY(nil) == nil)
     }
 
+    @Test func 不正なttyヘッダを受け入れない() {
+        #expect(HookRequest.normalizeTTY("/dev/../console") == nil)
+        #expect(HookRequest.normalizeTTY("ttys001\r\nX-Fake: yes") == nil)
+        #expect(HookRequest.normalizeTTY(String(repeating: "a", count: 33)) == nil)
+    }
+
     @Test func ブリッジは祖先をたどってCLI本体を探す() {
         let script = HookInstaller.bridgeScript(socketPath: "/tmp/x.sock")
         // フックの親シェルは制御端末を持たないため、$PPIDだけでは特定できない
@@ -1898,6 +1377,11 @@ struct HTTPParserTests {
     @Test func ヘッダ終端が無ければ解析しない() {
         #expect(HTTPRequestParser.parse(Data("POST /hook HTTP/1.1".utf8)) == nil)
     }
+
+    @Test func POST以外の要求は解析しない() {
+        let raw = Data("GET /hook HTTP/1.1\r\nHost: localhost\r\n\r\n".utf8)
+        #expect(HTTPRequestParser.parse(raw) == nil)
+    }
 }
 
 // MARK: - ターミナルへの移動 (Jump)
@@ -1914,7 +1398,7 @@ struct TerminalJumpTests {
         #expect(TerminalActivator.titleMatches("チャット · dd7867b0-0cbc-48", session: info))
         // フォルダ名が含まれれば一致
         #expect(TerminalActivator.titleMatches("subghost — zsh", session: info))
-        // どちらも含まれなければ不一致（別タブへの誤送信を防ぐ）
+        // どちらも含まれなければ不一致（別タブの通知抑制を防ぐ）
         #expect(!TerminalActivator.titleMatches("別のプロジェクト — vim", session: info))
     }
 
@@ -1998,413 +1482,9 @@ struct TerminalJumpTests {
 
 // MARK: - 承認/質問の検出 (Approve / Ask)
 
-struct ChoicePromptTests {
-
-    /// Claude Codeの権限リクエストを模したcapture-pane出力
-    private let approvalScreen = """
-    ● foo.swift を編集します
-
-    ╭──────────────────────────────────────────────╮
-    │ Edit file                                    │
-    │                                              │
-    │ Do you want to make this edit to foo.swift?  │
-    │ ❯ 1. Yes                                     │
-    │   2. Yes, allow all edits this session       │
-    │   3. No, and tell Claude what to do (esc)    │
-    ╰──────────────────────────────────────────────╯
-      ? for shortcuts
-    """
-
-    @Test func 権限リクエストを承認リクエストとして検出する() {
-        guard let choice = ChoicePrompt.detect(in: approvalScreen, profile: .claude) else {
-            Issue.record("選択肢を検出できなかった")
-            return
-        }
-        #expect(choice.kind == .approval)
-        #expect(choice.title == "Do you want to make this edit to foo.swift?")
-        #expect(choice.options.map(\.label) == [
-            "今回だけ許可", "このセッション中は許可", "拒否する",
-        ])
-        #expect(choice.options.map(\.keystroke) == ["1", "2", "3"])
-        #expect(choice.options.map(\.screenLabel) == [
-            "Yes", "Yes, allow all edits this session", "No, and tell Claude what to do (esc)",
-        ])
-        #expect(choice.options[0].isAffirmative)
-        #expect(choice.options[1].isAffirmative)
-        #expect(choice.options[2].isNegative)
-        #expect(choice.options.allSatisfy { !$0.needsEnter })
-    }
-
-    @Test func Codex固有の承認項目を省略せず実際の番号を保つ() {
-        let codexApprovalScreen = """
-        Would you like to run this command?
-        ❯ 1. Yes, proceed
-          2. Yes, and don't ask again for commands that start with `git status`
-          3. No, and tell Codex what to do differently
-        """
-        guard let choice = ChoicePrompt.detect(in: codexApprovalScreen, profile: .codex) else {
-            Issue.record("Codexの承認項目を検出できなかった")
-            return
-        }
-        #expect(choice.kind == .approval)
-        #expect(choice.options.map(\.label) == [
-            "今回だけ許可", "今後この種類の操作を許可", "拒否する",
-        ])
-        #expect(choice.options.map(\.keystroke) == ["1", "2", "3"])
-        #expect(choice.options.map(\.screenLabel) == [
-            "Yes, proceed",
-            "Yes, and don't ask again for commands that start with `git status`",
-            "No, and tell Codex what to do differently",
-        ])
-    }
-
-    @Test func Codexの補足情報付き承認画面から実際の三つのキーを取得する() {
-        let screen = """
-        Would you like to run the following command?
-
-        Environment: local
-
-        Reason: Subghostの承認項目をテストします
-
-        $ date
-
-        › 1. Yes, proceed (y)
-          2. Yes, and don't ask again for commands that start with `date` (p)
-          3. No, and tell Codex what to do differently (esc)
-        """
-        guard let choice = ChoicePrompt.detect(in: screen, profile: .codex) else {
-            Issue.record("Codexの補足情報付き承認画面を検出できなかった")
-            return
-        }
-        // PermissionRequest Hook側ではこの実キーを使うため、画面分類の種類には依存しない。
-        #expect(choice.options.map(\.keystroke) == ["1", "2", "3"])
-        #expect(choice.options.map(\.screenLabel) == [
-            "Yes, proceed (y)",
-            "Yes, and don't ask again for commands that start with `date` (p)",
-            "No, and tell Codex what to do differently (esc)",
-        ])
-    }
-
-    @Test func 承認以外の問いかけは質問として分類する() {
-        let screen = """
-        どの方針で進めますか?
-        ❯ 1. 既存の実装を拡張する
-          2. 新しく書き直す
-        """
-        guard let choice = ChoicePrompt.detect(in: screen, profile: .claude) else {
-            Issue.record("選択肢を検出できなかった")
-            return
-        }
-        #expect(choice.kind == .question)
-        #expect(choice.options.count == 2)
-    }
-
-    @Test func yn形式のプロンプトを検出する() {
-        let screen = """
-        既存のファイルを上書きします
-        Do you want to continue? (y/n)
-        """
-        guard let choice = ChoicePrompt.detect(in: screen, profile: .codex) else {
-            Issue.record("y/n形式を検出できなかった")
-            return
-        }
-        #expect(choice.kind == .approval)
-        #expect(choice.options.map(\.label) == ["今回だけ許可", "拒否する"])
-        #expect(choice.options.map(\.keystroke) == ["y", "n"])
-        // y/n形式は入力確定にEnterが必要
-        #expect(choice.options.allSatisfy { $0.needsEnter })
-    }
-
-    @Test func 通常の応答画面では選択肢を検出しない() {
-        let screen = """
-        処理が完了しました。変更点は以下です。
-        - foo.swift を修正
-        - bar.swift を追加
-        ╭────────────╮
-        │ >          │
-        ╰────────────╯
-        """
-        #expect(ChoicePrompt.detect(in: screen, profile: .claude) == nil)
-    }
-
-    @Test func 番号が1から始まらない列挙は選択肢とみなさない() {
-        let screen = """
-        参考:
-        2. 二番目の項目
-        3. 三番目の項目
-        """
-        #expect(ChoicePrompt.detect(in: screen, profile: .claude) == nil)
-    }
-
-    /// 実際に起きた不具合の再現: 説明文中の番号付き箇条書き（項目ごとの説明行を挟まない
-    /// 単純な連番）が、会話が先へ進んだ後も画面に残っていると選択待ちと誤検出されていた。
-    /// (Subghost起動直後、フックがまだ繋がっていない一瞬に画面解析が走ると
-    /// この文面を拾ってしまい、選んだつもりが数字だけ誤送信される不具合につながっていた)
-    @Test func 説明文中の番号付き箇条書きを選択待ちと誤認しない() {
-        let screen = """
-        状況をまとめます.
-
-        1. 複数選択のトグルは正しく動作しています
-        2. Submit直後に確認画面が挟まることが分かりました
-        3. 確認画面では改めて1を送る必要があります
-
-        修正を実装します.
-        """
-        #expect(ChoicePrompt.detect(in: screen, profile: .claude) == nil)
-    }
-
-    @Test func ヒント行だけで終わる生きたメニューは引き続き検出する() {
-        // 選択肢の後に操作ヒントだけがあり、それ以降に何も続かない（＝画面の最後）なら生きている
-        let screen = """
-        【複数選択の検証】
-
-        ❯ 1. [ ] 項目A
-          2. [ ] 項目B
-             Submit
-
-        Enter to select · ↑/↓ to navigate · Esc to cancel
-        """
-        guard let choice = ChoicePrompt.detect(in: screen, profile: .claude) else {
-            Issue.record("生きたメニューを検出できなかった")
-            return
-        }
-        #expect(choice.options.count == 2)
-    }
-
-    @Test func 選択肢の直後で画面が終わっていれば生きていると判定する() {
-        // ヒント行すら無く、選択肢の直後で画面がそのまま終わる（＝末尾）なら生きている
-        let screen = """
-        どちらにしますか?
-        ❯ 1. こちら
-          2. あちら
-        """
-        #expect(ChoicePrompt.detect(in: screen, profile: .claude) != nil)
-    }
-
-    // MARK: - 送信直前の再照合（フールプルーフ）
-
-    @Test func 選択肢のラベルが画面に残っていれば送信前照合を通す() {
-        let paneText = """
-        ❯ 1. [ ] 項目A
-          2. [✔] 項目B
-             Submit
-        """
-        #expect(ChoicePrompt.matchesCurrentScreen(optionLabels: ["項目A", "項目B"], in: paneText))
-    }
-
-    @Test func 画面が先へ進んでいれば送信前照合を弾く() {
-        // 表示から回答までの間に会話が進み、選択肢のラベルがもう画面に無い場合
-        let paneText = """
-        修正を実装しました. 次の作業に移ります.
-        """
-        #expect(!ChoicePrompt.matchesCurrentScreen(optionLabels: ["項目A", "項目B"], in: paneText))
-    }
-
-    @Test func 選択肢が空なら送信前照合を通さない() {
-        #expect(!ChoicePrompt.matchesCurrentScreen(optionLabels: [], in: "何かの画面"))
-    }
-
-    @Test func 画面幅で折り返された長いラベルでも送信前照合を通す() {
-        // 実機で確認した不具合: 長いラベルはターミナルの画面幅で複数行に折り返され、
-        // 日本語は単語境界と無関係に任意の文字位置で改行されるため、
-        // 改行を挟んだ状態のままだと単純な contains では一致しなくなっていた。
-        let longLabel = "非常に長い説明文が付いた選択肢を含むパターンで、ノッチ側で折り返しや省略がどう表示されるかを見たいケース"
-        let paneText = """
-        ❯ 2. 非常に長い説明文が付いた選択肢を含むパターンで、ノッチ側で折
-             り返しや省略がどう表示されるかを見たいケース
-             Submit
-        """
-        #expect(ChoicePrompt.matchesCurrentScreen(optionLabels: [longLabel], in: paneText))
-    }
-}
-
-// MARK: - 起動時に既存セッションの状態を引き継ぐ
-
-struct InitialAdoptionTests {
-
-    @Test func 起動前から承認待ちで止まっているセッションを拾う() {
-        var detector = StateDetector(profile: .claude)
-        let t0 = Date(timeIntervalSince1970: 0)
-        let screen = """
-        Do you want to run this command?
-        ❯ 1. Yes
-          2. No
-        """
-        // 初回の取り込みは候補として保持するだけで、まだ確定しない
-        // (フールプルーフ: 起動直後の一瞬は誤検出のリスクが最も高いため、
-        // 1回見ただけでは確定させず、次のポーリングでの再確認を待つ)
-        let first = detector.adoptCurrentState(rawText: screen, at: t0)
-        #expect(first == .none)
-
-        // 次のポーリングでも同じ内容が見えて初めて確定する
-        let event = detector.ingest(rawText: screen, at: t0.addingTimeInterval(1))
-        guard case .becameAwaitingChoice(let choice) = event else {
-            Issue.record("承認待ちを拾えなかった: \(event)")
-            return
-        }
-        #expect(detector.state == .awaitingApproval)
-        #expect(choice.options.count == 2)
-    }
-
-    @Test func 起動直後の候補が次のポーリングで消えていれば確定しない() {
-        var detector = StateDetector(profile: .claude)
-        let t0 = Date(timeIntervalSince1970: 0)
-        let screen = """
-        Do you want to run this command?
-        ❯ 1. Yes
-          2. No
-        """
-        _ = detector.adoptCurrentState(rawText: screen, at: t0)
-
-        // 次のポーリングで別の画面（選択メニューではない）に変わっていれば、
-        // 一過性の誤検出だったとみなして確定しない
-        _ = detector.ingest(rawText: "通常の会話が続いています", at: t0.addingTimeInterval(1))
-        #expect(detector.state != .awaitingApproval)
-        #expect(detector.state != .awaitingAnswer)
-        #expect(detector.pendingChoice == nil)
-    }
-
-    @Test func 起動時に生成中なら生成中として引き継ぐ() {
-        var detector = StateDetector(profile: .claude)
-        let screen = "✻ Thinking… (esc to interrupt)"
-        let event = detector.adoptCurrentState(rawText: screen, at: Date(timeIntervalSince1970: 0))
-        #expect(event == .becameThinking)
-        #expect(detector.state == .thinking)
-    }
-
-    @Test func 起動前に完了していた応答で完了通知を出さない() {
-        var detector = StateDetector(profile: .claude)
-        let screen = """
-        処理が完了しました。
-        ╭────────────╮
-        │ >          │
-        ╰────────────╯
-        """
-        // 起動前に終わっていた作業を「今完了した」と誤報してはいけない
-        let event = detector.adoptCurrentState(rawText: screen, at: Date(timeIntervalSince1970: 0))
-        #expect(event == .none)
-        #expect(detector.state == .idle)
-    }
-
-    @Test func 引き継ぎ後は通常の差分判定に戻る() {
-        var detector = StateDetector(profile: .claude)
-        let t0 = Date(timeIntervalSince1970: 0)
-        #expect(detector.needsInitialAdoption)
-
-        _ = detector.adoptCurrentState(rawText: "待機中の画面", at: t0)
-        #expect(!detector.needsInitialAdoption)
-
-        // 以降は出力の伸長で生成中になる
-        let event = detector.ingest(rawText: "待機中の画面\n新しい出力", at: t0.addingTimeInterval(1))
-        #expect(event == .becameThinking)
-    }
-
-    @Test func 引き継ぎ直後に同じ承認画面でも二重通知しない() {
-        var detector = StateDetector(profile: .claude)
-        let t0 = Date(timeIntervalSince1970: 0)
-        let screen = """
-        Do you want to run this command?
-        ❯ 1. Yes
-          2. No
-        """
-        _ = detector.adoptCurrentState(rawText: screen, at: t0)
-        // 次のポーリングで候補が確定する
-        _ = detector.ingest(rawText: screen, at: t0.addingTimeInterval(1))
-        #expect(detector.state == .awaitingApproval)
-
-        // 確定後、同じ画面が続いても二重通知しない
-        let repeated = detector.ingest(rawText: screen, at: t0.addingTimeInterval(2))
-        #expect(repeated == .none)
-        #expect(detector.state == .awaitingApproval)
-    }
-}
-
-struct ChoiceStateTests {
-
-    private let approvalScreen = """
-    Do you want to run this command?
-    ❯ 1. Yes
-      2. No
-    """
-
-    @Test func 選択待ちを検出したらawaitingApprovalへ遷移する() {
-        var detector = StateDetector(profile: .claude)
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "作業中の画面", at: t0)
-
-        let event = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(1))
-        guard case .becameAwaitingChoice(let choice) = event else {
-            Issue.record("承認待ちにならなかった: \(event)")
-            return
-        }
-        #expect(detector.state == .awaitingApproval)
-        #expect(choice.options.count == 2)
-    }
-
-    @Test func 同じ選択肢が出続けても再通知しない() {
-        var detector = StateDetector(profile: .claude)
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "作業中の画面", at: t0)
-        _ = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(1))
-
-        let repeated = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(2))
-        #expect(repeated == .none)
-        #expect(detector.state == .awaitingApproval)
-    }
-
-    @Test func 選択待ちの間はcompletedと判定しない() {
-        var detector = StateDetector(profile: .claude)
-        detector.stableInterval = 1.5
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "作業中の画面", at: t0)
-        _ = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(1))
-
-        // 静止時間が十分経過してもcompletedにはしない
-        let later = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(30))
-        #expect(later == .none)
-        #expect(detector.state == .awaitingApproval)
-    }
-
-    @Test func ターミナル側で回答されたら選択待ちが解消する() {
-        var detector = StateDetector(profile: .claude)
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "作業中の画面", at: t0)
-        _ = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(1))
-
-        let resolved = detector.ingest(rawText: "コマンドを実行しています…", at: t0.addingTimeInterval(2))
-        #expect(resolved == .choiceResolved)
-        #expect(detector.state == .thinking)
-        #expect(detector.pendingChoice == nil)
-    }
-
-    @Test func ノッチから回答した直後は同じ選択肢を再通知しない() {
-        var detector = StateDetector(profile: .claude)
-        let t0 = Date(timeIntervalSince1970: 0)
-        _ = detector.ingest(rawText: "作業中の画面", at: t0)
-        _ = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(1))
-
-        // 回答を送信（画面はまだ更新されていない）
-        _ = detector.noteUserAnsweredChoice(at: t0.addingTimeInterval(2))
-        let afterAnswer = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(2.5))
-        #expect(afterAnswer == .none)
-        #expect(detector.state == .thinking)
-
-        // 抑制時間を過ぎてもまだ同じ画面なら、答えが届いていないので再通知する
-        let renotified = detector.ingest(rawText: approvalScreen, at: t0.addingTimeInterval(10))
-        guard case .becameAwaitingChoice = renotified else {
-            Issue.record("抑制時間経過後に再通知されなかった: \(renotified)")
-            return
-        }
-    }
-}
-
-// MARK: - タスク完了後のスリープ
-
-/// スリープは取り消せず、しかも席を外している前提で起きる。
-/// 「寝てよい」と判断する条件はここで固定値のまま網羅しておく。
 struct SleepConditionTests {
 
-    private func セッション(
+    private func session(
         tty: String = "/dev/ttys001",
         pid: Int32 = 100,
         profileID: String = "claude",
@@ -2414,7 +1494,7 @@ struct SleepConditionTests {
     }
 
     @Test func 予約したCLIの完了でスリープへ進む() {
-        let finished = セッション(state: .completed)
+        let finished = session(state: .completed)
         #expect(SleepCondition.shouldStartCountdown(
             targets: [.agent(profileID: "claude")],
             finished: finished,
@@ -2423,144 +1503,34 @@ struct SleepConditionTests {
         ))
     }
 
-    @Test func 予約していないCLIの完了では進まない() {
-        let finished = セッション(profileID: "codex", state: .completed)
-        #expect(!SleepCondition.shouldStartCountdown(
-            targets: [.agent(profileID: "claude")],
-            finished: finished,
-            sessions: [finished],
-            includesError: true
-        ))
-    }
-
-    /// 同じCLIをタブ違いで並行して使っている場合、まだ動いている方が本命かもしれない
-    @Test func 同じCLIの別セッションが作業中なら進まない() {
-        let finished = セッション(state: .completed)
-        let working = セッション(tty: "/dev/ttys002", pid: 200, state: .thinking)
-        #expect(!SleepCondition.shouldStartCountdown(
-            targets: [.agent(profileID: "claude")],
-            finished: finished,
-            sessions: [finished, working],
-            includesError: true
-        ))
+    @Test func 同じ対象に作業中セッションがあれば進まない() {
+        let finished = session(state: .completed)
+        let working = session(tty: "/dev/ttys002", pid: 200, state: .thinking)
         #expect(SleepCondition.hold(
-            targets: [.agent(profileID: "claude")], sessions: [finished, working]) == .targetBusy)
-    }
-
-    /// 答えるまでCLIは止まったまま。そこで寝ると、戻ってきても何も進んでいない。
-    @Test func 予約の対象外でも回答待ちがあれば進まない() {
-        let finished = セッション(state: .completed)
-        let waiting = セッション(
-            tty: "/dev/ttys003", pid: 300, profileID: "codex", state: .awaitingApproval)
-        #expect(!SleepCondition.shouldStartCountdown(
             targets: [.agent(profileID: "claude")],
-            finished: finished,
-            sessions: [finished, waiting],
-            includesError: true
-        ))
-        #expect(SleepCondition.hold(
-            targets: [.agent(profileID: "claude")], sessions: [finished, waiting]) == .awaitingResponse)
+            sessions: [finished, working]
+        ) == .targetBusy)
     }
 
-    @Test func 質問待ちも回答待ちとして扱う() {
-        let finished = セッション(state: .completed)
-        let asking = セッション(tty: "/dev/ttys004", pid: 400, state: .awaitingAnswer)
-        #expect(SleepCondition.hold(
-            targets: [.agent(profileID: "claude")], sessions: [finished, asking]) == .awaitingResponse)
-    }
-
-    @Test func エラー終了を終了に含めるかは設定で決まる() {
-        let failed = セッション(state: .error)
-        #expect(SleepCondition.shouldStartCountdown(
-            targets: [.agent(profileID: "claude")],
-            finished: failed,
-            sessions: [failed],
-            includesError: true
-        ))
-        #expect(!SleepCondition.shouldStartCountdown(
-            targets: [.agent(profileID: "claude")],
-            finished: failed,
-            sessions: [failed],
-            includesError: false
-        ))
-    }
-
-    /// 予約した直後、何も動いていないだけで寝てしまってはいけない
-    @Test func 待機中や生成中は終了とみなさない() {
+    @Test func エラーを終了に含めるか選べる() {
+        #expect(SleepCondition.isFinished(.error, includesError: true))
+        #expect(!SleepCondition.isFinished(.error, includesError: false))
         #expect(!SleepCondition.isFinished(.idle, includesError: true))
         #expect(!SleepCondition.isFinished(.thinking, includesError: true))
-        #expect(!SleepCondition.isFinished(.awaitingApproval, includesError: true))
-        #expect(!SleepCondition.isFinished(.awaitingAnswer, includesError: true))
         #expect(SleepCondition.isFinished(.completed, includesError: false))
     }
 
-    @Test func 対象のセッションが見当たらなければ待たせる() {
-        let other = セッション(profileID: "codex", state: .idle)
+    @Test func 対象が無ければ進まない() {
         #expect(SleepCondition.hold(
-            targets: [.agent(profileID: "claude")], sessions: [other]) == .targetMissing)
-        #expect(SleepCondition.hold(
-            targets: [.agent(profileID: "claude")], sessions: []) == .targetMissing)
+            targets: [.agent(profileID: "claude")],
+            sessions: []
+        ) == .targetMissing)
     }
 
-    /// ttyは使い回されるため、PIDまで一致しなければ別のセッション
-    @Test func セッション指定はPIDまで一致しないと対象外() {
-        let session = セッション(state: .completed)
-        #expect(SleepCondition.covers(.session(tty: "/dev/ttys001", pid: 100), session))
-        #expect(!SleepCondition.covers(.session(tty: "/dev/ttys001", pid: 999), session))
-        #expect(!SleepCondition.covers(.session(tty: "/dev/ttys009", pid: 100), session))
-    }
-
-    @Test func セッション指定では他のセッションの作業中は妨げにならない() {
-        let finished = セッション(state: .completed)
-        let otherWorking = セッション(tty: "/dev/ttys002", pid: 200, state: .thinking)
-        #expect(SleepCondition.shouldStartCountdown(
-            targets: [.session(tty: "/dev/ttys001", pid: 100)],
-            finished: finished,
-            sessions: [finished, otherWorking],
-            includesError: true
-        ))
-    }
-
-    /// 複数を予約したときは「最後の1つが終わるまで待つ」
-    @Test func 複数予約では片方が残っている間は進まない() {
-        let claudeDone = セッション(state: .completed)
-        let codexWorking = セッション(
-            tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .thinking)
-        let targets: [SleepTarget] = [.agent(profileID: "claude"), .agent(profileID: "codex")]
-
-        #expect(!SleepCondition.shouldStartCountdown(
-            targets: targets,
-            finished: claudeDone,
-            sessions: [claudeDone, codexWorking],
-            includesError: true
-        ))
-        #expect(SleepCondition.hold(
-            targets: targets, sessions: [claudeDone, codexWorking]) == .targetBusy)
-    }
-
-    @Test func 複数予約は最後の1つが終わった時点で進む() {
-        let claudeDone = セッション(state: .completed)
-        let codexDone = セッション(
-            tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .completed)
-
-        #expect(SleepCondition.shouldStartCountdown(
-            targets: [.agent(profileID: "claude"), .agent(profileID: "codex")],
-            finished: codexDone,
-            sessions: [claudeDone, codexDone],
-            includesError: true
-        ))
-    }
-
-    /// 消えた予約を数え続けると、残りが終わっても永久に寝られなくなる
-    @Test func 対象が消えた予約は判断から外す() {
-        let claudeDone = セッション(state: .completed)
-        let targets: [SleepTarget] = [.agent(profileID: "claude"), .agent(profileID: "codex")]
-
-        #expect(SleepCondition.liveTargets(targets, sessions: [claudeDone])
-                == [.agent(profileID: "claude")])
-        #expect(SleepCondition.hold(targets: targets, sessions: [claudeDone]) == .none)
-        // ただし1つも残っていなければ、狙う相手がいないので進めない
-        #expect(SleepCondition.hold(targets: targets, sessions: []) == .targetMissing)
+    @Test func セッション指定はPIDまで一致させる() {
+        let value = session(state: .completed)
+        #expect(SleepCondition.covers(.session(tty: "/dev/ttys001", pid: 100), value))
+        #expect(!SleepCondition.covers(.session(tty: "/dev/ttys001", pid: 999), value))
     }
 
     @Test func 猶予秒数を安全な範囲へ補正する() {
@@ -2578,8 +1548,6 @@ final class SleepTestProbe {
     var sleepCount = 0
     /// 判定へ渡すセッション一覧（テストの途中で差し替える）
     var sessions: [SleepSessionSnapshot] = []
-    /// ノッチで入力中か
-    var isInteracting = false
 }
 
 @MainActor
@@ -2600,7 +1568,6 @@ struct SleepSchedulerTests {
         let scheduler = SleepScheduler()
         scheduler.automaticTicking = false
         scheduler.sessionsProvider = { probe.sessions }
-        scheduler.isUserInteracting = { probe.isInteracting }
         scheduler.sleepAction = { probe.sleepCount += 1 }
         return (scheduler, probe)
     }
@@ -2628,46 +1595,6 @@ struct SleepSchedulerTests {
         scheduler.noteFinished(finished)
         #expect(scheduler.countdown == nil)
         #expect(probe.sleepCount == 0)
-    }
-
-    /// 目の前で入力している最中に寝るのは明らかな誤り
-    @Test func ノッチへ入力中は猶予を数えない() async {
-        let finished = セッション(state: .completed)
-        let (scheduler, probe) = 用意する([finished])
-        scheduler.reserve(.agent(profileID: "claude"), label: "Claude Code")
-        scheduler.noteFinished(finished)
-
-        probe.isInteracting = true
-        for _ in 0..<猶予の秒数 { await scheduler.tick() }
-        #expect(probe.sleepCount == 0)
-        #expect(scheduler.countdown?.pausedByUser == true)
-        #expect(scheduler.countdown?.remaining == SleepPreferences.countdown)
-
-        // 入力を終えれば、その続きから数え直す
-        probe.isInteracting = false
-        for _ in 0..<猶予の秒数 { await scheduler.tick() }
-        #expect(probe.sleepCount == 1)
-    }
-
-    /// 猶予の途中で承認待ちが現れたら、答えるまで寝てはいけない
-    @Test func 途中で回答待ちが現れたら猶予を止める() async {
-        let finished = セッション(state: .completed)
-        let (scheduler, probe) = 用意する([finished])
-        scheduler.reserve(.agent(profileID: "claude"), label: "Claude Code")
-        scheduler.noteFinished(finished)
-
-        probe.sessions = [
-            finished,
-            セッション(tty: "/dev/ttys002", pid: 200, profileID: "codex", state: .awaitingApproval),
-        ]
-        for _ in 0..<猶予の秒数 { await scheduler.tick() }
-        #expect(probe.sleepCount == 0)
-        #expect(scheduler.countdown?.hold == .awaitingResponse)
-
-        // 回答が済めば残りを数え直して寝る
-        probe.sessions = [finished]
-        for _ in 0..<猶予の秒数 { await scheduler.tick() }
-        #expect(probe.sleepCount == 1)
     }
 
     /// 取り消しても予約は残す。次に完了したときは改めて確認する。

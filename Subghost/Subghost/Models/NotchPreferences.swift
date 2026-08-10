@@ -17,12 +17,9 @@ nonisolated enum NotchPreferences {
     static let notificationDisplayDurationKey = "notificationDisplayDuration"
     static let collapseOnMouseExitKey = "collapseOnMouseExit"
     static let closeOnOutsideClickKey = "closeOnOutsideClick"
-    static let choiceAutoCloseIntervalKey = "choiceAutoCloseInterval"
-    static let focusChoiceOnAppearKey = "focusChoiceOnAppear"
     static let hideUnmonitorableSessionsKey = "hideUnmonitorableSessions"
     static let hideInactiveSessionsKey = "hideInactiveSessions"
     static let inactiveSessionThresholdKey = "inactiveSessionThreshold"
-    static let suggestsTmuxSetupKey = "suggestsTmuxSetup"
 
     static var hoverExpansionEnabled: Bool {
         bool(forKey: hoverExpansionEnabledKey, default: true)
@@ -70,8 +67,7 @@ nonisolated enum NotchPreferences {
 
     // MARK: - 一覧に出さないセッション
 
-    /// tmuxにもフックにも繋がっていない＝監視も操作もできないセッションを一覧から外す。
-    /// 既定で有効。表示しても状態が出ず、送信もできないため実用上の情報がない。
+    /// フックに繋がっておらず、状態を監視できないセッションを一覧から外す。
     static var hideUnmonitorableSessions: Bool {
         bool(forKey: hideUnmonitorableSessionsKey, default: true)
     }
@@ -79,16 +75,6 @@ nonisolated enum NotchPreferences {
     /// 一定時間まったく動きの無いセッションを一覧から外す
     static var hideInactiveSessions: Bool {
         bool(forKey: hideInactiveSessionsKey, default: true)
-    }
-
-    /// tmuxの導入案内を出すか。
-    /// tmuxを使わず監視だけで使うのも正規の構成なので、断れるようにしておく。
-    static var suggestsTmuxSetup: Bool {
-        bool(forKey: suggestsTmuxSetupKey, default: true)
-    }
-
-    static func setSuggestsTmuxSetup(_ value: Bool) {
-        UserDefaults.standard.set(value, forKey: suggestsTmuxSetupKey)
     }
 
     static let inactiveSessionThresholdRange: ClosedRange<TimeInterval> = 300...86_400
@@ -108,21 +94,6 @@ nonisolated enum NotchPreferences {
 
     static var closeOnOutsideClick: Bool {
         bool(forKey: closeOnOutsideClickKey, default: true)
-    }
-
-    /// 選択肢（承認/質問）を自動で閉じるまでの秒数。
-    /// 0以下なら自動で閉じない（回答するまで表示し続ける、既定の挙動）。
-    static var choiceAutoCloseInterval: TimeInterval {
-        number(forKey: choiceAutoCloseIntervalKey, default: 0)
-    }
-
-    /// 選択肢が届いたとき、Subghostがキーボードフォーカスを奪ってよいか。
-    ///
-    /// 有効だと数字キーだけで即座に回答できるが、他アプリで文章を書いている
-    /// 最中に割り込むと打鍵を横取りしてしまう。無効にした場合はパネルを出すだけに留め、
-    /// ノッチをクリックしてから数字キーで回答する。
-    static var focusChoiceOnAppear: Bool {
-        bool(forKey: focusChoiceOnAppearKey, default: true)
     }
 
     static func bool(

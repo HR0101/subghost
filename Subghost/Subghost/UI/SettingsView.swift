@@ -57,57 +57,93 @@ struct SettingsView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            List(selection: $selection) {
-                Section {
-                    settingsLink(.general, "一般", "gearshape.fill")
-                    settingsLink(.alerts, "通知とサウンド", "bell.badge.fill")
-                    settingsLink(.appearance, "外観", "paintbrush.fill")
-                    settingsLink(.integration, "統合", "puzzlepiece.extension.fill")
+            VStack(spacing: 0) {
+                HStack(spacing: 11) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color.accentColor.opacity(0.24),
+                                        Color.purple.opacity(0.14),
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 42, height: 42)
+                        PixelGhostView(state: .completed, pixelSize: 3)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Subghost")
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        Text("AI CLI Monitor")
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
                 }
-                Section("詳細設定") {
-                    settingsLink(.shortcuts, "ショートカット", "keyboard.fill")
-                    settingsLink(.data, "履歴とデータ", "clock.arrow.circlepath")
-                    settingsLink(.diagnostics, "診断", "stethoscope")
-                    settingsLink(.setup, "セットアップ", "wrench.and.screwdriver.fill")
+                .padding(.horizontal, 14)
+                .padding(.vertical, 14)
+                .accessibilityElement(children: .combine)
+
+                Divider()
+
+                List(selection: $selection) {
+                    Section {
+                        settingsLink(.general)
+                        settingsLink(.alerts)
+                        settingsLink(.appearance)
+                        settingsLink(.integration)
+                    }
+                    Section("詳細設定") {
+                        settingsLink(.shortcuts)
+                        settingsLink(.data)
+                        settingsLink(.diagnostics)
+                        settingsLink(.setup)
+                    }
+                    Section {
+                        settingsLink(.information)
+                    }
                 }
-                Section {
-                    settingsLink(.information, "情報", "info.circle.fill")
-                }
+                .listStyle(.sidebar)
             }
-            .listStyle(.sidebar)
-            .frame(width: 190)
+            .frame(width: 216)
+            .background(.ultraThinMaterial)
 
             Divider()
 
-            Group {
-                switch selection {
-                case .general: GeneralSettingsView()
-                case .alerts: AlertSettingsView()
-                case .appearance: AppearanceSettingsView()
-                case .integration: HookSettingsView()
-                case .shortcuts: ShortcutSettingsView()
-                case .data: DataSettingsView()
-                case .diagnostics: SetupDiagnosticsView()
-                case .setup: SetupGuideView()
-                case .information: InformationSettingsView()
+            VStack(spacing: 0) {
+                SettingsPageHeader(page: selection)
+                Divider()
+                Group {
+                    switch selection {
+                    case .general: GeneralSettingsView()
+                    case .alerts: AlertSettingsView()
+                    case .appearance: AppearanceSettingsView()
+                    case .integration: HookSettingsView()
+                    case .shortcuts: ShortcutSettingsView()
+                    case .data: DataSettingsView()
+                    case .diagnostics: SetupDiagnosticsView()
+                    case .setup: SetupGuideView()
+                    case .information: InformationSettingsView()
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
         // 固定サイズだと、システムの文字サイズを大きくした環境で内容が見切れる。
         // 既定の大きさは保ちつつ、ユーザーがリサイズできるようにする。
         .frame(
-            minWidth: 640, idealWidth: 860, maxWidth: .infinity,
+            minWidth: 700, idealWidth: 920, maxWidth: .infinity,
             minHeight: 480, idealHeight: 680, maxHeight: .infinity
         )
     }
 
-    private func settingsLink(
-        _ page: SettingsPage,
-        _ title: String,
-        _ systemImage: String
-    ) -> some View {
-        Label(title, systemImage: systemImage)
+    private func settingsLink(_ page: SettingsPage) -> some View {
+        Label(page.title, systemImage: page.systemImage)
             .tag(page)
     }
 }
@@ -122,10 +158,81 @@ private enum SettingsPage: Hashable {
     case diagnostics
     case setup
     case information
+
+    var title: String {
+        switch self {
+        case .general: return "一般"
+        case .alerts: return "通知とサウンド"
+        case .appearance: return "外観"
+        case .integration: return "統合"
+        case .shortcuts: return "ショートカット"
+        case .data: return "履歴とデータ"
+        case .diagnostics: return "診断"
+        case .setup: return "セットアップ"
+        case .information: return "情報"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .general: return "起動、表示、セッション監視の基本設定"
+        case .alerts: return "完了やエラーの通知方法を調整"
+        case .appearance: return "ノッチの形、濃さ、アニメーションを調整"
+        case .integration: return "Claude CodeとCodex CLIの監視フックを管理"
+        case .shortcuts: return "よく使う操作へキーボードを割り当て"
+        case .data: return "履歴、プライバシー、設定ファイルを管理"
+        case .diagnostics: return "監視状態とローカル連携の問題を確認"
+        case .setup: return "初めて使うときの手順を確認"
+        case .information: return "アプリ情報とプライバシー方針"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general: return "gearshape.fill"
+        case .alerts: return "bell.badge.fill"
+        case .appearance: return "paintbrush.fill"
+        case .integration: return "puzzlepiece.extension.fill"
+        case .shortcuts: return "keyboard.fill"
+        case .data: return "clock.arrow.circlepath"
+        case .diagnostics: return "stethoscope"
+        case .setup: return "wrench.and.screwdriver.fill"
+        case .information: return "info.circle.fill"
+        }
+    }
+}
+
+private struct SettingsPageHeader: View {
+    let page: SettingsPage
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.12))
+                    .frame(width: 40, height: 40)
+                Image(systemName: page.systemImage)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(page.title)
+                    .font(.system(size: 17, weight: .semibold))
+                Text(page.subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
 }
 
 private struct GeneralSettingsView: View {
-    @AppStorage("pollInterval") private var pollInterval = 0.8
+    @AppStorage("pollInterval") private var pollInterval = 3.0
     @AppStorage(DisplayPreference.userDefaultsKey) private var notchDisplay = ""
     @AppStorage("preferredTerminal") private var preferredTerminal = ""
     @AppStorage(NotchPreferences.hoverExpansionEnabledKey) private var hoverExpansionEnabled = true
@@ -241,10 +348,10 @@ private struct GeneralSettingsView: View {
 
             Section("監視") {
                 VStack(alignment: .leading) {
-                    Slider(value: $pollInterval, in: 0.4...3.0, step: 0.1) {
+                    Slider(value: $pollInterval, in: 2.0...10.0, step: 0.5) {
                         Text("ポーリング間隔: \(pollInterval, specifier: "%.1f")秒")
                     }
-                    Text("短いほど反応が速く、長いほど省電力です")
+                    Text("CLIプロセスを見つける間隔です。状態更新はフックから即時に届きます。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -361,8 +468,7 @@ private struct SleepSettingsSection: View {
             ForEach(CLIProfile.builtins) { profile in
                 Toggle(profile.displayName, isOn: reservationBinding(for: profile))
             }
-            Text("選んだCLIのタスクが終わり、どのセッションも回答待ちでなければ、"
-                 + "猶予をおいてMacをスリープします。"
+            Text("選んだCLIのタスクが終わったら、猶予をおいてMacをスリープします。"
                  + "複数を選んだ場合は、最後の1つが終わるまで待ちます。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -391,8 +497,8 @@ private struct SleepSettingsSection: View {
                         .monospacedDigit()
                 }
             }
-            Text("この間はノッチから取り消せます。対象が作業を再開したときや、"
-                 + "どれかのセッションが回答待ちのあいだは、猶予を数えるのを止めて待ちます。")
+            Text("この間はノッチから取り消せます。対象が作業を再開したときは、"
+                 + "猶予を数えるのを止めます。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -435,7 +541,7 @@ private struct AppearanceSettingsView: View {
     @AppStorage(AppearancePreferences.ghostAnimationEnabledKey)
     private var ghostAnimation = true
     @AppStorage(AppearancePreferences.hidePreviewTextKey)
-    private var hidePreview = false
+    private var hidePreview = true
 
     /// Slider は Double の範囲を要求するので、Int の設定範囲を変換して持っておく
     private static let listRowsRange: ClosedRange<Double> = {
@@ -503,10 +609,10 @@ private struct AppearanceSettingsView: View {
             Section("プライバシー") {
                 Toggle("応答の本文を表示しない", isOn: $hidePreview)
                 Text("ノッチのプレビュー・通知の本文・アクティビティ履歴から、会話の中身を伏せます。"
-                     + "画面共有や録画のときに使ってください。")
+                     + "有効な間は会話記録の本文も読み取りません。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("既に記録済みの履歴には遡って適用されません。消すには「履歴とデータ」から削除してください。")
+                Text("有効にすると、既に保存された履歴の本文も削除します。この操作は元に戻せません。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -515,6 +621,9 @@ private struct AppearanceSettingsView: View {
         .onChange(of: panelOpacity) { _, _ in preferencesChanged() }
         .onChange(of: cornerRadius) { _, _ in preferencesChanged() }
         .onChange(of: listRows) { _, _ in preferencesChanged() }
+        .onChange(of: hidePreview) { _, hidden in
+            if hidden { AppCoordinator.shared.activity.redactSummaries() }
+        }
     }
 
     private func preferencesChanged() {
@@ -589,7 +698,7 @@ private struct DataSettingsView: View {
                 Button("すべての設定を初期状態に戻す", role: .destructive) {
                     confirmingReset = true
                 }
-                Text("フック連携の登録や ~/.zshrc の変更といったアプリ外への変更はそのまま残ります。"
+                Text("フック連携など、アプリ外へ登録した統合設定はそのまま残ります。"
                      + "必要なら「統合」画面から個別に解除してください。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -612,7 +721,7 @@ private struct DataSettingsView: View {
             Button("初期化する", role: .destructive) { resetSettings() }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("ショートカット、通知、外観、スニペットの設定がすべて既定へ戻ります。この操作は取り消せません。")
+            Text("ショートカット、通知、外観、履歴の設定がすべて既定へ戻ります。この操作は取り消せません。")
         }
     }
 
@@ -686,14 +795,12 @@ private struct ActivityKindRow: View {
 
 private struct AlertSettingsView: View {
     @AppStorage(NotificationPreferences.masterKey) private var notificationsEnabled = true
-    @AppStorage(NotificationPreferences.timeSensitiveKey) private var timeSensitive = true
     @AppStorage("soundEnabled") private var soundEnabled = true
     @AppStorage("soundVolume") private var soundVolume = Double(SoundAlerts.defaultVolume)
 
     @AppStorage(QuietHours.enabledKey) private var quietEnabled = false
     @AppStorage(QuietHours.startKey) private var quietStart = Double(QuietHours.defaultStartMinutes)
     @AppStorage(QuietHours.endKey) private var quietEnd = Double(QuietHours.defaultEndMinutes)
-    @AppStorage(QuietHours.allowBlockingKey) private var quietAllowsBlocking = true
 
     @AppStorage(UsagePreferences.warningKey) private var usageWarning = UsagePreferences.defaultWarning
     @AppStorage(UsagePreferences.criticalKey) private var usageCritical = UsagePreferences.defaultCritical
@@ -716,18 +823,6 @@ private struct AlertSettingsView: View {
                     NotificationEventRow(event: event)
                         .disabled(!notificationsEnabled)
                 }
-                Text("承認リクエストの通知からは「承認」「拒否」を直接選べます。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("集中モード") {
-                Toggle("承認・質問は集中モード中でも割り込む", isOn: $timeSensitive)
-                    .disabled(!notificationsEnabled)
-                Text("回答しないとCLIが止まってしまうため、既定では割り込みます。"
-                     + "オフにすると、macOSの集中モードの設定に従って抑制されます。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section("静穏時間") {
@@ -735,12 +830,11 @@ private struct AlertSettingsView: View {
                 if quietEnabled {
                     MinutePicker(title: "開始", minutes: $quietStart)
                     MinutePicker(title: "終了", minutes: $quietEnd)
-                    Toggle("承認・質問だけは通す", isOn: $quietAllowsBlocking)
                     Text(quietSummary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("通知・サウンド・ノッチの自動展開をまとめて控えます。回答待ちは消えず、一覧には残ります。")
+                Text("通知・サウンド・ノッチの自動展開をまとめて控えます。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -877,149 +971,11 @@ private struct MinutePicker: View {
     }
 }
 
-private struct SnippetSettingsView: View {
-    @State private var store = AppCoordinator.shared.snippets
-    @State private var newTitle = ""
-    @State private var newBody = ""
-    @State private var editing: Snippet?
-    @State private var confirmingDefaults = false
-
-    var body: some View {
-        VStack(spacing: 0) {
-            List {
-                ForEach(store.snippets) { snippet in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(snippet.title).font(.headline)
-                            Text(snippet.body)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        Spacer()
-                        Button {
-                            editing = snippet
-                        } label: {
-                            Image(systemName: "pencil")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("編集する")
-
-                        Button(role: .destructive) {
-                            store.remove(snippet)
-                        } label: {
-                            Image(systemName: "trash")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
-                .onMove { source, destination in
-                    store.move(fromOffsets: source, toOffset: destination)
-                }
-            }
-
-            Divider()
-
-            VStack(spacing: 8) {
-                HStack {
-                    TextField("タイトル", text: $newTitle)
-                        .frame(width: 120)
-                    TextField("本文", text: $newBody)
-                    Button("追加") {
-                        store.add(title: newTitle, body: newBody)
-                        newTitle = ""
-                        newBody = ""
-                    }
-                    .disabled(newBody.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-                HStack {
-                    Text("ドラッグで並べ替えられます。上にあるものほどノッチで早く選べます。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("既定に戻す") { confirmingDefaults = true }
-                        .buttonStyle(.borderless)
-                }
-            }
-            .padding(10)
-        }
-        .sheet(item: $editing) { snippet in
-            SnippetEditor(snippet: snippet) { updated in
-                store.update(updated)
-                editing = nil
-            } onCancel: {
-                editing = nil
-            }
-        }
-        .confirmationDialog(
-            "スニペットを既定の内容に戻します",
-            isPresented: $confirmingDefaults,
-            titleVisibility: .visible
-        ) {
-            Button("戻す", role: .destructive) { store.restoreDefaults() }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("追加・編集したスニペットはすべて失われます。")
-        }
-    }
-}
-
-/// スニペット1件の編集シート
-private struct SnippetEditor: View {
-    let snippet: Snippet
-    let onSave: (Snippet) -> Void
-    let onCancel: () -> Void
-
-    @State private var title: String
-    /// SwiftUI の body と名前がぶつからないよう text で持つ
-    @State private var text: String
-
-    init(snippet: Snippet, onSave: @escaping (Snippet) -> Void, onCancel: @escaping () -> Void) {
-        self.snippet = snippet
-        self.onSave = onSave
-        self.onCancel = onCancel
-        _title = State(initialValue: snippet.title)
-        _text = State(initialValue: snippet.body)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("スニペットを編集")
-                .font(.headline)
-            TextField("タイトル", text: $title)
-            TextEditor(text: $text)
-                .font(.body)
-                .frame(minHeight: 120)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(.quaternary)
-                )
-            HStack {
-                Spacer()
-                Button("キャンセル", role: .cancel) { onCancel() }
-                Button("保存") { save() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(20)
-        .frame(width: 420)
-    }
-
-    private func save() {
-        var updated = snippet
-        updated.title = title.trimmingCharacters(in: .whitespaces)
-        updated.body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // タイトルを空のまま保存したら、本文の先頭を見出しに使う
-        if updated.title.isEmpty {
-            updated.title = String(updated.body.prefix(10))
-        }
-        onSave(updated)
-    }
-}
 
 /// フック連携の導入・解除 (追補: フック方式)
 private struct HookSettingsView: View {
+    @AppStorage(UsagePreferences.codexCollectionEnabledKey)
+    private var codexUsageCollectionEnabled = false
     @State private var installed: [HookTarget: Bool] = [:]
     @State private var messages: [HookTarget: (text: String, isError: Bool)] = [:]
     @State private var confirming: HookTarget?
@@ -1028,6 +984,8 @@ private struct HookSettingsView: View {
     @State private var newAliasBaseProfileID = CLIProfile.codex.id
     @State private var aliasMessage: String?
     @State private var customAliasStore = AppCoordinator.shared.customAliasStore
+    @State private var watcher = AppCoordinator.shared.watcher
+    @State private var healthCheckMessage: String?
 
     /// 失敗したらその内容を文字列で返す（成功時は nil）
     private func run(_ work: () throws -> Void) -> String? {
@@ -1038,7 +996,7 @@ private struct HookSettingsView: View {
         CLIProfile.builtins.first { $0.id == profileID }?.displayName ?? profileID
     }
 
-    private var serverRunning: Bool { AppCoordinator.shared.watcher.hookServerRunning }
+    private var serverRunning: Bool { watcher.hookServerRunning }
 
     var body: some View {
         Form {
@@ -1049,6 +1007,28 @@ private struct HookSettingsView: View {
                 Text("フックからイベントを直接受け取り、タスクが作業途中か完了したかだけを監視します。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                HStack {
+                    Button("受信サーバをテスト") { testHealth() }
+                        .disabled(!serverRunning)
+                    if let last = watcher.lastHealthCheckAt {
+                        Text("最終確認: \(last.formatted(date: .omitted, time: .standard))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let healthCheckMessage {
+                    Text(healthCheckMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if watcher.unmatchedHookEventCount > 0 {
+                    Label(
+                        "宛先を特定できなかったイベント: \(watcher.unmatchedHookEventCount)件",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
             }
 
             ForEach(HookTarget.allCases) { target in
@@ -1058,6 +1038,20 @@ private struct HookSettingsView: View {
                     Label(isOn ? "登録済み" : "未登録",
                           systemImage: isOn ? "checkmark.circle.fill" : "circle.dashed")
                         .foregroundStyle(isOn ? Color.green : Color.secondary)
+
+                    if let last = watcher.lastHookEventAtBySource[target.rawValue] {
+                        Label(
+                            "動作確認済み: \(last.formatted(date: .omitted, time: .standard))",
+                            systemImage: "wave.3.right.circle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    } else if isOn {
+                        Label("イベント未受信。CLIを再起動してタスクを開始してください。",
+                              systemImage: "clock.badge.questionmark")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
 
                     Text(target.settingsURL.path.replacingOccurrences(
                         of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
@@ -1090,7 +1084,7 @@ private struct HookSettingsView: View {
                 }
             }
 
-            Section("使用量の取得") {
+            Section("使用量の取得（任意・実験的）") {
                 let installed = HookInstaller.isStatuslineInstalled()
                 Label(installed ? "有効" : "無効",
                       systemImage: installed ? "checkmark.circle.fill" : "circle.dashed")
@@ -1104,10 +1098,16 @@ private struct HookSettingsView: View {
                      + "statusline の見た目は変わりません。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text("状態監視には不要です。CLI側の仕様変更で取得できなくなる可能性があります。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
 
                 if installed {
                     Button("解除して元に戻す", role: .destructive) {
-                        statuslineMessage = run { try HookInstaller.uninstallStatusline() }
+                        statuslineMessage = run {
+                            try HookInstaller.uninstallStatusline()
+                            watcher.clearUsage(for: CLIProfile.claude.id)
+                        }
                             ?? "元の statusline に戻しました。"
                     }
                 } else {
@@ -1121,6 +1121,16 @@ private struct HookSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                Divider()
+                Toggle("Codexの使用量を取得する", isOn: $codexUsageCollectionEnabled)
+                    .onChange(of: codexUsageCollectionEnabled) { _, enabled in
+                        if !enabled { watcher.clearUsage(for: CLIProfile.codex.id) }
+                    }
+                Text("有効にした場合だけ、CodexがMac内へ保存した直近のセッション記録から"
+                     + "レート制限の数値を読みます。会話本文は使用量の解析対象にしません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -1193,6 +1203,21 @@ private struct HookSettingsView: View {
             Button("キャンセル", role: .cancel) { confirming = nil }
         } message: {
             Text("既存の設定は保持し、Subghost用のフックのみを追記します。いつでも解除できます。")
+        }
+    }
+
+    private func testHealth() {
+        healthCheckMessage = nil
+        Task {
+            do {
+                try await Task.detached { try HookInstaller.sendHealthCheck() }.value
+                try? await Task.sleep(for: .milliseconds(100))
+                healthCheckMessage = watcher.lastHealthCheckAt == nil
+                    ? "テスト要求は完了しましたが、受信確認が取れませんでした。"
+                    : "ローカル受信サーバは正常です。"
+            } catch {
+                healthCheckMessage = "受信テストに失敗しました: \(error.localizedDescription)"
+            }
         }
     }
 

@@ -8,8 +8,8 @@
 //  ここは予約の保持・待ち時間の消化・実行という副作用だけを受け持つ。
 //
 //  設計の要点は、待ち時間を「減らさない」条件を持たせたこと。
-//  対象が動き出した／どこかで回答を待っている／ユーザーがノッチへ入力中、
-//  のいずれかであればカウントを止めて理由を出し、予約は残したまま待ち続ける。
+//  対象が再び動き出した場合はカウントを止めて理由を出し、
+//  予約は残したまま待ち続ける。
 //  取り消すのではなく止めるのは、少し席へ戻っただけで予約が消えると
 //  「終わったら寝る」という当初の意図まで失われてしまうため。
 //
@@ -47,14 +47,10 @@ final class SleepScheduler {
         var remaining: TimeInterval
         /// 進めない理由（`.none` なら進行中）
         var hold: SleepHold
-        /// ノッチへ入力中などでユーザーが操作していて止めているか
-        var pausedByUser: Bool
-
-        var isPaused: Bool { hold.isHolding || pausedByUser }
+        var isPaused: Bool { hold.isHolding }
 
         /// なぜ止まっているのかの説明
         var holdMessage: String? {
-            if pausedByUser { return "操作中のため待っています" }
             return hold.message
         }
 
@@ -75,8 +71,6 @@ final class SleepScheduler {
 
     /// 現在のセッション一覧を取り出す（AppCoordinator が結線する）
     @ObservationIgnored var sessionsProvider: () -> [SleepSessionSnapshot] = { [] }
-    /// ユーザーが今ノッチを操作中か（入力中は待ち時間を進めない）
-    @ObservationIgnored var isUserInteracting: () -> Bool = { false }
     /// 待ち時間の開始・終了をUIへ知らせる
     @ObservationIgnored var onCountdownStarted: (() -> Void)?
     @ObservationIgnored var onCountdownFinished: (() -> Void)?
@@ -180,8 +174,7 @@ final class SleepScheduler {
             label: reservationLabel,
             targetCount: reservations.count,
             remaining: SleepPreferences.countdown,
-            hold: .none,
-            pausedByUser: false
+            hold: .none
         )
         startMonitor()
         onCountdownStarted?()
@@ -232,7 +225,6 @@ final class SleepScheduler {
         guard !reservations.isEmpty, var current = countdown else { return }
 
         current.hold = SleepCondition.hold(targets: targets, sessions: sessions)
-        current.pausedByUser = isUserInteracting()
 
         if current.isPaused {
             holdingSeconds += 1
@@ -279,9 +271,9 @@ final class SleepScheduler {
     private func fire() async {
         guard !reservations.isEmpty, let current = countdown else { return }
 
-        // 直前にもう一度確かめる。1秒の間に承認待ちが現れることがある。
+        // 直前にもう一度確かめる。1秒の間に対象が作業を再開することがある。
         let hold = SleepCondition.hold(targets: targets, sessions: sessionsProvider())
-        guard !hold.isHolding, !isUserInteracting() else { return }
+        guard !hold.isHolding else { return }
 
         countdown = nil
         onCountdownFinished?()

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Monitor-only regression guard
+        run: >-
+          ! grep -R -nE
+          'send-keys|capture-pane|new-session|attach-session|kill-session|SIGTERM|SIGKILL|kill[[:space:]]*\('
+          Subghost/Subghost --include='*.swift'
+      - name: Validate privacy manifest
+        run: plutil -lint Subghost/Subghost/PrivacyInfo.xcprivacy
+      - name: Build
+        run: >-
+          xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost
+          -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+      - name: Unit tests
+        run: >-
+          xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost
+          -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
+          -only-testing:SubghostTests test
+      - name: Analyze Release build
+        run: >-
+          xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost
+          -configuration Release -destination 'platform=macOS'
+          CODE_SIGNING_ALLOWED=NO analyze

@@ -159,6 +159,7 @@ final class NotchPanel: NSPanel {
 
 // MARK: - コントローラ
 
+@MainActor
 final class NotchPanelController {
 
     private unowned let coordinator: AppCoordinator
@@ -243,7 +244,6 @@ final class NotchPanelController {
     private static let menuBarPollInterval: TimeInterval = 0.4
 
     /// 全画面アプリでメニューバーが隠れている画面では、ノッチUIも隠す。
-    /// ただし承認待ちなど操作が必要な場合は、内容に重なってでも表示する。
     private func startMenuBarTracking() {
         menuBarTimer?.invalidate()
         let timer = Timer.scheduledTimer(withTimeInterval: Self.menuBarPollInterval, repeats: true) {
@@ -286,7 +286,7 @@ final class NotchPanelController {
     }
 
     private func shouldBeVisible() -> Bool {
-        // 応答待ちや入力中は、全画面アプリの上でも見せる必要がある
+        // 展開中の案内や一覧は、全画面アプリの上でも見せる
         guard coordinator.displayMode == .compact else { return true }
         if NotchPreferences.hideWhenNoSessions, coordinator.watcher.sessions.isEmpty {
             return false
@@ -335,7 +335,7 @@ final class NotchPanelController {
     /// 展開時は透明な表示領域だけを先に確保し、黒いノッチ形状の変形はSwiftUIへ任せる。
     /// 収納時は形状がノッチへ戻り終えてから、透明な表示領域を小さくする。
     func modeChanged() {
-        // 承認待ちなどで展開する場合は、隠れていても即座に出す
+        // モード変更を現在のメニューバー表示状態へ即座に反映する
         updateVisibility()
 
         let target = frame(for: coordinator.displayMode)
@@ -388,21 +388,14 @@ final class NotchPanelController {
         applyMeasuredHeight(height)
     }
 
-    // MARK: - キーボードフォーカス (設計書 4.3)
-
-    func focusInput() {
-        // 常駐アプリ(LSUIElement)かつ非アクティブ化パネルのため、
-        // アプリ自体をアクティブにしないとキーボード入力が前面のアプリへ行ってしまう。
-        NSApp.activate()
-        panel.makeKeyAndOrderFront(nil)
-    }
+    // MARK: - フォーカス復帰
 
     func resignInput() {
         guard panel.isKeyWindow else { return }
         // 一旦orderOutして直前のアプリへキーボードフォーカスを返す
         panel.orderOut(nil)
         panel.orderFrontRegardless()
-        // 入力を終えたら元のアプリへ操作を戻す
+        // 操作を終えたら元のアプリへフォーカスを戻す
         NSApp.deactivate()
     }
 
@@ -437,13 +430,6 @@ final class NotchPanelController {
             size = NSSize(width: NotchLayout.canvasWidth(
                 for: max(metrics.notchWidth + 280, 620)),
                           height: min(max(height, 200), 380))
-        case .input:
-            size = NSSize(
-                width: NotchLayout.canvasWidth(
-                    for: max(metrics.notchWidth + 280, 640)
-                ),
-                height: 340
-            )
         case .sessions:
             // 一覧は最大高を超えた分だけ内部スクロールする。
             // 一覧に実際に出す件数で高さを決める（絞り込みで消えた分の余白を作らない）
@@ -465,20 +451,6 @@ final class NotchPanelController {
                     for: max(metrics.notchWidth + 420, 760)
                 ),
                 height: min(metrics.topInset + 90 + max(listHeight, 150), 520)
-            )
-        case .choice:
-            // 選択肢の数と文脈行数で高さが変わるため実データから見積もる
-            let choice = coordinator.pendingChoice
-            let optionCount = choice?.options.count ?? 2
-            let detailCount = choice?.detail.count ?? 0
-            let estimated = metrics.topInset + 120
-                + CGFloat(detailCount) * 16
-                + CGFloat(optionCount) * 38
-            size = NSSize(
-                width: NotchLayout.canvasWidth(
-                    for: max(metrics.notchWidth + 320, 680)
-                ),
-                height: min(estimated, 480)
             )
         case .onboarding:
             // 「フック連携」ステップだけ対象CLI数ぶん行が増える。他のステップは短い固定文言。
@@ -574,7 +546,7 @@ enum NotchLayout {
     static let topShoulderWidth: CGFloat = 12 // 画面上端とつなぐ外向きのカーブ
     static let collapseAnimationDuration: TimeInterval = 0.32
     /// セッションが増えてもノッチが画面下まで伸びないよう、一覧部分だけを制限する。
-    static let sessionRowEstimatedHeight: CGFloat = 68
+    static let sessionRowEstimatedHeight: CGFloat = 86
     /// 一覧に一度に見せる件数から高さを決める。これを超えるぶんはスクロールになる。
     static var sessionsListMaxHeight: CGFloat {
         CGFloat(AppearancePreferences.sessionListMaxRows) * sessionRowEstimatedHeight

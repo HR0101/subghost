@@ -5,8 +5,7 @@
 //  Ghostty補助ノッチAIアシスタント
 //
 //  アプリの入口。@main の App 本体と AppDelegate だけを持つ。
-//  メニューバーには常駐せず、Scene は SwiftUI が最低1つ要求するための
-//  Settings のみ。実際の起動処理・終了処理はすべて AppCoordinator へ委ねる。
+//  ノッチを見失った場合の復旧導線として、最小限のメニューバー項目も提供する。
 //
 
 import SwiftUI
@@ -15,13 +14,38 @@ import SwiftUI
 struct SubghostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
-    // メニューバーには何も置かない。操作の入口はノッチUIに集約する。
-    // App は最低1つ Scene を要求するため Settings を置いているが、
-    // 設定ウインドウは SettingsWindowController が自前で開く（このシーン経由ではない）。
     var body: some Scene {
+        MenuBarExtra("Subghost", systemImage: "ghost.fill") {
+            SubghostMenuBarContent()
+        }
+
         Settings {
             SettingsView()
         }
+    }
+}
+
+private struct SubghostMenuBarContent: View {
+    @State private var coordinator = AppCoordinator.shared
+
+    var body: some View {
+        Button("セッション一覧を開く") { coordinator.showSessions() }
+        Button("アクティビティを開く") { coordinator.showActivity() }
+
+        if !coordinator.watcher.sessions.isEmpty {
+            Divider()
+            ForEach(coordinator.watcher.sessions) { session in
+                Button("\(session.info.displayName) — \(session.state.displayName)") {
+                    coordinator.jump(to: session)
+                }
+                .disabled(session.info.tty.isEmpty)
+            }
+        }
+
+        Divider()
+        Button("設定…") { coordinator.openSettings() }
+            .keyboardShortcut(",")
+        Button("Subghostを終了") { NSApp.terminate(nil) }
     }
 }
 

@@ -31,9 +31,8 @@ final class CustomAliasStore {
 
     /// 名前を追加する。空文字・不正な文字・重複（大文字小文字を区別しない）は無視する。
     ///
-    /// この名前はシェルスクリプトへ直接埋め込まれるため、英数字・ハイフン・
-    /// アンダースコア以外を許すとコマンドインジェクションになりうる
-    /// (CustomAlias.isValidName / 実機レビューで指摘された脆弱性)。
+    /// 外部プロセス名と照合する値なので、英数字・ハイフン・アンダースコアに
+    /// 限定し、壊れた設定や意図しない表示値を持ち込まない。
     @discardableResult
     func add(name: String, baseProfileID: String) -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
@@ -55,7 +54,10 @@ final class CustomAliasStore {
         guard let data = try? Data(contentsOf: storeURL),
               let decoded = try? JSONDecoder().decode([CustomAlias].self, from: data)
         else { return }
-        aliases = decoded
+        let supportedProfiles = Set(CLIProfile.builtins.map(\.id))
+        aliases = decoded.filter {
+            CustomAlias.isValidName($0.name) && supportedProfiles.contains($0.baseProfileID)
+        }
     }
 
     private func save() {

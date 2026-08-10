@@ -9,9 +9,8 @@
 //
 //  表示の要点:
 //  要求されたモードは NotchMode だが、実際に描画されるのは displayMode。
-//  入力 > 選択 > オンボーディング > 通知 > セッション一覧 > 活動 > ホバー > コンパクト
-//  の優先順位を適用し、急ぎの問い合わせが埋もれることと、入力中に画面が
-//  切り替わることを防ぐ。表示の優先順位を変えるときは呼び出し側ではなくここを直す。
+//  オンボーディング > 通知 > セッション一覧 > 活動 > ホバー > コンパクト
+//  の優先順位を適用する。Subghostは監視専用で、CLIへの入力は行わない。
 //
 
 import AppKit
@@ -21,10 +20,8 @@ import Observation
 enum NotchMode: Equatable {
     case compact        // 状態アイコンのみ
     case notification   // 応答チラ見せ
-    case input          // プロンプト入力欄
-    case choice         // 承認リクエスト／質問への回答
     case sessions       // 複数CLIの一覧
-    case activity       // 完了・エラー・回答待ちの履歴
+    case activity       // 完了・エラーの履歴
     case onboarding      // 初回起動時の案内
     case sleep          // まもなくスリープする案内（取り消しの機会）
 }
@@ -37,26 +34,13 @@ enum OnboardingStep: Int, CaseIterable {
     case done
 }
 
-/// セッションを切り替えても入力途中の内容を混ぜないための下書き置き場。
-nonisolated struct PromptDraftStore {
-    private var drafts: [String: String] = [:]
-
-    func text(for key: String) -> String {
-        drafts[key] ?? ""
-    }
-
-    mutating func setText(_ text: String, for key: String) {
-        drafts[key] = text
-    }
-}
-
+@MainActor
 @Observable
 final class AppCoordinator {
 
     static let shared = AppCoordinator()
 
     let watcher = SessionWatcher()
-    let snippets = SnippetStore()
     let activity = ActivityStore()
     let hotkey = HotkeyManager()
     let customAliasStore = CustomAliasStore()
@@ -68,14 +52,6 @@ final class AppCoordinator {
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
     @ObservationIgnored private var notificationPresentationTask: Task<Void, Never>?
-    /// ユーザーが明示的に閉じた問い合わせ（セッション名 → 内容）。同じ内容では再展開しない。
-    @ObservationIgnored private var dismissedChoices: [String: PendingChoice] = [:]
-    /// タイムアウトで自動的に閉じた問い合わせ（セッション名 → 内容・時刻）。
-    /// ユーザーが見た記録ではないため、クールダウンの後は再度自動展開の対象に戻す。
-    @ObservationIgnored private var autoClosedChoices: [String: (choice: PendingChoice, at: Date)] = [:]
-    /// 自動で閉じた直後にすぐ再展開してしまわないための猶予
-    private static let autoCloseCooldown: TimeInterval = 5.0
-
     private(set) var mode: NotchMode = .compact
     /// パネルコントローラが算出したノッチ寸法（ビューが形状描画に使う）
     var notchMetrics: NotchMetrics?
@@ -85,86 +61,78 @@ final class AppCoordinator {
     private var isPointerInside = false
     /// 通知展開で表示中のセッション
     private(set) var notificationSession: MonitoredSession?
-    /// 承認/質問の回答待ちで表示中のセッション
-    private(set) var choiceSession: MonitoredSession?
-    /// セッションごとの入力下書き。TTY再利用時の混同を避けるためPIDも含める。
-    private var promptDrafts = PromptDraftStore()
-    var inputText: String {
-        get { promptDrafts.text(for: promptDraftKey) }
-        set { promptDrafts.setText(newValue, for: promptDraftKey) }
-    }
-    var lastSendError: String?
-    /// 回答送信に失敗したときのメッセージ
-    var lastChoiceError: String?
-    /// 回答を送信中か（二重送信の防止と表示用）
-    private(set) var isSendingChoice = false
-    /// 送信できた選択肢のラベル（一瞬「送信しました」を出す）
-    private(set) var choiceSentLabel: String?
     /// 消音中か（一覧のスピーカーアイコンと連動）。
     /// SoundAlerts.isEnabled はUserDefaultsを都度読むだけの static var で、@Observable の
     /// 変更検知の対象にならない（他クラスの静的プロパティのため）。ここにストアドプロパティとして
     /// キャッシュし、変更のたびに明示的に更新することでボタンの見た目を追従させる。
     /// (実機で確認した不具合: ボタンを押しても消音自体は効くが、アイコン表示が変わらなかった)
-    private(set) var isMuted: Bool = !SoundAlerts.isEnabled
+    private(set) var isMuted = false
     @ObservationIgnored private var soundDefaultsObserver: NSObjectProtocol?
 
     // MARK: - 初回起動の案内
 
     @ObservationIgnored private static let hasCompletedOnboardingKey = "hasCompletedOnboarding"
-    @ObservationIgnored private static let removedLegacyTmuxKey = "removedLegacyTmuxIntegration"
-    @ObservationIgnored private static let migratedMonitoringHooksKey = "migratedMonitoringOnlyHooks"
+    @ObservationIgnored private static let migrationVersionKey = "migrationVersion"
+    @ObservationIgnored private static let currentMigrationVersion = 2
     private(set) var onboardingStep: OnboardingStep = .welcome
     /// フック有効化ボタンを押した結果（成功メッセージ／エラー）。ステップごとに保持する。
     var onboardingHookMessage: [HookTarget: String] = [:]
+    private(set) var onboardingNotificationMessage: String?
 
     /// 実際に画面へ出す表示モード（ホバー時は軽く展開してプレビュー: 設計書 6.4）
     var displayMode: NotchMode {
-        if mode == .input { return .input }
-        // 送信中／送信完了表示のあいだは一覧へ切り替えない
-        if mode == .choice { return .choice }
         // まもなくスリープする案内は、取り消す機会そのもの。案内や通知に埋もれさせない。
         if mode == .sleep { return .sleep }
-        // 初回案内は、本当に急ぎの選択肢対応の次に優先する。
-        // 通知や一覧に割り込まれて案内が埋もれないようにするため。
+        // 通知や一覧に割り込まれて初回案内が埋もれないようにする。
         if mode == .onboarding { return .onboarding }
         if mode == .notification { return .notification }
-        // 入力画面の戻るボタンから開いた一覧は、ホバーが外れても表示を維持する。
+        // 明示的に開いた一覧は、ホバーが外れても表示を維持する。
         if mode == .sessions { return .sessions }
         if mode == .activity { return .activity }
         // ホバー中は常に一覧を出す。
-        // メニューバー項目を置かないため、ここが設定・終了への唯一の入口になる。
+        // ホバーからも素早くセッション一覧へ入れる。
         if isHovering { return .sessions }
         return .compact
     }
 
-    /// 承認モードで表示中の選択肢
-    var pendingChoice: PendingChoice? { choiceSession?.pendingChoice }
-
     // MARK: - 起動
 
     func start() {
-        migrateRemovedFeaturesIfNeeded()
+        let isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
+        if isUITesting {
+            UserDefaults.standard.set(false, forKey: Self.hasCompletedOnboardingKey)
+            UserDefaults.standard.set(false, forKey: "soundEnabled")
+        } else {
+            migrateRemovedFeaturesIfNeeded()
+        }
+        // @Observableのストアドプロパティ初期化子からMainActor分離された設定を読むと、
+        // Xcode 16.4ではマクロ展開後のコードがActor分離違反になる。起動時にMainActor上で
+        // 同期することで、通常起動とUIテスト用設定のどちらも正しい表示へ合わせる。
+        isMuted = !SoundAlerts.isEnabled
+        if AppearancePreferences.hidePreviewText { activity.redactSummaries() }
         NotificationManager.shared.setup()
         SoundAlerts.shared.play(.appLaunched)
 
-        // 監視より先にパネルを用意する。
-        // 起動直後の1回目のポーリングで承認待ちを見つけた場合、
-        // パネルが未生成だとノッチを開けないため。
+        // 監視より先にパネルを用意し、初回イベントから表示できるようにする。
         panelController = NotchPanelController(coordinator: self)
         panelController?.show()
 
-        hotkey.onAction = { [weak self] action in
-            self?.perform(action)
+        if !isUITesting {
+            hotkey.onAction = { [weak self] action in
+                self?.perform(action)
+            }
+            hotkey.register()
         }
-        hotkey.register()
 
         watcher.onEvent = { [weak self] session, event in
             self?.handle(event: event, session: session)
         }
         wireSleepScheduler()
         watcher.customAliases = customAliasStore.aliases
-        watcher.startHookServer()
-        watcher.start()
+        if !isUITesting {
+            watcher.startHookServer()
+            watcher.start()
+        }
 
         // 設定画面（@AppStorage経由）からサウンド設定が変わった場合にも
         // ノッチのアイコンを追従させる。ノッチのボタン経由の変更は toggleMute() が
@@ -180,36 +148,38 @@ final class AppCoordinator {
         }
 
         // 初回起動時だけ、案内をノッチへ自動で出す。
-        // メニューバー・Dockに何も置かない設計のため、フック連携や権限といった
-        // 重要な設定に自分から気づいてもらう手段がノッチの外に無い。
         if !UserDefaults.standard.bool(forKey: Self.hasCompletedOnboardingKey) {
             setMode(.onboarding)
         }
     }
 
-    /// 旧版がユーザー環境へ追加した自動tmux起動と回答用フックを一度だけ片付ける。
+    /// 旧版がユーザー環境へ追加した自動tmux起動と旧フックを一度だけ片付ける。
     private func migrateRemovedFeaturesIfNeeded() {
         let defaults = UserDefaults.standard
+        let version = defaults.integer(forKey: Self.migrationVersionKey)
+        guard version < Self.currentMigrationVersion else { return }
+        var succeeded = true
 
-        if !defaults.bool(forKey: Self.removedLegacyTmuxKey) {
+        if version < 1 {
             do {
                 if ShellIntegration.isInstalled() { try ShellIntegration.uninstall() }
-                defaults.set(true, forKey: Self.removedLegacyTmuxKey)
             } catch {
+                succeeded = false
                 NSLog("Subghost: 旧tmux自動起動設定を解除できませんでした: \(error.localizedDescription)")
             }
         }
 
-        if !defaults.bool(forKey: Self.migratedMonitoringHooksKey) {
+        if version < 2 {
             do {
                 for target in HookTarget.allCases where HookInstaller.isInstalled(target) {
                     try HookInstaller.install(target)
                 }
-                defaults.set(true, forKey: Self.migratedMonitoringHooksKey)
             } catch {
+                succeeded = false
                 NSLog("Subghost: 監視専用フックへ移行できませんでした: \(error.localizedDescription)")
             }
         }
+        if succeeded { defaults.set(Self.currentMigrationVersion, forKey: Self.migrationVersionKey) }
     }
 
     // MARK: - タスク完了後のスリープ (追補)
@@ -224,8 +194,6 @@ final class AppCoordinator {
                 SleepSessionSnapshot(info: $0.info, state: $0.state)
             } ?? []
         }
-        // 入力中はユーザーが目の前にいる。書いている途中で寝るのは明らかに誤り。
-        sleepScheduler.isUserInteracting = { [weak self] in self?.mode == .input }
         sleepScheduler.onCountdownStarted = { [weak self] in self?.presentSleepCountdown() }
         sleepScheduler.onCountdownFinished = { [weak self] in
             guard let self, self.mode == .sleep else { return }
@@ -283,10 +251,8 @@ final class AppCoordinator {
 
     /// まもなくスリープすることをノッチへ出す。
     ///
-    /// 入力中と回答待ちの表示は妨げない。表示できなくても待ち時間は進むが、
-    /// コンパクト表示と一覧に残り時間が出るので、そちらから取り消せる。
+    /// 他の展開表示より優先して、取り消せるカウントダウンを表示する。
     private func presentSleepCountdown() {
-        guard mode != .input, mode != .choice else { return }
         notificationPresentationTask?.cancel()
         collapseTask?.cancel()
         notificationSession = nil
@@ -297,7 +263,6 @@ final class AppCoordinator {
     // MARK: - グローバルショートカット (設計書 4.3)
 
     /// 割り当てられた操作を実行する。
-    /// 回答系は、回答待ちのセッションが無ければ何もしない（押し間違いで誤送信しないため）。
     func perform(_ action: HotkeyAction) {
         switch action {
         case .showSessions:
@@ -309,20 +274,6 @@ final class AppCoordinator {
         case .toggleMute:
             toggleMute()
         }
-    }
-
-    /// ショートカットから「はい／いいえ」で答える。
-    /// ノッチを開いていなくても、回答待ちのセッションがあればそれを対象にする。
-    private func respondToPendingChoice(affirmative: Bool) {
-        let target = choiceSession ?? watcher.sessionAwaitingResponse
-        guard let session = target, let choice = session.pendingChoice else { return }
-        guard let option = affirmative ? choice.affirmativeOption : choice.negativeOption else {
-            // はい／いいえが揃っていない問いは、選択肢を見せて選んでもらう
-            showChoice(for: session)
-            return
-        }
-        if choiceSession !== session { choiceSession = session }
-        respond(with: option)
     }
 
     // MARK: - 初回起動の案内
@@ -358,12 +309,19 @@ final class AppCoordinator {
         }
     }
 
+    func requestNotificationPermission() {
+        NotificationManager.shared.requestAuthorization { [weak self] allowed in
+            self?.onboardingNotificationMessage = allowed
+                ? "通知を有効にしました。"
+                : "通知は許可されていません。後からシステム設定で変更できます。"
+        }
+    }
+
     // MARK: - 状態遷移イベント (設計書 4.1 / 4.2)
 
     private func handle(event: DetectorEvent, session: MonitoredSession) {
         switch event {
         case .becameCompleted(let preview):
-            NotificationManager.shared.invalidateChoice(for: session.info)
             activity.record(kind: .completed, session: session.info, preview: preview)
             SoundAlerts.shared.play(for: .completed, session: session.info)
             NotificationManager.shared.notify(session: session.info, state: .completed, preview: preview)
@@ -373,7 +331,6 @@ final class AppCoordinator {
                 showNotification(for: session)
             }
         case .becameError(let preview):
-            NotificationManager.shared.invalidateChoice(for: session.info)
             activity.record(kind: .error, session: session.info, preview: preview)
             SoundAlerts.shared.play(for: .error, session: session.info)
             NotificationManager.shared.notify(session: session.info, state: .error, preview: preview)
@@ -381,29 +338,7 @@ final class AppCoordinator {
             if AlertGate.allowsAutoExpand(.error, session: session.info) {
                 showNotification(for: session)
             }
-        case .becameAwaitingChoice(let choice):
-            let event: NotificationEvent = choice.kind == .approval ? .approval : .question
-            activity.record(
-                kind: choice.kind == .approval ? .approval : .question,
-                session: session.info,
-                preview: [choice.title]
-            )
-            SoundAlerts.shared.play(for: session.state, session: session.info)
-            NotificationManager.shared.notifyChoice(session: session.info, choice: choice)
-            // ミュート中でも、回答しないとCLIが止まる問いは黙って捨てない。
-            // ノッチを自動で開かないだけで、一覧には回答待ちとして残り続ける。
-            if AlertGate.allowsAutoExpand(event, session: session.info) {
-                showChoice(for: session)
-            }
-        case .choiceResolved:
-            NotificationManager.shared.invalidateChoice(for: session.info)
-            dismissedChoices[session.info.tty] = nil
-            autoClosedChoices[session.info.tty] = nil
-            // ターミナル側で回答された場合はノッチを畳む
-            if choiceSession === session { collapse() }
-        case .becameThinking, .becameIdle:
-            NotificationManager.shared.invalidateChoice(for: session.info)
-        case .none:
+        case .becameThinking, .becameIdle, .none:
             break
         }
     }
@@ -423,10 +358,9 @@ final class AppCoordinator {
     }
 
     private func presentNotification(for session: MonitoredSession) {
-        // 非同期の前面タブ判定中に入力や承認が開いた場合、それを通知で上書きしない。
-        // オンボーディング中も同様に、通常の完了/エラー通知でセットアップ画面を
+        // オンボーディング中は通常の完了/エラー通知でセットアップ画面を
         // 上書きしない（実機レビューで指摘: 上書きされた後は自動で戻らなかった）。
-        guard mode != .input, mode != .choice, mode != .onboarding else { return }
+        guard mode != .onboarding else { return }
         notificationSession = session
         setMode(.notification)
 
@@ -443,149 +377,7 @@ final class AppCoordinator {
         }
     }
 
-    // MARK: - 承認/質問モード (Approve / Ask)
-
-    /// 回答待ちのセッションをノッチへ展開する。
-    /// 通知の自動折りたたみは行わない（ユーザーが答えるまで消さない）。
-    func showChoice(for session: MonitoredSession) {
-        // 入力中は割り込まない。閉じたときに collapse() が改めて拾う。
-        guard mode != .input else { return }
-        notificationPresentationTask?.cancel()
-        collapseTask?.cancel()
-        lastChoiceError = nil
-        notificationSession = nil
-        choiceSession = session
-        setMode(.choice)
-        // 既に承認モードでも選択肢の数で高さが変わるため、必ずフレームを取り直す
-        panelController?.modeChanged()
-        takeChoiceFocusIfAppropriate(for: session)
-
-        // 既定では自動で閉じない（回答するまで表示し続ける）。設定で秒数が
-        // 指定されている場合のみ、その時間が経過し、かつホバー中でなければ畳む。
-        // (実機で確認: 無回答のまま勝手に閉じるのはバグとして修正済みだが、
-        // 自動で閉じたい人向けに設定でだけ選べるようにする)
-        let autoCloseSeconds = NotchPreferences.choiceAutoCloseInterval
-        guard autoCloseSeconds > 0 else { return }
-        collapseTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(autoCloseSeconds))
-            while let self, self.isHovering, !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-            }
-            guard let self, !Task.isCancelled,
-                  self.mode == .choice, self.choiceSession === session
-            else { return }
-            self.autoCloseChoice(session: session)
-        }
-    }
-
-    /// 選択肢が出たときにキーボードフォーカスを取るか判断する。
-    ///
-    /// 無条件に `NSApp.activate()` すると、ユーザーが他アプリで文章を書いている最中でも
-    /// 打鍵を横取りし、数字キーが意図しない回答として送信されてしまう。
-    /// - 設定で無効にされていれば取らない
-    /// - 対象セッションのターミナルが既に前面なら、そちらで直接答えられるので取らない
-    private func takeChoiceFocusIfAppropriate(for session: MonitoredSession) {
-        guard NotchPreferences.focusChoiceOnAppear else { return }
-        Task { [weak self] in
-            guard await !TerminalActivator.isSessionFrontmost(session.info) else { return }
-            guard let self, self.mode == .choice, self.choiceSession === session else { return }
-            self.panelController?.focusInput()
-        }
-    }
-
-    /// 選択肢へ回答する（ノッチのボタン／数字キーから呼ばれる）
-    func respond(with option: ChoiceOption) {
-        respond(with: [option])
-    }
-
-    /// 旧UIから呼ばれてもCLIへは何も送らない。
-    func respond(with options: [ChoiceOption]) {
-        guard !options.isEmpty else { return }
-        lastChoiceError = "Subghostからの回答送信機能は廃止されました。ターミナルで直接回答してください。"
-    }
-
-    /// 回答せずにノッチだけ閉じる（CLIへは何も送らない、Escキー等ユーザーの明示操作）
-    func dismissChoice() {
-        rememberDismissal()
-        collapseInternal(resumeIfNeeded: true)
-    }
-
-    /// 閉じた問い合わせを記録し、同じ内容で再展開しないようにする
-    private func rememberDismissal() {
-        guard let session = choiceSession, let choice = session.pendingChoice else { return }
-        dismissedChoices[session.info.tty] = choice
-    }
-
-    /// タイムアウトによる自動クローズ。ユーザーが見たわけではないため
-    /// dismissedChoices には記録しない。ただし collapse() をそのまま呼ぶと
-    /// resumePendingChoiceIfNeeded() が未回答のままの選択肢を検知して即座に
-    /// 開き直してしまい、自動で閉じた意味が無くなる。そのため resumeIfNeeded なしで
-    /// 畳み、短いクールダウンの後に改めて自動展開の対象へ戻す。
-    /// (実機レビューで指摘: 自動タイムアウトで閉じると二度と再表示できなかった)
-    private func autoCloseChoice(session: MonitoredSession) {
-        if let choice = session.pendingChoice {
-            autoClosedChoices[session.info.tty] = (choice, Date())
-        }
-        collapseInternal(resumeIfNeeded: false)
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.autoCloseCooldown))
-            self?.resumePendingChoiceIfNeeded()
-        }
-    }
-
-    /// 折りたたみ後、まだ回答されていない問い合わせが残っていれば改めて展開する
-    private func resumePendingChoiceIfNeeded() {
-        guard mode == .compact else { return }
-        guard let session = watcher.sessionAwaitingResponse,
-              let choice = session.pendingChoice
-        else { return }
-        if dismissedChoices[session.info.tty] == choice { return }
-        if let recent = autoClosedChoices[session.info.tty],
-           recent.choice == choice,
-           Date().timeIntervalSince(recent.at) < Self.autoCloseCooldown {
-            return
-        }
-        showChoice(for: session)
-    }
-
-    // MARK: - 入力モード (設計書 4.3)
-
-    func toggleInput() {
-        if mode == .input {
-            collapse()
-        } else {
-            expandInput()
-        }
-    }
-
-    /// プロンプトを送れるセッションが1つでもあるか。
-    /// 入力欄を出すかどうかの唯一の判断基準にする。
-    var canSendPromptToAnySession: Bool {
-        watcher.sessions.contains { $0.info.canSendPrompt }
-    }
-
-    func expandInput() {
-        notificationPresentationTask?.cancel()
-        collapseTask?.cancel()
-        lastSendError = nil
-
-        // 送れないセッションで入力欄を出すと、書いてから送信時に断ることになる。
-        // 送れる相手がいなければ入力欄自体を出さず、一覧で状況を見せる。
-        guard canSendPromptToAnySession else {
-            showSessions()
-            return
-        }
-        // 選ばれている送信先が送れないなら、送れるセッションへ寄せる
-        if watcher.activeSession?.info.canSendPrompt == false,
-           let sendable = watcher.sessions.first(where: { $0.info.canSendPrompt }) {
-            watcher.chooseActiveSession(sendable.info.tty)
-        }
-
-        setMode(.input)
-        panelController?.focusInput()
-    }
-
-    /// 入力内容を保持したまま、送信先を選べるセッション一覧へ戻る。
+    /// 監視中のセッション一覧を表示する。
     func showSessions() {
         notificationPresentationTask?.cancel()
         collapseTask?.cancel()
@@ -605,45 +397,13 @@ final class AppCoordinator {
     }
 
     func collapse() {
-        collapseInternal(resumeIfNeeded: true)
-    }
-
-    private func collapseInternal(resumeIfNeeded: Bool) {
         collapseTask?.cancel()
         notificationSession = nil
-        choiceSession = nil
         setMode(.compact)
         panelController?.resignInput()
-        if resumeIfNeeded { resumePendingChoiceIfNeeded() }
-    }
-
-    func sendPrompt() {
-        lastSendError = "Subghostからの送信機能は廃止されました。"
-    }
-
-    private var promptDraftKey: String {
-        guard let session = watcher.activeSession else { return "no-session" }
-        return "\(session.info.pid):\(session.info.tty)"
-    }
-
-    func insertSnippet(_ snippet: Snippet) {
-        if inputText.isEmpty {
-            inputText = snippet.body
-        } else {
-            inputText += " " + snippet.body
-        }
     }
 
     // MARK: - クリックでターミナルへ (設計書 4.2 / 6.4、追補: Jump)
-
-    /// 一覧から選んだセッションを送信先にして、プロンプト入力欄を開く
-    func promptSession(_ session: MonitoredSession) {
-        // 送れないセッションでは一覧の送信ボタン自体を出していないが、
-        // 経路が増えても取り違えないよう、ここでも確かめる。
-        guard session.info.canSendPrompt else { return }
-        watcher.chooseActiveSession(session.info.tty)
-        expandInput()
-    }
 
     // MARK: - 一覧の片付け
 
@@ -652,37 +412,9 @@ final class AppCoordinator {
         watcher.hide(session)
     }
 
-    /// CLIごと終了させる。取り消せない操作なので必ず確認を取る。
-    ///
-    /// ノッチのパネルは statusBar より上にいるため、パネル内にシートを出すと
-    /// 隠れてしまう。アプリモーダルの NSAlert で確実に前へ出す。
-    func confirmTerminate(_ session: MonitoredSession) {
-        NSApp.activate()
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText =
-            "\(session.info.displayName) の \(session.info.profile.displayName) を終了しますか？"
-        alert.informativeText =
-            "作業中だった場合、途中の内容は失われることがあります。"
-            + "終了させず、一覧から隠すだけにもできます。"
-        alert.addButton(withTitle: "終了する")
-        alert.addButton(withTitle: "キャンセル")
-        alert.addButton(withTitle: "隠すだけ")
-
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            watcher.terminate(session)
-        case .alertThirdButtonReturn:
-            watcher.hide(session)
-        default:
-            break
-        }
-    }
-
     /// 一覧から選んだセッションのタブへ移動する
     func jump(to session: MonitoredSession) {
-        watcher.chooseActiveSession(session.info.tty)
+        watcher.chooseActiveSession(session.info.id)
         watcher.acknowledge(session)
         collapse()
         Task { await TerminalActivator.jump(to: session.info) }
@@ -704,15 +436,12 @@ final class AppCoordinator {
 
     /// 対象セッションが動いているターミナルのタブへ移動する
     func jumpToTerminal() {
-        // 回答待ちのままターミナルへ移る場合は、戻ってきた直後に再展開しないよう記録しておく
-        if mode == .choice { rememberDismissal() }
-
-        let target = choiceSession ?? notificationSession ?? watcher.activeSession
+        let target = notificationSession ?? watcher.activeSession
         if let target {
-            watcher.activeSessionName = target.info.tty
+            watcher.activeSessionName = target.info.id
             watcher.acknowledge(target)
         }
-        if mode == .notification || mode == .choice { collapse() }
+        if mode == .notification { collapse() }
 
         Task {
             if let target {

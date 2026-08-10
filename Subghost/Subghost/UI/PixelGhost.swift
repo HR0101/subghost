@@ -107,8 +107,6 @@ nonisolated enum GhostSprite {
             return (happy, happy)
         case .thinking:
             return (idle, wave)
-        case .awaitingApproval, .awaitingAnswer:
-            return (alert, idle)
         case .error:
             return (upset, upset)
         }
@@ -118,7 +116,6 @@ nonisolated enum GhostSprite {
     static func frameDuration(for state: AIState) -> Double {
         switch state {
         case .thinking: return 0.35        // せわしなく揺れる
-        case .awaitingApproval, .awaitingAnswer: return 0.5   // 点滅して気を引く
         default: return 2.2                // たまに瞬きするだけ
         }
     }
@@ -162,8 +159,6 @@ struct PixelGhostView: View {
         switch state {
         case .idle: return .gray
         case .thinking: return .blue
-        case .awaitingApproval: return .orange
-        case .awaitingAnswer: return .yellow
         case .completed: return .green
         case .error: return .red
         }

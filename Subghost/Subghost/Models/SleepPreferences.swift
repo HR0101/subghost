@@ -62,8 +62,6 @@ nonisolated enum SleepHold: Hashable, Sendable {
     case targetMissing
     /// 対象がまだ作業中
     case targetBusy
-    /// 承認・質問の回答を待っているセッションがある
-    case awaitingResponse
 
     var isHolding: Bool { self != .none }
 
@@ -73,7 +71,6 @@ nonisolated enum SleepHold: Hashable, Sendable {
         case .none: return nil
         case .targetMissing: return "対象のセッションが見つかりません"
         case .targetBusy: return "対象がまだ作業中のため待っています"
-        case .awaitingResponse: return "回答待ちのセッションがあるため待っています"
         }
     }
 }
@@ -99,7 +96,7 @@ nonisolated enum SleepCondition {
         switch state {
         case .completed: return true
         case .error: return includesError
-        case .idle, .thinking, .awaitingApproval, .awaitingAnswer: return false
+        case .idle, .thinking: return false
         }
     }
 
@@ -136,12 +133,9 @@ nonisolated enum SleepCondition {
     /// 待ち時間を進めてよいか。進めない場合はその理由を返す。
     ///
     /// 予約が複数あるときは、生きている対象が**すべて**手離れして初めて進む。
-    /// 回答待ちだけは対象かどうかに関わらず止める。答えるまでCLIは停止したままで、
-    /// そのまま寝るとユーザーは「終わったはずなのに何も進んでいない」状態で戻ってくる。
     static func hold(targets: [SleepTarget], sessions: [SleepSessionSnapshot]) -> SleepHold {
         let live = liveTargets(targets, sessions: sessions)
         guard !live.isEmpty else { return .targetMissing }
-        if sessions.contains(where: { $0.state.needsUserResponse }) { return .awaitingResponse }
         let matched = sessions.filter { session in live.contains { covers($0, session) } }
         if matched.contains(where: { $0.state == .thinking }) { return .targetBusy }
         return .none
