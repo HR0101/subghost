@@ -545,7 +545,7 @@ enum NotchLayout {
     static let topShoulderWidth: CGFloat = 12 // 画面上端とつなぐ外向きのカーブ
     static let collapseAnimationDuration: TimeInterval = 0.32
     /// セッションが増えてもノッチが画面下まで伸びないよう、一覧部分だけを制限する。
-    static let sessionRowEstimatedHeight: CGFloat = 68
+    static let sessionRowEstimatedHeight: CGFloat = 86
     /// 一覧に一度に見せる件数から高さを決める。これを超えるぶんはスクロールになる。
     static var sessionsListMaxHeight: CGFloat {
         CGFloat(AppearancePreferences.sessionListMaxRows) * sessionRowEstimatedHeight

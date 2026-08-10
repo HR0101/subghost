@@ -57,57 +57,93 @@ struct SettingsView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            List(selection: $selection) {
-                Section {
-                    settingsLink(.general, "一般", "gearshape.fill")
-                    settingsLink(.alerts, "通知とサウンド", "bell.badge.fill")
-                    settingsLink(.appearance, "外観", "paintbrush.fill")
-                    settingsLink(.integration, "統合", "puzzlepiece.extension.fill")
+            VStack(spacing: 0) {
+                HStack(spacing: 11) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color.accentColor.opacity(0.24),
+                                        Color.purple.opacity(0.14),
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 42, height: 42)
+                        PixelGhostView(state: .completed, pixelSize: 3)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Subghost")
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        Text("AI CLI Monitor")
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
                 }
-                Section("詳細設定") {
-                    settingsLink(.shortcuts, "ショートカット", "keyboard.fill")
-                    settingsLink(.data, "履歴とデータ", "clock.arrow.circlepath")
-                    settingsLink(.diagnostics, "診断", "stethoscope")
-                    settingsLink(.setup, "セットアップ", "wrench.and.screwdriver.fill")
+                .padding(.horizontal, 14)
+                .padding(.vertical, 14)
+                .accessibilityElement(children: .combine)
+
+                Divider()
+
+                List(selection: $selection) {
+                    Section {
+                        settingsLink(.general)
+                        settingsLink(.alerts)
+                        settingsLink(.appearance)
+                        settingsLink(.integration)
+                    }
+                    Section("詳細設定") {
+                        settingsLink(.shortcuts)
+                        settingsLink(.data)
+                        settingsLink(.diagnostics)
+                        settingsLink(.setup)
+                    }
+                    Section {
+                        settingsLink(.information)
+                    }
                 }
-                Section {
-                    settingsLink(.information, "情報", "info.circle.fill")
-                }
+                .listStyle(.sidebar)
             }
-            .listStyle(.sidebar)
-            .frame(width: 190)
+            .frame(width: 216)
+            .background(.ultraThinMaterial)
 
             Divider()
 
-            Group {
-                switch selection {
-                case .general: GeneralSettingsView()
-                case .alerts: AlertSettingsView()
-                case .appearance: AppearanceSettingsView()
-                case .integration: HookSettingsView()
-                case .shortcuts: ShortcutSettingsView()
-                case .data: DataSettingsView()
-                case .diagnostics: SetupDiagnosticsView()
-                case .setup: SetupGuideView()
-                case .information: InformationSettingsView()
+            VStack(spacing: 0) {
+                SettingsPageHeader(page: selection)
+                Divider()
+                Group {
+                    switch selection {
+                    case .general: GeneralSettingsView()
+                    case .alerts: AlertSettingsView()
+                    case .appearance: AppearanceSettingsView()
+                    case .integration: HookSettingsView()
+                    case .shortcuts: ShortcutSettingsView()
+                    case .data: DataSettingsView()
+                    case .diagnostics: SetupDiagnosticsView()
+                    case .setup: SetupGuideView()
+                    case .information: InformationSettingsView()
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
         // 固定サイズだと、システムの文字サイズを大きくした環境で内容が見切れる。
         // 既定の大きさは保ちつつ、ユーザーがリサイズできるようにする。
         .frame(
-            minWidth: 640, idealWidth: 860, maxWidth: .infinity,
+            minWidth: 700, idealWidth: 920, maxWidth: .infinity,
             minHeight: 480, idealHeight: 680, maxHeight: .infinity
         )
     }
 
-    private func settingsLink(
-        _ page: SettingsPage,
-        _ title: String,
-        _ systemImage: String
-    ) -> some View {
-        Label(title, systemImage: systemImage)
+    private func settingsLink(_ page: SettingsPage) -> some View {
+        Label(page.title, systemImage: page.systemImage)
             .tag(page)
     }
 }
@@ -122,6 +158,77 @@ private enum SettingsPage: Hashable {
     case diagnostics
     case setup
     case information
+
+    var title: String {
+        switch self {
+        case .general: return "一般"
+        case .alerts: return "通知とサウンド"
+        case .appearance: return "外観"
+        case .integration: return "統合"
+        case .shortcuts: return "ショートカット"
+        case .data: return "履歴とデータ"
+        case .diagnostics: return "診断"
+        case .setup: return "セットアップ"
+        case .information: return "情報"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .general: return "起動、表示、セッション監視の基本設定"
+        case .alerts: return "完了やエラーの通知方法を調整"
+        case .appearance: return "ノッチの形、濃さ、アニメーションを調整"
+        case .integration: return "Claude CodeとCodex CLIの監視フックを管理"
+        case .shortcuts: return "よく使う操作へキーボードを割り当て"
+        case .data: return "履歴、プライバシー、設定ファイルを管理"
+        case .diagnostics: return "監視状態とローカル連携の問題を確認"
+        case .setup: return "初めて使うときの手順を確認"
+        case .information: return "アプリ情報とプライバシー方針"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general: return "gearshape.fill"
+        case .alerts: return "bell.badge.fill"
+        case .appearance: return "paintbrush.fill"
+        case .integration: return "puzzlepiece.extension.fill"
+        case .shortcuts: return "keyboard.fill"
+        case .data: return "clock.arrow.circlepath"
+        case .diagnostics: return "stethoscope"
+        case .setup: return "wrench.and.screwdriver.fill"
+        case .information: return "info.circle.fill"
+        }
+    }
+}
+
+private struct SettingsPageHeader: View {
+    let page: SettingsPage
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.12))
+                    .frame(width: 40, height: 40)
+                Image(systemName: page.systemImage)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(page.title)
+                    .font(.system(size: 17, weight: .semibold))
+                Text(page.subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
 }
 
 private struct GeneralSettingsView: View {

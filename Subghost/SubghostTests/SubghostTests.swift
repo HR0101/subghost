@@ -113,7 +113,10 @@ struct PixelGhostAnimationTests {
 struct SessionsListLayoutTests {
     @Test func 少数のセッションでは行数に合わせた高さになる() {
         #expect(NotchLayout.sessionsListHeight(count: 0) == 0)
-        #expect(NotchLayout.sessionsListHeight(count: 2) == 136)
+        #expect(
+            NotchLayout.sessionsListHeight(count: 2)
+                == NotchLayout.sessionRowEstimatedHeight * 2
+        )
     }
 
     @Test func 多数のセッションでも一覧の最大高を超えない() {
