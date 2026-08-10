@@ -65,7 +65,7 @@ final class AppCoordinator {
     /// 変更検知の対象にならない（他クラスの静的プロパティのため）。ここにストアドプロパティとして
     /// キャッシュし、変更のたびに明示的に更新することでボタンの見た目を追従させる。
     /// (実機で確認した不具合: ボタンを押しても消音自体は効くが、アイコン表示が変わらなかった)
-    private(set) var isMuted: Bool = !SoundAlerts.isEnabled
+    private(set) var isMuted = false
     @ObservationIgnored private var soundDefaultsObserver: NSObjectProtocol?
 
     // MARK: - 初回起動の案内
@@ -104,6 +104,10 @@ final class AppCoordinator {
         } else {
             migrateRemovedFeaturesIfNeeded()
         }
+        // @Observableのストアドプロパティ初期化子からMainActor分離された設定を読むと、
+        // Xcode 16.4ではマクロ展開後のコードがActor分離違反になる。起動時にMainActor上で
+        // 同期することで、通常起動とUIテスト用設定のどちらも正しい表示へ合わせる。
+        isMuted = !SoundAlerts.isEnabled
         if AppearancePreferences.hidePreviewText { activity.redactSummaries() }
         NotificationManager.shared.setup()
         SoundAlerts.shared.play(.appLaunched)
