@@ -338,14 +338,7 @@ struct NotchView: View {
     }
 
     private func contentWidth(for mode: NotchMode) -> CGFloat {
-        switch mode {
-        case .compact: return notchWidth + NotchLayout.sideWidth * 2
-        case .notification: return max(notchWidth + 280, 620)
-        case .sessions: return max(notchWidth + 420, 760)
-        case .activity: return max(notchWidth + 420, 760)
-        case .onboarding: return max(notchWidth + 320, 680)
-        case .sleep: return max(notchWidth + 300, 660)
-        }
+        NotchLayout.contentWidth(for: mode, notchWidth: notchWidth)
     }
 
     // MARK: - コンパクト：状態アイコンのみ (設計書 4.1 / 6.2)
@@ -430,7 +423,7 @@ struct NotchView: View {
     private var notificationContent: some View {
         let session = coordinator.notificationSession ?? coordinator.watcher.activeSession
 
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 8) {
             Color.clear.frame(height: topInset)   // ノッチ本体を避ける
 
             HStack(spacing: 8) {
@@ -452,7 +445,12 @@ struct NotchView: View {
                     .foregroundStyle(.white.opacity(0.6))
             }
 
-            if let rawPreview = session?.preview, !rawPreview.isEmpty {
+            if let session,
+               let prompt = session.lastUserPrompt,
+               !prompt.isEmpty,
+               !session.preview.isEmpty {
+                conversationPreview(prompt: prompt, reply: session.preview)
+            } else if let rawPreview = session?.preview, !rawPreview.isEmpty {
                 // 画面共有向けに本文を伏せる設定があるため、描画の直前で差し替える
                 let preview = AppearancePreferences.maskedPreview(rawPreview)
                 // 応答は長くなるため、折り返して読めるようにし、スクロールできるようにする
@@ -467,7 +465,7 @@ struct NotchView: View {
                                 .textSelection(.enabled)
                         }
                     }
-                    .padding(10)
+                    .padding(8)
                 }
                 .frame(maxWidth: .infinity, maxHeight: 210, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
@@ -481,8 +479,8 @@ struct NotchView: View {
                 Text(session == nil
                      ? "AI CLI が見つかりません"
                      : "応答待ち…")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.5))
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.5))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
             }
@@ -503,22 +501,172 @@ struct NotchView: View {
                     .foregroundStyle(.white.opacity(0.6))
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
+        .padding(.horizontal, NotchLayout.expandedHorizontalPadding)
+        .padding(.bottom, NotchLayout.expandedBottomPadding)
         .contentShape(Rectangle())
         .onTapGesture { coordinator.jumpToTerminal() }
+    }
+
+    /// transcriptを読める環境では、完了通知の中に直近の往復をまとめて出す。
+    /// 本文はCLIフックが渡す入力とローカル記録から得る。
+    private func conversationPreview(prompt: String, reply: [String]) -> some View {
+        let displayedPrompt = AppearancePreferences.maskedPreview(prompt)
+        let displayedReply = AppearancePreferences.maskedPreview(reply)
+
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 8) {
+                previewSection(
+                    title: "送信内容",
+                    systemImage: "arrow.up.right",
+                    lines: [displayedPrompt],
+                    tint: NotchVisualStyle.accent
+                )
+                previewSection(
+                    title: "返答",
+                    systemImage: "arrow.down.left",
+                    lines: displayedReply,
+                    tint: .green
+                )
+            }
+            .padding(8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: 210, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
+    }
+
+    private func previewSection(
+        title: String,
+        systemImage: String,
+        lines: [String],
+        tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(tint.opacity(0.95))
+
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
     }
 
     // MARK: - 展開（一覧）：複数CLIをまとめて見る
 
     private var sessionsContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Color.clear.frame(height: topInset)   // ノッチ本体を避ける
+        VStack(alignment: .leading, spacing: 4) {
+            // 使用量と操作は、ノッチ下に専用の行を作らずメニューバー帯へ収める。
+            sessionsMenuBar
 
-            // 上段: 現在地、使用量、操作アイコン
-            HStack(spacing: 8) {
+            sleepReservationBanner
+
+            let visible = coordinator.watcher.visibleSessions
+            if !visible.isEmpty {
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: 3) {
+                        ForEach(visible) { session in
+                            SessionRow(
+                                session: session,
+                                isActive: session.info.id == coordinator.watcher.activeSessionName,
+                                isSleepReserved: coordinator.sleepScheduler.isReservedSession(
+                                    tty: session.info.tty, pid: session.info.pid
+                                ),
+                                onJump: { coordinator.jump(to: session) },
+                                onHide: { coordinator.hideSession(session) },
+                                onToggleSleep: { coordinator.toggleSleepReservation(for: session) }
+                            )
+                        }
+                    }
+                    .padding(.trailing, 3)
+                }
+                .scrollIndicators(.visible)
+                .frame(height: NotchLayout.sessionsListHeight(count: visible.count))
+            }
+
+            if coordinator.watcher.sessions.isEmpty {
+                VStack(spacing: 7) {
+                    ZStack {
+                        Circle()
+                            .fill(NotchVisualStyle.accent.opacity(0.13))
+                            .frame(width: 38, height: 38)
+                        Circle()
+                            .stroke(NotchVisualStyle.accent.opacity(0.24), lineWidth: 1)
+                            .frame(width: 38, height: 38)
+                        PixelGhostView(state: .idle, pixelSize: 2.7)
+                    }
+                    Text("AI CLIを待っています")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NotchVisualStyle.primaryText)
+                    Text("ターミナルでClaude CodeまたはCodex CLIを起動すると、\nここに作業状態が表示されます。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(NotchVisualStyle.secondaryText)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        coordinator.openSettings()
+                    } label: {
+                        Label("設定を開く", systemImage: "gearshape")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.84))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(.white.opacity(0.10)))
+                            .overlay(Capsule().stroke(.white.opacity(0.10), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(NotchVisualStyle.cardFill)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(NotchVisualStyle.cardBorder, lineWidth: 1)
+                )
+            }
+
+            // 隠したぶんは黙って消さず、件数と戻す手段を残す
+            if coordinator.watcher.revealsHiddenSessions {
+                Button("放置中のセッションを隠す") {
+                    coordinator.watcher.revealsHiddenSessions = false
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.75))
+                .padding(.top, 1)
+            } else if coordinator.watcher.hiddenSessionCount > 0 {
+                HStack(spacing: 6) {
+                    Text("他に \(coordinator.watcher.hiddenSessionCount) 件（放置・監視不可）")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.5))
+                    Button("すべて表示") {
+                        coordinator.watcher.unhideAll()
+                        coordinator.watcher.revealsHiddenSessions = true
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.75))
+                }
+                .padding(.top, 1)
+            }
+        }
+        .padding(.horizontal, NotchLayout.expandedHorizontalPadding)
+        .padding(.bottom, NotchLayout.expandedBottomPadding)
+    }
+
+    /// 物理ノッチの左右にあるメニューバー帯を、情報と操作の置き場として使う。
+    private var sessionsMenuBar: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
                 Text("セッション")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(NotchVisualStyle.primaryText)
                     .accessibilityAddTraits(.isHeader)
                 Text("\(coordinator.watcher.sessions.count)")
@@ -529,15 +677,11 @@ struct NotchView: View {
                     .background(Capsule().fill(.white.opacity(0.11)))
                 if let usage = coordinator.watcher.usage {
                     let others = coordinator.watcher.allUsage
-                    Rectangle()
-                        .fill(.white.opacity(0.12))
-                        .frame(width: 1, height: 16)
-                        .padding(.horizontal, 2)
                     Button {
                         if others.count > 1 { showAllUsage.toggle() }
                     } label: {
                         HStack(spacing: 4) {
-                            UsageBadge(usage: usage)
+                            UsageBadge(usage: usage, showsRemainingTime: false)
                             if others.count > 1 {
                                 Image(systemName: showAllUsage ? "chevron.up" : "chevron.down")
                                     .font(.system(size: 8))
@@ -552,7 +696,14 @@ struct NotchView: View {
                         UsagePopover(items: others)
                     }
                 }
-                Spacer()
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+
+            // 物理ノッチと文字・ボタンが重ならないための中央クリアランス。
+            Color.clear
+                .frame(width: notchWidth + NotchLayout.menuBarNotchClearance * 2)
+
+            HStack(spacing: 4) {
                 Button {
                     coordinator.showActivity()
                 } label: {
@@ -621,104 +772,9 @@ struct NotchView: View {
                 .help("Subghostを終了")
                 .accessibilityLabel("Subghostを終了")
             }
-            .padding(.bottom, 2)
-
-            if coordinator.watcher.sessions.isEmpty {
-                VStack(spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill(NotchVisualStyle.accent.opacity(0.13))
-                            .frame(width: 44, height: 44)
-                        Circle()
-                            .stroke(NotchVisualStyle.accent.opacity(0.24), lineWidth: 1)
-                            .frame(width: 44, height: 44)
-                        PixelGhostView(state: .idle, pixelSize: 3.2)
-                    }
-                    Text("AI CLIを待っています")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(NotchVisualStyle.primaryText)
-                    Text("ターミナルでClaude CodeまたはCodex CLIを起動すると、\nここに作業状態が表示されます。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(NotchVisualStyle.secondaryText)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button {
-                        coordinator.openSettings()
-                    } label: {
-                        Label("設定を開く", systemImage: "gearshape")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.84))
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(.white.opacity(0.10)))
-                            .overlay(Capsule().stroke(.white.opacity(0.10), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 24)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(NotchVisualStyle.cardFill)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(NotchVisualStyle.cardBorder, lineWidth: 1)
-                )
-            }
-
-            sleepReservationBanner
-
-            let visible = coordinator.watcher.visibleSessions
-            if !visible.isEmpty {
-                ScrollView(.vertical) {
-                    LazyVStack(spacing: 6) {
-                        ForEach(visible) { session in
-                            SessionRow(
-                                session: session,
-                                isActive: session.info.id == coordinator.watcher.activeSessionName,
-                                isSleepReserved: coordinator.sleepScheduler.isReservedSession(
-                                    tty: session.info.tty, pid: session.info.pid
-                                ),
-                                onJump: { coordinator.jump(to: session) },
-                                onHide: { coordinator.hideSession(session) },
-                                onToggleSleep: { coordinator.toggleSleepReservation(for: session) }
-                            )
-                        }
-                    }
-                    .padding(.trailing, 4)
-                }
-                .scrollIndicators(.visible)
-                .frame(height: NotchLayout.sessionsListHeight(count: visible.count))
-            }
-
-            // 隠したぶんは黙って消さず、件数と戻す手段を残す
-            if coordinator.watcher.revealsHiddenSessions {
-                Button("放置中のセッションを隠す") {
-                    coordinator.watcher.revealsHiddenSessions = false
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.75))
-                .padding(.top, 2)
-            } else if coordinator.watcher.hiddenSessionCount > 0 {
-                HStack(spacing: 6) {
-                    Text("他に \(coordinator.watcher.hiddenSessionCount) 件（放置・監視不可）")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.5))
-                    Button("すべて表示") {
-                        coordinator.watcher.unhideAll()
-                        coordinator.watcher.revealsHiddenSessions = true
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.75))
-                }
-                .padding(.top, 2)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
+        .frame(height: topInset)
     }
 
     /// 一覧の先頭に出す、スリープ予約の状況。
@@ -783,7 +839,7 @@ struct NotchView: View {
     // MARK: - 展開（履歴）：見逃したイベントを確認
 
     private var activityContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Color.clear.frame(height: topInset)
 
             HStack(spacing: 8) {
@@ -820,10 +876,10 @@ struct NotchView: View {
                 }
                 .foregroundStyle(.white.opacity(0.6))
                 .frame(maxWidth: .infinity)
-                .frame(height: 150)
+                .frame(height: 120)
             } else {
                 ScrollView(.vertical) {
-                    LazyVStack(spacing: 6) {
+                    LazyVStack(spacing: 4) {
                         ForEach(coordinator.activity.entries) { entry in
                             ActivityRow(
                                 entry: entry,
@@ -841,14 +897,14 @@ struct NotchView: View {
                 ))
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
+        .padding(.horizontal, NotchLayout.expandedHorizontalPadding)
+        .padding(.bottom, NotchLayout.expandedBottomPadding)
     }
 
     // MARK: - 展開（初回案内）：ようこそ→フック連携→権限→完了
 
     private var onboardingContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             Color.clear.frame(height: topInset)
 
             HStack(spacing: 8) {
@@ -889,7 +945,7 @@ struct NotchView: View {
 
             onboardingStepContent
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
+                .padding(12)
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(NotchVisualStyle.cardFill)
@@ -930,8 +986,8 @@ struct NotchView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
+        .padding(.horizontal, NotchLayout.expandedHorizontalPadding)
+        .padding(.bottom, NotchLayout.expandedBottomPadding)
     }
 
     @ViewBuilder
@@ -1052,7 +1108,7 @@ struct NotchView: View {
         let scheduler = coordinator.sleepScheduler
         let countdown = scheduler.countdown
 
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 8) {
             Color.clear.frame(height: topInset)   // ノッチ本体を避ける
 
             HStack(spacing: 8) {
@@ -1140,8 +1196,8 @@ struct NotchView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.white.opacity(0.5))
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
+        .padding(.horizontal, NotchLayout.expandedHorizontalPadding)
+        .padding(.bottom, NotchLayout.expandedBottomPadding)
         .focusable()
         .focusEffectDisabled()
         .onExitCommand { coordinator.cancelSleepCountdown() }
@@ -1218,20 +1274,20 @@ struct SessionRow: View {
 
     var body: some View {
         // 行全体の移動ボタンと、右側の補助操作を分けて配置する
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 6) {
             Button(action: onJump) {
-                HStack(alignment: .top, spacing: 10) {
+                HStack(alignment: .top, spacing: 8) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(stateAccent.opacity(0.12))
-                            .frame(width: 34, height: 34)
+                            .frame(width: 32, height: 32)
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(stateAccent.opacity(0.20), lineWidth: 1)
-                            .frame(width: 34, height: 34)
-                        PixelGhostView(state: session.state, pixelSize: 2.6)
+                            .frame(width: 32, height: 32)
+                        PixelGhostView(state: session.state, pixelSize: 2.4)
                     }
 
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 3) {
                         // 1行目: 作業フォルダと更新時刻
                         HStack(spacing: 6) {
                             Text(title)
@@ -1273,7 +1329,7 @@ struct SessionRow: View {
                                 Image(systemName: "arrow.turn.down.right")
                                     .font(.system(size: 8, weight: .semibold))
                                     .foregroundStyle(NotchVisualStyle.accent.opacity(0.85))
-                                Text(prompt)
+                                Text(AppearancePreferences.maskedPreview(prompt))
                                     .font(.system(size: 11))
                                     .foregroundStyle(NotchVisualStyle.secondaryText)
                                     .lineLimit(1)
@@ -1347,8 +1403,8 @@ struct SessionRow: View {
             .help("このセッションを一覧から片付ける")
             .accessibilityLabel("\(session.info.displayName) を一覧から片付ける")
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(
@@ -1599,6 +1655,8 @@ struct UsageBadge: View {
     /// システム色へ切り替える。（以前は colorScheme を切り替えていたが、
     /// `.white` は colorScheme に反応しないため明背景でほぼ不可視だった）
     var onDarkBackground = true
+    /// メニューバー帯では横幅を抑え、残り時間はヘルプと読み上げだけで伝える。
+    var showsRemainingTime = true
 
     private var labelColor: Color {
         onDarkBackground ? .white.opacity(0.7) : .secondary
@@ -1655,7 +1713,7 @@ struct UsageBadge: View {
             Text("\(Int(window.usedPercent.rounded()))%")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(color(for: window))
-            if let remaining = window.remainingText() {
+            if showsRemainingTime, let remaining = window.remainingText() {
                 Text(remaining)
                     .font(.system(size: 10))
                     .foregroundStyle(mutedColor)

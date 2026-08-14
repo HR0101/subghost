@@ -542,10 +542,13 @@ final class SessionWatcher {
 
         if isFirstHookConnection { session.state = .completed }
         // 会話本文の表示を明示的に有効にしている場合だけ記録を読む。
-        if !AppearancePreferences.hidePreviewText,
-           let path = event.transcriptPath,
-           let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
-            session.lastUserPrompt = prompt
+        if !AppearancePreferences.hidePreviewText {
+            if let prompt = event.prompt {
+                session.lastUserPrompt = TranscriptReader.oneLine(prompt)
+            } else if let path = event.transcriptPath,
+                      let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
+                session.lastUserPrompt = prompt
+            }
         }
         preferMonitorableSession()
 
