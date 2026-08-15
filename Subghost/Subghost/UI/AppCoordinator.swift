@@ -74,6 +74,10 @@ final class AppCoordinator {
     @ObservationIgnored private static let hasCompletedOnboardingKey = "hasCompletedOnboarding"
     @ObservationIgnored private static let hookMigrationVersionKey = "hookMigrationVersion"
     @ObservationIgnored private static let currentHookMigrationVersion = 1
+
+    private static func hookMigrationKey(for target: HookTarget) -> String {
+        "hookMigration.v\(currentHookMigrationVersion).\(target.rawValue)"
+    }
     private(set) var onboardingStep: OnboardingStep = .welcome
     /// フック有効化ボタンを押した結果（成功メッセージ／エラー）。ステップごとに保持する。
     var onboardingHookMessage: [HookTarget: String] = [:]
@@ -159,13 +163,22 @@ final class AppCoordinator {
         let version = defaults.integer(forKey: Self.hookMigrationVersionKey)
         guard version < Self.currentHookMigrationVersion else { return }
 
-        do {
-            for target in HookTarget.allCases where HookInstaller.isInstalled(target) {
+        var migrationSucceeded = true
+        for target in HookTarget.allCases where HookInstaller.isInstalled(target) {
+            let targetKey = Self.hookMigrationKey(for: target)
+            guard !defaults.bool(forKey: targetKey) else { continue }
+
+            do {
                 try HookInstaller.install(target)
+                defaults.set(true, forKey: targetKey)
+            } catch {
+                migrationSucceeded = false
+                NSLog("Subghost: \(target.displayName)の監視専用フックへ移行できませんでした: \(error.localizedDescription)")
             }
+        }
+
+        if migrationSucceeded {
             defaults.set(Self.currentHookMigrationVersion, forKey: Self.hookMigrationVersionKey)
-        } catch {
-            NSLog("Subghost: 監視専用フックへ移行できませんでした: \(error.localizedDescription)")
         }
     }
 
@@ -315,7 +328,8 @@ final class AppCoordinator {
                 session: session.info,
                 state: .completed,
                 preview: preview,
-                prompt: session.lastUserPrompt
+                prompt: session.lastUserPrompt,
+                tasks: session.taskList
             )
             // スリープ予約より先に通知・音を出す。寝る前に「何が終わったか」は必ず残す。
             sleepScheduler.noteFinished(SleepSessionSnapshot(info: session.info, state: .completed))
@@ -329,7 +343,8 @@ final class AppCoordinator {
                 session: session.info,
                 state: .error,
                 preview: preview,
-                prompt: session.lastUserPrompt
+                prompt: session.lastUserPrompt,
+                tasks: session.taskList
             )
             sleepScheduler.noteFinished(SleepSessionSnapshot(info: session.info, state: .error))
             if AlertGate.allowsAutoExpand(.error, session: session.info) {
@@ -435,7 +450,7 @@ final class AppCoordinator {
     func jumpToTerminal() {
         let target = notificationSession ?? watcher.activeSession
         if let target {
-            watcher.activeSessionName = target.info.id
+            watcher.chooseActiveSession(target.info.id)
             watcher.acknowledge(target)
         }
         if mode == .notification { collapse() }

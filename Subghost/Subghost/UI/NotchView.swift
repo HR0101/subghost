@@ -133,6 +133,7 @@ struct NotchView: View {
     @AppStorage(NotchPreferences.expansionAnimationDurationKey)
     private var expansionAnimationDuration = NotchPreferences.defaultExpansionAnimationDuration
     @State private var showAllUsage = false
+    @State private var showQuitConfirmation = false
     /// 黒いノッチ面の内側に表示する内容。輪郭の変形と時間差を付ける。
     @State private var renderedMode: NotchMode = .compact
     /// 0が物理ノッチ寸法、1が展開寸法。常に同じ輪郭を変形させる。
@@ -242,6 +243,16 @@ struct NotchView: View {
         }
         .onChange(of: requestedMode) { _, newMode in
             transition(to: newMode)
+        }
+        .confirmationDialog(
+            "Subghostを終了しますか？",
+            isPresented: $showQuitConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("終了", role: .destructive) { NSApp.terminate(nil) }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("AI CLIの監視とタスク完了後のスリープ予約を停止します。")
         }
     }
 
@@ -446,10 +457,14 @@ struct NotchView: View {
             }
 
             if let session,
-               let prompt = session.lastUserPrompt,
-               !prompt.isEmpty,
-               !session.preview.isEmpty {
-                conversationPreview(prompt: prompt, reply: session.preview)
+               session.lastUserPrompt?.isEmpty == false
+                   || !session.preview.isEmpty
+                   || !session.taskList.isEmpty {
+                conversationPreview(
+                    prompt: session.lastUserPrompt,
+                    reply: session.preview,
+                    tasks: session.taskList
+                )
             } else if let rawPreview = session?.preview, !rawPreview.isEmpty {
                 // 画面共有向けに本文を伏せる設定があるため、描画の直前で差し替える
                 let preview = AppearancePreferences.maskedPreview(rawPreview)
@@ -509,29 +524,75 @@ struct NotchView: View {
 
     /// transcriptを読める環境では、完了通知の中に直近の往復をまとめて出す。
     /// 本文はCLIフックが渡す入力とローカル記録から得る。
-    private func conversationPreview(prompt: String, reply: [String]) -> some View {
-        let displayedPrompt = AppearancePreferences.maskedPreview(prompt)
+    private func conversationPreview(
+        prompt: String?,
+        reply: [String],
+        tasks: [AITaskItem]
+    ) -> some View {
+        let displayedPrompt = prompt.map(AppearancePreferences.maskedPreview)
         let displayedReply = AppearancePreferences.maskedPreview(reply)
 
         return ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 8) {
-                previewSection(
-                    title: "送信内容",
-                    systemImage: "arrow.up.right",
-                    lines: [displayedPrompt],
-                    tint: NotchVisualStyle.accent
-                )
-                previewSection(
-                    title: "返答",
-                    systemImage: "arrow.down.left",
-                    lines: displayedReply,
-                    tint: .green
-                )
+                if let displayedPrompt, !displayedPrompt.isEmpty {
+                    previewSection(
+                        title: "送信内容",
+                        systemImage: "arrow.up.right",
+                        lines: [displayedPrompt],
+                        tint: NotchVisualStyle.accent
+                    )
+                }
+                if !displayedReply.isEmpty {
+                    previewSection(
+                        title: "返答",
+                        systemImage: "arrow.down.left",
+                        lines: displayedReply,
+                        tint: .green
+                    )
+                }
+                if !tasks.isEmpty {
+                    taskListSection(tasks)
+                }
             }
             .padding(8)
         }
-        .frame(maxWidth: .infinity, maxHeight: 210, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
+    }
+
+    private func taskListSection(_ tasks: [AITaskItem]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("AIタスク", systemImage: "checklist")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.purple.opacity(0.95))
+
+            ForEach(tasks) { task in
+                HStack(alignment: .top, spacing: 5) {
+                    Image(systemName: task.status.systemImage)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(taskTint(task.status))
+                        .frame(width: 13)
+                    Text(AppearancePreferences.maskedPreview(task.title))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Text(task.status.displayName)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.52))
+                }
+            }
+        }
+    }
+
+    private func taskTint(_ status: AITaskStatus) -> Color {
+        switch status {
+        case .pending: return .white.opacity(0.55)
+        case .inProgress: return NotchVisualStyle.accent
+        case .completed: return .green
+        case .blocked: return .orange
+        case .cancelled: return .red.opacity(0.8)
+        }
     }
 
     private func previewSection(
@@ -763,7 +824,7 @@ struct NotchView: View {
 
                 // ノッチからもすぐ終了できるようにする
                 Button {
-                    NSApp.terminate(nil)
+                    showQuitConfirmation = true
                 } label: {
                     Image(systemName: "power")
                         .font(.system(size: 12))
@@ -1343,6 +1404,41 @@ struct SessionRow: View {
                                 .foregroundStyle(NotchVisualStyle.tertiaryText)
                                 .lineLimit(1)
                         }
+
+                        if let taskSummary {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundStyle(.purple.opacity(0.85))
+                                Text(taskSummary)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(NotchVisualStyle.tertiaryText)
+                                    .lineLimit(1)
+                            }
+                        }
+
+                        if isActive && !session.taskList.isEmpty {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(Array(session.taskList.prefix(4))) { task in
+                                    HStack(spacing: 4) {
+                                        Image(systemName: task.status.systemImage)
+                                            .font(.system(size: 8, weight: .semibold))
+                                            .foregroundStyle(taskTint(task.status))
+                                            .frame(width: 11)
+                                        Text(AppearancePreferences.maskedPreview(task.title))
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(NotchVisualStyle.secondaryText)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                if session.taskList.count > 4 {
+                                    Text("ほか \(session.taskList.count - 4) 件")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(NotchVisualStyle.tertiaryText)
+                                }
+                            }
+                            .padding(.top, 1)
+                        }
                     }
                 }
                 .contentShape(Rectangle())
@@ -1452,6 +1548,7 @@ struct SessionRow: View {
             parts.append("直近の指示 \(prompt)")
         }
         if let reply = secondaryText, !reply.isEmpty { parts.append("応答 \(reply)") }
+        if let taskSummary, !taskSummary.isEmpty { parts.append(taskSummary) }
         parts.append("最終更新 \(elapsedText)")
         return parts.joined(separator: "、")
     }
@@ -1493,6 +1590,22 @@ struct SessionRow: View {
         }
         // 返信がまだ無いときだけ、監視できていれば状態を出す
         return session.info.isMonitorable ? session.state.displayName : nil
+    }
+
+    private var taskSummary: String? {
+        guard !session.taskList.isEmpty else { return nil }
+        let completed = session.taskList.filter { $0.status == .completed }.count
+        return "AIタスク \(completed)/\(session.taskList.count) 完了"
+    }
+
+    private func taskTint(_ status: AITaskStatus) -> Color {
+        switch status {
+        case .pending: return .white.opacity(0.55)
+        case .inProgress: return NotchVisualStyle.accent
+        case .completed: return .green
+        case .blocked: return .orange
+        case .cancelled: return .red.opacity(0.8)
+        }
     }
 
     /// 最後の動きからの経過時間

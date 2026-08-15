@@ -11,7 +11,7 @@
      CODE_SIGNING_ALLOWED=NO analyze
    plutil -lint Subghost/Subghost/PrivacyInfo.xcprivacy
    ! grep -R -nE \
-     'SIGTERM|SIGKILL|kill[[:space:]]*\(' \
+     'SIGTERM|SIGKILL|Process\.terminate[[:space:]]*\(|killpg[[:space:]]*\(|raise[[:space:]]*\(|pthread_kill[[:space:]]*\(|kill[[:space:]]*\(' \
      Subghost/Subghost --include='*.swift'
    ```
 

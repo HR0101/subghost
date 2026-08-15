@@ -424,12 +424,18 @@ final class NotchPanelController {
                 height: metrics.topInset
             )
         case .notification:
-            // 応答の行数に応じて高さを変える（長文も読めるように）
-            let lines = coordinator.notificationSession?.preview.count ?? 0
-            let height = metrics.topInset + 110 + CGFloat(min(lines, 12)) * 17
+            // 送信内容・返信・AIタスクの量に応じて高さを変える。
+            let session = coordinator.notificationSession
+            let replyLines = session?.preview.count ?? 0
+            let taskLines = session?.taskList.count ?? 0
+            let hasPrompt = session?.lastUserPrompt?.isEmpty == false
+            let sectionLines = (hasPrompt ? 2 : 0)
+                + min(replyLines, 12)
+                + min(taskLines * 2, 16)
+            let height = metrics.topInset + 110 + CGFloat(sectionLines) * 17
             size = NSSize(width: NotchLayout.canvasWidth(
                 for: NotchLayout.contentWidth(for: mode, notchWidth: metrics.notchWidth)),
-                          height: min(max(height, 200), 380))
+                          height: min(max(height, 200), 480))
         case .sessions:
             // 一覧は最大高を超えた分だけ内部スクロールする。
             // 一覧に実際に出す件数で高さを決める（絞り込みで消えた分の余白を作らない）

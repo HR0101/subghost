@@ -74,7 +74,8 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         session: SessionInfo,
         state: AIState,
         preview: [String],
-        prompt: String? = nil
+        prompt: String? = nil,
+        tasks: [AITaskItem] = []
     ) {
         guard let event = NotificationEvent.from(state: state),
               event == .completed || event == .error,
@@ -97,6 +98,13 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
         let reply = AppearancePreferences.maskedPreview(preview).joined(separator: "\n")
         if !reply.isEmpty { bodyParts.append("返答\n\(reply)") }
+        if !tasks.isEmpty {
+            let taskLines = tasks.prefix(8).map { task in
+                let title = AppearancePreferences.maskedPreview(task.title)
+                return "\(task.status.displayName) \(title)"
+            }
+            bodyParts.append("AIタスク\n" + taskLines.joined(separator: "\n"))
+        }
         content.body = bodyParts.joined(separator: "\n\n")
         content.sound = Self.notificationSound
         content.userInfo = NotificationSessionReference(session: session).userInfo

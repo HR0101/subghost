@@ -232,7 +232,8 @@ private struct SettingsPageHeader: View {
 }
 
 private struct GeneralSettingsView: View {
-    @AppStorage("pollInterval") private var pollInterval = 3.0
+    @AppStorage(GeneralPreferences.pollIntervalKey)
+    private var pollInterval = GeneralPreferences.defaultPollInterval
     @AppStorage(DisplayPreference.userDefaultsKey) private var notchDisplay = ""
     @AppStorage("preferredTerminal") private var preferredTerminal = ""
     @AppStorage(NotchPreferences.hoverExpansionEnabledKey) private var hoverExpansionEnabled = true
@@ -348,7 +349,7 @@ private struct GeneralSettingsView: View {
 
             Section("監視") {
                 VStack(alignment: .leading) {
-                    Slider(value: $pollInterval, in: 2.0...10.0, step: 0.5) {
+                    Slider(value: $pollInterval, in: GeneralPreferences.pollIntervalRange, step: 0.5) {
                         Text("ポーリング間隔: \(pollInterval, specifier: "%.1f")秒")
                     }
                     Text("CLIプロセスを見つける間隔です。状態更新はフックから即時に届きます。")
@@ -410,7 +411,9 @@ private struct GeneralSettingsView: View {
         .formStyle(.grouped)
         .onAppear {
             launchAtLogin = LoginItemManager.isEnabled
+            normalizePollInterval()
         }
+        .onChange(of: pollInterval) { _, _ in normalizePollInterval() }
         .onChange(of: hoverExpansionEnabled) { _, _ in preferencesChanged() }
         .onChange(of: hoverDelay) { _, _ in preferencesChanged() }
         .onChange(of: expansionAnimationDuration) { _, _ in preferencesChanged() }
@@ -422,6 +425,11 @@ private struct GeneralSettingsView: View {
 
     private func preferencesChanged() {
         AppCoordinator.shared.preferencesChanged()
+    }
+
+    private func normalizePollInterval() {
+        let normalized = GeneralPreferences.normalizedPollInterval(pollInterval)
+        if pollInterval != normalized { pollInterval = normalized }
     }
 
     private func updateLaunchAtLogin(_ enabled: Bool) {
@@ -607,9 +615,9 @@ private struct AppearanceSettingsView: View {
             }
 
             Section("プライバシー") {
-                Toggle("応答の本文を表示しない", isOn: $hidePreview)
-                Text("ノッチのプレビュー・通知の本文・アクティビティ履歴から、会話の中身を伏せます。"
-                     + "有効な間は会話記録の本文も読み取りません。")
+                Toggle("会話本文とAIタスクを表示しない", isOn: $hidePreview)
+                Text("ノッチのプレビュー・通知・アクティビティ履歴から、送信内容・返答・AIタスクを伏せます。"
+                     + "有効な間は会話記録とタスク状態も読み取りません。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("有効にすると、既に保存された履歴の本文も削除します。この操作は元に戻せません。")
@@ -622,7 +630,10 @@ private struct AppearanceSettingsView: View {
         .onChange(of: cornerRadius) { _, _ in preferencesChanged() }
         .onChange(of: listRows) { _, _ in preferencesChanged() }
         .onChange(of: hidePreview) { _, hidden in
-            if hidden { AppCoordinator.shared.activity.redactSummaries() }
+            if hidden {
+                AppCoordinator.shared.activity.redactSummaries()
+                AppCoordinator.shared.watcher.redactPreviewContent()
+            }
         }
     }
 
@@ -1208,13 +1219,22 @@ private struct HookSettingsView: View {
 
     private func testHealth() {
         healthCheckMessage = nil
+        let before = watcher.lastHealthCheckAt
         Task {
             do {
                 try await Task.detached { try HookInstaller.sendHealthCheck() }.value
-                try? await Task.sleep(for: .milliseconds(100))
-                healthCheckMessage = watcher.lastHealthCheckAt == nil
-                    ? "テスト要求は完了しましたが、受信確認が取れませんでした。"
-                    : "ローカル受信サーバは正常です。"
+                let deadline = Date().addingTimeInterval(1.0)
+                var received = false
+                while Date() < deadline {
+                    if watcher.lastHealthCheckAt != before {
+                        received = true
+                        break
+                    }
+                    try await Task.sleep(for: .milliseconds(25))
+                }
+                healthCheckMessage = received
+                    ? "ローカル受信サーバは正常です。"
+                    : "テスト要求は完了しましたが、受信確認が取れませんでした。"
             } catch {
                 healthCheckMessage = "受信テストに失敗しました: \(error.localizedDescription)"
             }
