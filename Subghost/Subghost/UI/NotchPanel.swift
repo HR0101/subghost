@@ -432,13 +432,14 @@ final class NotchPanelController {
                 : (session?.lastReply?.isEmpty == false ? 1 : 0)
             let taskLines = session?.taskList.count ?? 0
             let hasPrompt = session?.lastUserPrompt?.isEmpty == false
-            let sectionLines = (hasPrompt ? 2 : 0)
-                + min(replyLines, 12)
-                + min(taskLines * 2, 16)
-            let height = metrics.topInset + 110 + CGFloat(sectionLines) * 17
             size = NSSize(width: NotchLayout.canvasWidth(
                 for: NotchLayout.contentWidth(for: mode, notchWidth: metrics.notchWidth)),
-                          height: min(max(height, 200), 480))
+                          height: NotchLayout.notificationHeight(
+                              topInset: metrics.topInset,
+                              hasPrompt: hasPrompt,
+                              replyLineCount: replyLines,
+                              taskCount: taskLines
+                          ))
         case .sessions:
             // 一覧は最大高を超えた分だけ内部スクロールする。
             // 一覧に実際に出す件数で高さを決める（絞り込みで消えた分の余白を作らない）
@@ -566,6 +567,42 @@ enum NotchLayout {
 
     static func sessionsListHeight(count: Int) -> CGFloat {
         min(CGFloat(max(count, 0)) * sessionRowEstimatedHeight, sessionsListMaxHeight)
+    }
+
+    /// 通知ポップアップの初期高さ。会話カードは本文行だけでなく見出し・余白を
+    /// 必要とするため、単純な行数計算では返答カードが下側に隠れてしまう。
+    /// 表示前に十分な領域を確保し、長い返答だけを内部スクロールに委ねる。
+    static func notificationHeight(
+        topInset: CGFloat,
+        hasPrompt: Bool,
+        replyLineCount: Int,
+        taskCount: Int
+    ) -> CGFloat {
+        let visibleReplyLines = min(max(replyLineCount, 0), 12)
+        let visibleTasks = min(max(taskCount, 0), 3)
+
+        // 送信内容・返答の各セクションは、見出しと1行ぶんの本文でおよそ31pt。
+        // 2セクションが並ぶ場合の間隔と外側パディングも先に見込む。
+        var previewHeight: CGFloat = 16 // ScrollView内の上下パディング
+        var sectionCount = 0
+        if hasPrompt {
+            previewHeight += 31
+            sectionCount += 1
+        }
+        if visibleReplyLines > 0 {
+            previewHeight += 31 + CGFloat(visibleReplyLines - 1) * 17
+            sectionCount += 1
+        }
+        if visibleTasks > 0 {
+            previewHeight += 28 + CGFloat(visibleTasks) * 16
+            sectionCount += 1
+        }
+        previewHeight += CGFloat(max(sectionCount - 1, 0)) * 8
+
+        // ノッチ余白、セッションヘッダー、CTA、各VStackの間隔と下余白。
+        let chromeHeight = topInset + 117
+        let minimum: CGFloat = sectionCount > 1 ? 250 : 200
+        return min(max(chromeHeight + previewHeight, minimum), 480)
     }
 
     /// 展開内容の幅。NSPanelとSwiftUIで共有し、透明な余白や内容の切れを防ぐ。

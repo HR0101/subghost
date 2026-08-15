@@ -147,6 +147,19 @@ struct SessionsListLayoutTests {
     @Test func 広いノッチでは左右の操作領域を確保する() {
         #expect(NotchLayout.contentWidth(for: .sessions, notchWidth: 500) == 870)
     }
+
+    @Test func 通知では送信内容と返答の両方に必要な高さを確保する() {
+        let oneCard = NotchLayout.notificationHeight(
+            topInset: 30, hasPrompt: true, replyLineCount: 0, taskCount: 0
+        )
+        let twoCards = NotchLayout.notificationHeight(
+            topInset: 30, hasPrompt: true, replyLineCount: 1, taskCount: 0
+        )
+
+        #expect(oneCard == 200)
+        #expect(twoCards >= 250)
+        #expect(twoCards > oneCard)
+    }
 }
 
 struct ActivityStoreTests {
