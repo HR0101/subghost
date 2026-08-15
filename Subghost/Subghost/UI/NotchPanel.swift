@@ -425,8 +425,11 @@ final class NotchPanelController {
             )
         case .notification:
             // 送信内容・返信・AIタスクの量に応じて高さを変える。
-            let session = coordinator.notificationSession
-            let replyLines = session?.preview.count ?? 0
+            // ホバー時のフォーカスカードも一覧と同じ横幅に揃える。
+            let session = coordinator.notificationSession ?? coordinator.watcher.activeSession
+            let replyLines = session?.preview.isEmpty == false
+                ? (session?.preview.count ?? 0)
+                : (session?.lastReply?.isEmpty == false ? 1 : 0)
             let taskLines = session?.taskList.count ?? 0
             let hasPrompt = session?.lastUserPrompt?.isEmpty == false
             let sectionLines = (hasPrompt ? 2 : 0)
@@ -571,7 +574,8 @@ enum NotchLayout {
         case .compact:
             return notchWidth + sideWidth * 2
         case .notification:
-            return max(notchWidth + 200, 500)
+            // 参考アプリのフォーカスカードと同じ、横長の一枚面にする。
+            return max(notchWidth + 470, 660)
         case .sessions:
             // 広い物理ノッチでも、右側の5操作がメニューバー帯に収まる幅を残す。
             return max(notchWidth + 370, 620)

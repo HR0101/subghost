@@ -93,9 +93,10 @@ final class AppCoordinator {
         // 明示的に開いた一覧は、ホバーが外れても表示を維持する。
         if mode == .sessions { return .sessions }
         if mode == .activity { return .activity }
-        // ホバー中は常に一覧を出す。
-        // ホバーからも素早くセッション一覧へ入れる。
-        if isHovering { return .sessions }
+        // ホバー中は、現在選択中のセッションをチラ見せする。
+        // 詳細確認は軽いプレビュー、複数セッションの操作はショートカット
+        // または明示的な一覧表示に分ける。
+        if isHovering { return .notification }
         return .compact
     }
 

@@ -124,7 +124,7 @@ struct SessionsListLayoutTests {
     }
 
     @Test func 展開幅は内容に応じた最小限の幅になる() {
-        #expect(NotchLayout.contentWidth(for: .notification, notchWidth: 190) == 500)
+        #expect(NotchLayout.contentWidth(for: .notification, notchWidth: 190) == 660)
         #expect(NotchLayout.contentWidth(for: .sessions, notchWidth: 190) == 620)
         #expect(NotchLayout.contentWidth(for: .activity, notchWidth: 190) == 620)
         #expect(NotchLayout.contentWidth(for: .onboarding, notchWidth: 190) == 580)

@@ -372,7 +372,8 @@ struct NotchView: View {
 
             Spacer(minLength: notchWidth)
 
-            // 右余白：一覧に出しているセッションの小ドット
+            // 右余白：一覧に出しているセッション数。
+            // コンパクト時はドットを並べるより、動作中の件数を一目で読めるようにする。
             HStack(spacing: 4) {
                 let visible = coordinator.watcher.visibleSessions
                 if let countdown = coordinator.sleepScheduler.countdown {
@@ -389,9 +390,16 @@ struct NotchView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.gray)
                 } else {
-                    ForEach(visible.prefix(4)) { session in
-                        StateDot(state: session.state, pulsing: session.state.shouldPulse, size: 6)
+                    if let active = coordinator.watcher.activeSession {
+                        StateDot(
+                            state: active.state,
+                            pulsing: active.state.shouldPulse,
+                            size: 6
+                        )
                     }
+                    Text("\(visible.count)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.78))
                 }
             }
             .frame(width: NotchLayout.sideWidth)
@@ -434,35 +442,21 @@ struct NotchView: View {
     private var notificationContent: some View {
         let session = coordinator.notificationSession ?? coordinator.watcher.activeSession
 
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 9) {
             Color.clear.frame(height: topInset)   // ノッチ本体を避ける
 
-            HStack(spacing: 8) {
-                PixelGhostView(state: session?.state ?? .idle, pixelSize: 2.5)
-                Text(session?.info.profile.displayName ?? "セッションなし")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                if let name = session?.info.displayName {
-                    Text(name)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                Spacer()
-                if let usage = coordinator.watcher.usage {
-                    UsageBadge(usage: usage)
-                }
-                Text(session?.state.displayName ?? "")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
+            notificationHeader(session)
 
             if let session,
                session.lastUserPrompt?.isEmpty == false
                    || !session.preview.isEmpty
+                   || session.lastReply?.isEmpty == false
                    || !session.taskList.isEmpty {
                 conversationPreview(
                     prompt: session.lastUserPrompt,
-                    reply: session.preview,
+                    reply: session.preview.isEmpty
+                        ? (session.lastReply.map { [$0] } ?? [])
+                        : session.preview,
                     tasks: session.taskList
                 )
             } else if let rawPreview = session?.preview, !rawPreview.isEmpty {
@@ -500,26 +494,151 @@ struct NotchView: View {
                     .padding(.vertical, 8)
             }
 
-            HStack {
-                // 以前は「クリックで移動」という説明文だけで、実際の操作は
-                // 領域全体の onTapGesture だった。キーボードとVoiceOverから
-                // 到達できるよう、本物のボタンにしている。
-                Button("該当タブへ移動") { coordinator.jumpToTerminal() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .accessibilityHint("このセッションが動いているターミナルのタブを前面に出します")
-                Spacer()
-                // ホットキーは設定で変更できるため、固定文字列にしない。
-                Text("\(HotkeyAction.showSessions.shortcutOrName) で一覧")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 8) {
+                // Vibe Islandの下部カードに合わせ、主要操作を1枚の大きな導線にする。
+                // 以前は短いテキストボタンだけで、展開カードの余韻が弱かった。
+                Button { coordinator.jumpToTerminal() } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(.white.opacity(0.10)))
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("該当タブへ移動")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("ターミナルで作業を続ける")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.55))
+                        }
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                    .foregroundStyle(.white.opacity(0.88))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(.white.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(.white.opacity(0.08), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("該当タブへ移動")
+                .accessibilityHint("このセッションが動いているターミナルのタブを前面に出します")
+                .frame(maxWidth: .infinity)
+
+                Button {
+                    coordinator.showSessions()
+                } label: {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.76))
+                        .frame(width: 28, height: 26)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.07)))
+                }
+                .buttonStyle(.plain)
+                .help("セッション一覧を開く")
+                .accessibilityLabel("セッション一覧を開く")
             }
         }
         .padding(.horizontal, NotchLayout.expandedHorizontalPadding)
         .padding(.bottom, NotchLayout.expandedBottomPadding)
         .contentShape(Rectangle())
         .onTapGesture { coordinator.jumpToTerminal() }
+    }
+
+    /// Vibe Islandの展開カードに合わせた、現在セッションのヘッダー。
+    /// 1行目はプロジェクト、2行目は直近の指示を置き、右側にはCLI・端末・経過時間をまとめる。
+    @ViewBuilder
+    private func notificationHeader(_ session: MonitoredSession?) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            PixelGhostView(state: session?.state ?? .idle, pixelSize: 2.5)
+                .frame(width: 25, height: 25)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(session?.info.displayName ?? "セッションなし")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(NotchVisualStyle.primaryText)
+                    .lineLimit(1)
+
+                if let prompt = session?.lastUserPrompt,
+                   !prompt.isEmpty {
+                    Text(AppearancePreferences.maskedPreview(prompt))
+                        .font(.system(size: 11))
+                        .foregroundStyle(NotchVisualStyle.secondaryText)
+                        .lineLimit(1)
+                } else {
+                    Text(session == nil ? "AI CLIを待っています" : "応答を監視中")
+                        .font(.system(size: 11))
+                        .foregroundStyle(NotchVisualStyle.secondaryText)
+                        .lineLimit(1)
+                }
+
+                if let session {
+                    HStack(spacing: 5) {
+                        TagBadge(
+                            text: session.info.profile.displayName,
+                            tint: profileTint(session.info.profile)
+                        )
+                        TagBadge(
+                            text: session.state.displayName,
+                            tint: stateBadgeTint(session.state)
+                        )
+                        if let terminal = session.info.terminalName {
+                            Text(terminal)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(NotchVisualStyle.tertiaryText)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            VStack(alignment: .trailing, spacing: 4) {
+                if let usage = coordinator.watcher.usage {
+                    UsageBadge(usage: usage, showsRemainingTime: false)
+                }
+                if let session {
+                    Text(sessionElapsedText(session))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(NotchVisualStyle.tertiaryText)
+                }
+            }
+        }
+        .padding(.horizontal, 2)
+    }
+
+    private func profileTint(_ profile: CLIProfile) -> Color {
+        switch profile.id {
+        case "claude": return .orange.opacity(0.42)
+        case "codex": return .blue.opacity(0.48)
+        default: return .green.opacity(0.42)
+        }
+    }
+
+    private func stateBadgeTint(_ state: AIState) -> Color {
+        switch state {
+        case .idle, .completed, .error: return .white.opacity(0.18)
+        case .thinking: return NotchVisualStyle.accent.opacity(0.45)
+        }
+    }
+
+    private func sessionElapsedText(_ session: MonitoredSession) -> String {
+        let seconds = Int(Date().timeIntervalSince(session.lastActivityAt))
+        if seconds < 60 { return "<1m" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        return hours < 24 ? "\(hours)h" : "\(hours / 24)d"
     }
 
     /// transcriptを読める環境では、完了通知の中に直近の往復をまとめて出す。
@@ -557,32 +676,66 @@ struct NotchView: View {
             .padding(8)
         }
         .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.black.opacity(0.30))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(.white.opacity(0.07), lineWidth: 1)
+        )
     }
 
     private func taskListSection(_ tasks: [AITaskItem]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label("AIタスク", systemImage: "checklist")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.purple.opacity(0.95))
+        let completedCount = tasks.filter { $0.status == .completed }.count
+        let inProgressCount = tasks.filter { $0.status == .inProgress }.count
+        let pendingCount = tasks.filter { $0.status == .pending }.count
 
-            ForEach(tasks) { task in
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text("タスク")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.84))
+                Text("(\(completedCount) 完了、\(inProgressCount) 進行中、\(pendingCount) 未着手)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.42))
+                Spacer(minLength: 0)
+            }
+
+            ForEach(Array(tasks.prefix(3))) { task in
                 HStack(alignment: .top, spacing: 5) {
-                    Image(systemName: task.status.systemImage)
+                    Image(systemName: task.status == .completed
+                          ? "checkmark.square.fill"
+                          : "square")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(taskTint(task.status))
                         .frame(width: 13)
                     Text(AppearancePreferences.maskedPreview(task.title))
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.88))
+                        .foregroundStyle(task.status == .completed
+                                         ? .white.opacity(0.48)
+                                         : .white.opacity(0.82))
                         .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                    Text(task.status.displayName)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.52))
+                        .lineLimit(1)
+                        .strikethrough(task.status == .completed, color: .white.opacity(0.36))
                 }
             }
+
+            if tasks.count > 3 {
+                Text("…+\(tasks.count - 3)件")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.42))
+            }
         }
+        .padding(9)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(.black.opacity(0.30))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(.white.opacity(0.06), lineWidth: 1)
+        )
     }
 
     private func taskTint(_ status: AITaskStatus) -> Color {
@@ -730,7 +883,7 @@ struct NotchView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(NotchVisualStyle.primaryText)
                     .accessibilityAddTraits(.isHeader)
-                Text("\(coordinator.watcher.sessions.count)")
+                Text("\(coordinator.watcher.visibleSessions.count)")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.78))
                     .padding(.horizontal, 6)
