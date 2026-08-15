@@ -78,6 +78,19 @@ struct NotchPreferencesTests {
         #expect(AppearancePreferences.defaultExpandedCornerRadius > 9)
         #expect(AppearancePreferences.defaultExpandedCornerRadius < 28)
     }
+
+    @Test func Codex使用量は既定で取得する() {
+        let suiteName = "SubghostTests.Usage.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(UsagePreferences.defaultCodexCollectionEnabled)
+        #expect(NotchPreferences.bool(
+            forKey: UsagePreferences.codexCollectionEnabledKey,
+            default: UsagePreferences.defaultCodexCollectionEnabled,
+            defaults: defaults
+        ))
+    }
 }
 
 struct NotchSurfaceShapeTests {
@@ -1323,6 +1336,17 @@ struct UsageParserTests {
         let usage = UsageParser.parseCodexRateLimits(inJSONLines: jsonl)
         #expect(usage?.sevenDay?.usedPercent == 6.0)
         #expect(usage?.fiveHour == nil)
+    }
+
+    @Test func CodexのeventMsg形式でもレート制限を取り出す() {
+        // 旧版Codexでは payload.type が token_count ではなく event_msg だが、
+        // rate_limits の構造は同じ。
+        let jsonl = """
+        {"type":"event_msg","payload":{"type":"event_msg","rate_limits":{"primary":{"used_percent":11.0,"window_minutes":300,"resets_at":1785000000},"secondary":{"used_percent":2.0,"window_minutes":10080,"resets_at":1785069709}}}}
+        """
+        let usage = UsageParser.parseCodexRateLimits(inJSONLines: jsonl)
+        #expect(usage?.fiveHour?.usedPercent == 11.0)
+        #expect(usage?.sevenDay?.usedPercent == 2.0)
     }
 
     @Test func Codexのレート制限が無い記録では何も返さない() {

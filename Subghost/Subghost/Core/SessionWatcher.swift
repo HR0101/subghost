@@ -352,7 +352,7 @@ final class SessionWatcher {
     }
 
     /// Codexの使用量をセッション記録から読み出す。
-    /// Codexにはstatuslineの仕組みが無いため、記録の `token_count` イベントを見る。
+    /// Codexにはstatuslineの仕組みが無いため、記録のレート制限イベントを見る。
     @ObservationIgnored private var lastCodexUsageRefreshAt: Date?
 
     private func refreshCodexUsageIfNeeded(at now: Date = Date()) {

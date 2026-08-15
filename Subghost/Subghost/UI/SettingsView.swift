@@ -986,7 +986,7 @@ private struct MinutePicker: View {
 /// フック連携の導入・解除 (追補: フック方式)
 private struct HookSettingsView: View {
     @AppStorage(UsagePreferences.codexCollectionEnabledKey)
-    private var codexUsageCollectionEnabled = false
+    private var codexUsageCollectionEnabled = UsagePreferences.defaultCodexCollectionEnabled
     @State private var installed: [HookTarget: Bool] = [:]
     @State private var messages: [HookTarget: (text: String, isError: Bool)] = [:]
     @State private var confirming: HookTarget?
