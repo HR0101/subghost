@@ -610,7 +610,10 @@ final class SessionWatcher {
                 session.lastReply = nil
                 session.taskList = []
                 if let prompt = event.prompt {
-                    session.lastUserPrompt = TranscriptReader.oneLine(prompt)
+                    // ポップアップでは送信した文章そのものを読めるよう、フックが
+                    // 直接渡した本文は省略せず保持する。コンパクトな一覧側では
+                    // lineLimitで表示量を制限する。
+                    session.lastUserPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
                 } else if let path = session.transcriptPath,
                           let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
                     session.lastUserPrompt = prompt
@@ -672,10 +675,20 @@ final class SessionWatcher {
         case .stop:
             // フックは完了を知らせるだけで本文を持たないため、記録から応答を読み出す
             let answer: [String]
-            if !AppearancePreferences.hidePreviewText, let path = event.transcriptPath {
-                answer = session.preview.isEmpty
-                    ? TranscriptReader.latestAssistantText(transcriptPath: path)
-                    : session.preview
+            if !AppearancePreferences.hidePreviewText {
+                let inlineAnswer = event.lastAssistantMessage.map {
+                    TranscriptReader.normalize($0)
+                } ?? []
+                let path = event.transcriptPath ?? session.transcriptPath
+                if !inlineAnswer.isEmpty {
+                    answer = inlineAnswer
+                } else if !session.preview.isEmpty {
+                    answer = session.preview
+                } else if let path {
+                    answer = TranscriptReader.latestAssistantText(transcriptPath: path)
+                } else {
+                    answer = []
+                }
             } else {
                 answer = []
             }

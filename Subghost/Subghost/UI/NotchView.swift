@@ -484,6 +484,12 @@ struct NotchView: View {
                     .foregroundStyle(.orange.opacity(0.9))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
+            } else if AppearancePreferences.hidePreviewText {
+                Text("会話本文はプライバシー設定で非表示です")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
             } else {
                 Text(session == nil
                      ? "AI CLI が見つかりません"

@@ -104,7 +104,9 @@ nonisolated enum TranscriptReader {
         return []
     }
 
-    /// 記録の末尾から、直近のユーザー発言を1行にして取り出す
+    /// 記録の末尾から、直近のユーザー発言を省略せず取り出す。
+    /// ポップアップでは送信した文章をそのまま読める必要があるため、要約・省略は
+    /// 一覧など表示側のレイアウトに委ねる。
     static func latestUserText(transcriptPath: String) -> String? {
         guard let text = readTail(path: transcriptPath) else { return nil }
         return latestUserText(inJSONLines: text)
@@ -120,7 +122,7 @@ nonisolated enum TranscriptReader {
                   message.role == .user
             else { continue }
 
-            return oneLine(message.text)
+            return message.text
         }
         return nil
     }

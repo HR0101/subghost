@@ -59,6 +59,19 @@ struct NotchPreferencesTests {
         #expect(NotchPreferences.normalizedExpansionAnimationDuration(0.65) == 0.65)
         #expect(NotchPreferences.normalizedExpansionAnimationDuration(3) == 1.20)
     }
+
+    @Test func 会話本文は既定で表示する() {
+        let suiteName = "SubghostTests.Appearance.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(!AppearancePreferences.defaultHidePreviewText)
+        #expect(!NotchPreferences.bool(
+            forKey: AppearancePreferences.hidePreviewTextKey,
+            default: AppearancePreferences.defaultHidePreviewText,
+            defaults: defaults
+        ))
+    }
 }
 
 struct NotchSurfaceShapeTests {
@@ -856,6 +869,18 @@ struct HookEventTests {
         #expect(HookEventDecoder.decode(data)?.prompt == "この内容をポップアップに表示して")
     }
 
+    @Test func Stopのインライン返答をポップアップ用に取り出す() {
+        let data = payload([
+            "hook_event_name": "Stop",
+            "session_id": "abc-123",
+            "transcript_path": "/tmp/transcript.jsonl",
+            "last_assistant_message": "完了しました。返答本文です。",
+        ])
+        let event = HookEventDecoder.decode(data)
+        #expect(event?.transcriptPath == "/tmp/transcript.jsonl")
+        #expect(event?.lastAssistantMessage == "完了しました。返答本文です。")
+    }
+
     @Test func 完了と失敗を別の状態として扱う() {
         #expect(HookEventKind.stop.resultingState == .completed)
         #expect(HookEventKind.stopFailure.resultingState == .error)
@@ -1110,6 +1135,13 @@ struct TranscriptReaderTests {
         {"type":"user","message":{"content":[{"type":"text","text":"最後"}]}}
         """
         #expect(TranscriptReader.latestUserText(inJSONLines: text) == "最後")
+    }
+
+    @Test func ユーザー本文は改行を保ったまま読む() {
+        let text = """
+        {"type":"user","message":{"content":[{"type":"text","text":"1行目\\n2行目"}]}}
+        """
+        #expect(TranscriptReader.latestUserText(inJSONLines: text) == "1行目\n2行目")
     }
 
     @Test func CodexのresponseItemから送信内容と返答を読む() {

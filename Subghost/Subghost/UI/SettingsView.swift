@@ -549,7 +549,7 @@ private struct AppearanceSettingsView: View {
     @AppStorage(AppearancePreferences.ghostAnimationEnabledKey)
     private var ghostAnimation = true
     @AppStorage(AppearancePreferences.hidePreviewTextKey)
-    private var hidePreview = true
+    private var hidePreview = AppearancePreferences.defaultHidePreviewText
 
     /// Slider は Double の範囲を要求するので、Int の設定範囲を変換して持っておく
     private static let listRowsRange: ClosedRange<Double> = {
@@ -617,7 +617,7 @@ private struct AppearanceSettingsView: View {
             Section("プライバシー") {
                 Toggle("会話本文とAIタスクを表示しない", isOn: $hidePreview)
                 Text("ノッチのプレビュー・通知・アクティビティ履歴から、送信内容・返答・AIタスクを伏せます。"
-                     + "有効な間は会話記録とタスク状態も読み取りません。")
+                     + "既定では本文を表示します。有効な間は会話記録とタスク状態も読み取りません。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("有効にすると、既に保存された履歴の本文も削除します。この操作は元に戻せません。")

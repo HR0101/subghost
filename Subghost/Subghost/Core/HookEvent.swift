@@ -72,6 +72,9 @@ nonisolated struct HookEvent: Sendable, Equatable {
     /// UserPromptSubmitに直接含まれる入力本文。CLIやバージョンによっては
     /// transcript_pathより早く、または確実に取得できる。
     let prompt: String?
+    /// Stopイベントが直接渡す最新のAI返答。Codexはtranscript_pathと合わせて
+    /// 提供するが、書き込み完了前でもポップアップへ即座に出せるよう利用する。
+    let lastAssistantMessage: String?
 
     /// 作業ディレクトリ名（表示用）
     var projectName: String? {
@@ -97,7 +100,10 @@ nonisolated enum HookEventDecoder {
             sessionID: dict["session_id"] as? String ?? "",
             cwd: dict["cwd"] as? String,
             transcriptPath: Self.transcriptPath(in: dict),
-            prompt: kind == .userPromptSubmit ? Self.prompt(in: dict) : nil
+            prompt: kind == .userPromptSubmit ? Self.prompt(in: dict) : nil,
+            lastAssistantMessage: kind == .stop || kind == .subagentStop
+                ? Self.lastAssistantMessage(in: dict)
+                : nil
         )
     }
 
@@ -111,6 +117,16 @@ nonisolated enum HookEventDecoder {
     private static func prompt(in dict: [String: Any]) -> String? {
         // Claude Codeはprompt、Codexやラッパーはuser_prompt/messageを使うことがある。
         for key in ["prompt", "user_prompt", "userPrompt", "message"] {
+            if let value = dict[key] as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func lastAssistantMessage(in dict: [String: Any]) -> String? {
+        for key in ["last_assistant_message", "lastAssistantMessage", "assistant_message"] {
             if let value = dict[key] as? String,
                !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return value
