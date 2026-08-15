@@ -7,11 +7,13 @@ Claude Code / Codex CLI のタスク状態をMacのノッチから確認する�
 - 実行中のAI CLIをプロセスから自動検出
 - 各タスクを `Working`（作業途中）/ `Done`（完了）で表示
 - タスク完了時にノッチ、macOS通知、サウンドで通知
+- 本文表示を許可した場合、CLI本文・送信内容・返答・AIタスクリストをノッチのポップアップで表示
 - 対象のターミナルへ移動
 - 指定したタスクの完了後にMacをスリープ
 - ノッチを見失った場合も使えるメニューバーの復旧メニュー
 
-Subghostは監視専用です。プロンプト、承認、質問への回答をCLIへ送信せず、CLIプロセスの終了も行いません。tmuxも使用しません。
+Subghostは監視専用です。プロンプト、承認、質問への回答をCLIへ送信せず、CLIプロセスの終了も行いません。
+送信内容はCLIフック、CLI本文・返答・AIタスクリストはフックが示すローカルのセッション記録から読み取ります。端末画面のキャプチャやターミナルマルチプレクサには依存しません。
 
 ## 動作環境
 
@@ -35,7 +37,7 @@ Antigravityは利用できるフック機構を確認できていないため、
 
 Claude Codeは `~/.claude/settings.json`、Codexは `~/.codex/hooks.json` にSubghost用フックを追記します。既存設定は保持し、変更前にバックアップを作成します。Subghostが起動していない場合、フックは何もせず正常終了します。
 
-旧版の「自動でtmux内起動」が有効だった場合は、初回起動時にSubghostが追加したシェル設定だけを自動解除します。現行版にtmuxを起動・接続・操作する経路はありません。
+現行版はシェル起動設定を変更せず、フック設定だけを監視専用イベントへ更新します。
 
 ## 状態の扱い
 
@@ -45,19 +47,21 @@ Claude Codeは `~/.claude/settings.json`、Codexは `~/.codex/hooks.json` にSub
 - `Done` は次のタスクが始まるまで保持
 
 承認や質問が発生してもSubghostは回答せず、CLI本来の画面へそのまま委ねます。
+本文ポップアップは設定の「会話本文とAIタスクを表示しない」をオフにした場合だけ表示します。タスクリストも会話本文と同じプライバシー設定に従います。
 
 終了フックを取りこぼした場合、誤って完了扱いにせず `Working` を維持します。設定の「統合」にある受信テストと最終受信時刻で疎通を確認できます。
 
 ## プライバシー
 
-会話本文のプレビューは既定で無効です。この状態では、Subghostはフックに含まれるセッション記録パスから本文を読みません。プレビューを有効にした場合だけ、ローカルの記録末尾を読み、通知と履歴に表示します。詳しくは [PRIVACY.md](PRIVACY.md) を参照してください。
+会話本文のプレビューは既定で無効です。この状態では、Subghostはフックに含まれるセッション記録パスから本文やタスクリストを読みません。プレビューを有効にした場合だけ、ローカルの記録末尾を読み、ポップアップと通知に表示します。詳しくは [PRIVACY.md](PRIVACY.md) を参照してください。
 
 Codexの使用量取得も任意で、既定では無効です。状態監視だけなら有効にする必要はありません。
 
 ## ビルドとテスト
 
 ```sh
-xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost build
+xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost \
+  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project Subghost/Subghost.xcodeproj -scheme Subghost \
   -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO \
   -only-testing:SubghostTests test

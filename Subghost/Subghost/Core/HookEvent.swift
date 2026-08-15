@@ -69,6 +69,9 @@ nonisolated struct HookEvent: Sendable, Equatable {
     let cwd: String?
     /// セッション記録(JSONL)のパス。プレビューを明示的に有効にした場合だけ読む。
     let transcriptPath: String?
+    /// UserPromptSubmitに直接含まれる入力本文。CLIやバージョンによっては
+    /// transcript_pathより早く、または確実に取得できる。
+    let prompt: String?
 
     /// 作業ディレクトリ名（表示用）
     var projectName: String? {
@@ -93,8 +96,27 @@ nonisolated enum HookEventDecoder {
             kind: kind,
             sessionID: dict["session_id"] as? String ?? "",
             cwd: dict["cwd"] as? String,
-            transcriptPath: dict["transcript_path"] as? String
+            transcriptPath: Self.transcriptPath(in: dict),
+            prompt: kind == .userPromptSubmit ? Self.prompt(in: dict) : nil
         )
+    }
+
+    private static func transcriptPath(in dict: [String: Any]) -> String? {
+        for key in ["transcript_path", "transcriptPath", "rollout_path", "rolloutPath"] {
+            if let value = dict[key] as? String, !value.isEmpty { return value }
+        }
+        return nil
+    }
+
+    private static func prompt(in dict: [String: Any]) -> String? {
+        // Claude Codeはprompt、Codexやラッパーはuser_prompt/messageを使うことがある。
+        for key in ["prompt", "user_prompt", "userPrompt", "message"] {
+            if let value = dict[key] as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return nil
     }
 
     /// イベント名のキーはCLIによって異なるため、候補を順に探す

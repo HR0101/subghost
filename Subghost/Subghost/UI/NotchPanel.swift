@@ -424,12 +424,18 @@ final class NotchPanelController {
                 height: metrics.topInset
             )
         case .notification:
-            // 応答の行数に応じて高さを変える（長文も読めるように）
-            let lines = coordinator.notificationSession?.preview.count ?? 0
-            let height = metrics.topInset + 110 + CGFloat(min(lines, 12)) * 17
+            // 送信内容・返信・AIタスクの量に応じて高さを変える。
+            let session = coordinator.notificationSession
+            let replyLines = session?.preview.count ?? 0
+            let taskLines = session?.taskList.count ?? 0
+            let hasPrompt = session?.lastUserPrompt?.isEmpty == false
+            let sectionLines = (hasPrompt ? 2 : 0)
+                + min(replyLines, 12)
+                + min(taskLines * 2, 16)
+            let height = metrics.topInset + 110 + CGFloat(sectionLines) * 17
             size = NSSize(width: NotchLayout.canvasWidth(
-                for: max(metrics.notchWidth + 280, 620)),
-                          height: min(max(height, 200), 380))
+                for: NotchLayout.contentWidth(for: mode, notchWidth: metrics.notchWidth)),
+                          height: min(max(height, 200), 480))
         case .sessions:
             // 一覧は最大高を超えた分だけ内部スクロールする。
             // 一覧に実際に出す件数で高さを決める（絞り込みで消えた分の余白を作らない）
@@ -438,7 +444,7 @@ final class NotchPanelController {
             )
             size = NSSize(
                 width: NotchLayout.canvasWidth(
-                    for: max(metrics.notchWidth + 420, 760)
+                    for: NotchLayout.contentWidth(for: mode, notchWidth: metrics.notchWidth)
                 ),
                 height: min(metrics.topInset + 120 + listHeight, 520))
         case .activity:
@@ -448,7 +454,7 @@ final class NotchPanelController {
             )
             size = NSSize(
                 width: NotchLayout.canvasWidth(
-                    for: max(metrics.notchWidth + 420, 760)
+                    for: NotchLayout.contentWidth(for: mode, notchWidth: metrics.notchWidth)
                 ),
                 height: min(metrics.topInset + 90 + max(listHeight, 150), 520)
             )
@@ -457,7 +463,7 @@ final class NotchPanelController {
             let extraRows = coordinator.onboardingStep == .hooks ? HookTarget.allCases.count : 0
             size = NSSize(
                 width: NotchLayout.canvasWidth(
-                    for: max(metrics.notchWidth + 320, 680)
+                    for: NotchLayout.contentWidth(for: mode, notchWidth: metrics.notchWidth)
                 ),
                 height: metrics.topInset + 150 + CGFloat(extraRows) * 40
             )
@@ -465,7 +471,7 @@ final class NotchPanelController {
             // 残り時間・進捗バー・ボタン列の固定構成。保留理由が出る分だけ余裕を持たせる。
             size = NSSize(
                 width: NotchLayout.canvasWidth(
-                    for: max(metrics.notchWidth + 300, 660)
+                    for: NotchLayout.contentWidth(for: mode, notchWidth: metrics.notchWidth)
                 ),
                 height: metrics.topInset + 175
             )
@@ -538,6 +544,9 @@ final class NotchPanelController {
 /// レイアウト定数（パネルとSwiftUIビューで共有）
 enum NotchLayout {
     static let sideWidth: CGFloat = 44      // コンパクト時、ノッチ左右のアイコン領域幅
+    static let expandedHorizontalPadding: CGFloat = 10
+    static let expandedBottomPadding: CGFloat = 6
+    static let menuBarNotchClearance: CGFloat = 8
     static let compactCornerRadius: CGFloat = 12
     /// 展開時の緩やかな下角丸。好みが分かれるため設定から変えられる。
     static var cornerRadius: CGFloat { AppearancePreferences.expandedCornerRadius }
@@ -546,7 +555,7 @@ enum NotchLayout {
     static let topShoulderWidth: CGFloat = 12 // 画面上端とつなぐ外向きのカーブ
     static let collapseAnimationDuration: TimeInterval = 0.32
     /// セッションが増えてもノッチが画面下まで伸びないよう、一覧部分だけを制限する。
-    static let sessionRowEstimatedHeight: CGFloat = 86
+    static let sessionRowEstimatedHeight: CGFloat = 74
     /// 一覧に一度に見せる件数から高さを決める。これを超えるぶんはスクロールになる。
     static var sessionsListMaxHeight: CGFloat {
         CGFloat(AppearancePreferences.sessionListMaxRows) * sessionRowEstimatedHeight
@@ -554,6 +563,25 @@ enum NotchLayout {
 
     static func sessionsListHeight(count: Int) -> CGFloat {
         min(CGFloat(max(count, 0)) * sessionRowEstimatedHeight, sessionsListMaxHeight)
+    }
+
+    /// 展開内容の幅。NSPanelとSwiftUIで共有し、透明な余白や内容の切れを防ぐ。
+    static func contentWidth(for mode: NotchMode, notchWidth: CGFloat) -> CGFloat {
+        switch mode {
+        case .compact:
+            return notchWidth + sideWidth * 2
+        case .notification:
+            return max(notchWidth + 200, 500)
+        case .sessions:
+            // 広い物理ノッチでも、右側の5操作がメニューバー帯に収まる幅を残す。
+            return max(notchWidth + 370, 620)
+        case .activity:
+            return max(notchWidth + 340, 620)
+        case .onboarding:
+            return max(notchWidth + 250, 580)
+        case .sleep:
+            return max(notchWidth + 230, 560)
+        }
     }
 
     static func canvasWidth(for surfaceWidth: CGFloat) -> CGFloat {

@@ -263,8 +263,30 @@ struct SettingsStoreTests {
         defer { try? FileManager.default.removeItem(at: url) }
         try Data(count: SettingsStore.maximumImportSize + 1).write(to: url, options: .atomic)
 
-        #expect(throws: SettingsStore.SettingsError.self) {
+        do {
             try SettingsStore.importSettings(from: url)
+            Issue.record("サイズ上限を超えた設定ファイルを受け入れた")
+        } catch let error as SettingsStore.SettingsError {
+            #expect(error == .tooLarge)
+        } catch {
+            Issue.record("サイズ上限エラーではないエラー: \(error)")
         }
+    }
+
+    @Test func ポーリング間隔は共有範囲へ補正される() {
+        #expect(
+            SettingsStore.portableValues(from: [
+                GeneralPreferences.pollIntervalKey: 0.0001
+            ])[GeneralPreferences.pollIntervalKey] as? Double
+                == GeneralPreferences.pollIntervalRange.lowerBound
+        )
+        #expect(
+            GeneralPreferences.normalizedPollInterval(.infinity)
+                == GeneralPreferences.defaultPollInterval
+        )
+        #expect(
+            GeneralPreferences.normalizedPollInterval(100)
+                == GeneralPreferences.pollIntervalRange.upperBound
+        )
     }
 }

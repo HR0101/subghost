@@ -39,7 +39,7 @@ nonisolated enum DiagnosticsPreferences {
 
 enum SettingsStore {
 
-    enum SettingsError: LocalizedError {
+    enum SettingsError: LocalizedError, Equatable {
         case noDomain
         case unreadable
         case tooLarge
@@ -65,7 +65,7 @@ enum SettingsStore {
     /// Subghostが公開設定として扱う固定キー。
     /// 案内、移行番号、履歴、選択中セッションなどの端末固有状態は含めない。
     private static let fixedPortableKeys: Set<String> = [
-        "pollInterval", "preferredTerminal", DisplayPreference.userDefaultsKey,
+        GeneralPreferences.pollIntervalKey, "preferredTerminal", DisplayPreference.userDefaultsKey,
         NotchPreferences.hoverExpansionEnabledKey,
         NotchPreferences.hoverDelayKey,
         NotchPreferences.expansionAnimationDurationKey,
@@ -112,7 +112,27 @@ enum SettingsStore {
     }
 
     static func portableValues(from domain: [String: Any]) -> [String: Any] {
-        domain.filter { isPortableKey($0.key) }
+        domain.reduce(into: [String: Any]()) { result, entry in
+            guard let value = normalizedPortableValue(forKey: entry.key, value: entry.value) else { return }
+            result[entry.key] = value
+        }
+    }
+
+    /// 外部から読み込んだ値も、各設定の共通範囲を通してから保存する。
+    static func normalizedPortableValue(forKey key: String, value: Any) -> Any? {
+        guard isPortableKey(key) else { return nil }
+        guard key == GeneralPreferences.pollIntervalKey else { return value }
+
+        if let number = value as? NSNumber {
+            return GeneralPreferences.normalizedPollInterval(number.doubleValue)
+        }
+        if let number = value as? Double {
+            return GeneralPreferences.normalizedPollInterval(number)
+        }
+        if let number = value as? Int {
+            return GeneralPreferences.normalizedPollInterval(Double(number))
+        }
+        return nil
     }
 
     /// すべての設定を消して初期状態へ戻す。
@@ -156,8 +176,9 @@ enum SettingsStore {
 
         let defaults = UserDefaults.standard
         var applied = 0
-        for (key, value) in values where isPortableKey(key) {
-            defaults.set(value, forKey: key)
+        for (key, value) in values {
+            guard let normalizedValue = normalizedPortableValue(forKey: key, value: value) else { continue }
+            defaults.set(normalizedValue, forKey: key)
             applied += 1
         }
         return applied

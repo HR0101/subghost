@@ -82,6 +82,10 @@ final class MonitoredSession: Identifiable {
     var lastUserPrompt: String?
     /// 直近のAIの返信（一覧に出す。監視できなくても記録から読む）
     var lastReply: String?
+    /// CLIセッション記録の場所。端末画面ではなく、ローカルJSONLを読むために保持する。
+    var transcriptPath: String?
+    /// CLIが管理している直近のタスクリスト
+    var taskList: [AITaskItem] = []
     /// 解決済みの作業ディレクトリ（表示用）
     var workingDirectory: String?
     /// 最後に何か動きがあった時刻（経過時間の表示に使う）
@@ -113,6 +117,8 @@ final class MonitoredSession: Identifiable {
         state = .idle
         preview = []
         lastCompletedAt = nil
+        transcriptPath = nil
+        taskList = []
     }
 
     /// 識別情報だけを差し替える（状態は維持する）
@@ -247,7 +253,7 @@ final class SessionWatcher {
                 guard let self else { return }
                 await self.pollOnce()
                 // idle時は間隔を延ばして負荷軽減 (設計書 12)
-                let base = UserDefaults.standard.object(forKey: "pollInterval") as? Double ?? 3.0
+                let base = GeneralPreferences.pollInterval
                 let interval = self.sessions.isEmpty ? max(base, 8.0) : base
                 try? await Task.sleep(for: .seconds(interval))
             }
@@ -269,7 +275,60 @@ final class SessionWatcher {
 
         refreshCodexUsageIfNeeded()
         await refreshWorkingDirectories()
+        refreshTranscriptContent()
         writeStateDumpIfEnabled()
+    }
+
+    /// プライバシー設定を有効にした瞬間に、メモリ上の本文も消す。
+    /// 次のフックからは設定を戻すまで再取得しない。
+    func redactPreviewContent() {
+        for session in sessions {
+            session.preview = []
+            session.lastUserPrompt = nil
+            session.lastReply = nil
+            session.transcriptPath = nil
+            session.taskList = []
+        }
+    }
+
+    /// フックで得た記録末尾から、送信内容・返信・タスクを更新する。
+    /// 1回の読み込みを各項目で共有し、端末画面の状態には依存しない。
+    private func refreshTranscriptContent() {
+        guard !AppearancePreferences.hidePreviewText else { return }
+        for session in sessions {
+            refreshTranscriptContent(for: session)
+        }
+    }
+
+    private func refreshTranscriptContent(for session: MonitoredSession) {
+        guard !AppearancePreferences.hidePreviewText else { return }
+
+        if session.info.profile.id == CLIProfile.claude.id,
+           let sessionID = session.info.hookSessionID,
+           let tasks = TranscriptReader.latestClaudeTaskList(sessionID: sessionID) {
+            session.taskList = tasks
+        }
+
+        guard let path = session.transcriptPath,
+              let text = TranscriptReader.readTail(path: path)
+        else { return }
+
+        if let prompt = TranscriptReader.latestUserText(inJSONLines: text) {
+            session.lastUserPrompt = prompt
+        }
+        if session.info.profile.id != CLIProfile.claude.id,
+           let tasks = TranscriptReader.latestTaskList(inJSONLines: text) {
+            session.taskList = tasks
+        }
+        // 応答途中の本文も一覧・展開表示に追従させる。完了時はStop処理が
+        // 最終本文を確定するため、ここで古い本文を上書きしない。
+        if session.state == .thinking {
+            let answer = TranscriptReader.latestAssistantText(inJSONLines: text)
+            if !answer.isEmpty {
+                session.preview = answer
+                session.lastReply = answer.joined(separator: " ")
+            }
+        }
     }
 
     /// 各セッションの作業ディレクトリを解決する。
@@ -541,11 +600,24 @@ final class SessionWatcher {
         if event.kind != .sessionEnd { session.hookSessionEndedAt = nil }
 
         if isFirstHookConnection { session.state = .completed }
+        if let path = event.transcriptPath { session.transcriptPath = path }
+
         // 会話本文の表示を明示的に有効にしている場合だけ記録を読む。
-        if !AppearancePreferences.hidePreviewText,
-           let path = event.transcriptPath,
-           let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
-            session.lastUserPrompt = prompt
+        if !AppearancePreferences.hidePreviewText {
+            if event.kind == .userPromptSubmit {
+                // 新しい往復が始まったら、前の返信とタスクを混ぜない。
+                session.preview = []
+                session.lastReply = nil
+                session.taskList = []
+                if let prompt = event.prompt {
+                    session.lastUserPrompt = TranscriptReader.oneLine(prompt)
+                } else if let path = session.transcriptPath,
+                          let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
+                    session.lastUserPrompt = prompt
+                }
+            } else {
+                refreshTranscriptContent(for: session)
+            }
         }
         preferMonitorableSession()
 
@@ -601,7 +673,9 @@ final class SessionWatcher {
             // フックは完了を知らせるだけで本文を持たないため、記録から応答を読み出す
             let answer: [String]
             if !AppearancePreferences.hidePreviewText, let path = event.transcriptPath {
-                answer = TranscriptReader.latestAssistantText(transcriptPath: path)
+                answer = session.preview.isEmpty
+                    ? TranscriptReader.latestAssistantText(transcriptPath: path)
+                    : session.preview
             } else {
                 answer = []
             }

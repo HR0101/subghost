@@ -122,6 +122,18 @@ struct SessionsListLayoutTests {
     @Test func 多数のセッションでも一覧の最大高を超えない() {
         #expect(NotchLayout.sessionsListHeight(count: 100) == NotchLayout.sessionsListMaxHeight)
     }
+
+    @Test func 展開幅は内容に応じた最小限の幅になる() {
+        #expect(NotchLayout.contentWidth(for: .notification, notchWidth: 190) == 500)
+        #expect(NotchLayout.contentWidth(for: .sessions, notchWidth: 190) == 620)
+        #expect(NotchLayout.contentWidth(for: .activity, notchWidth: 190) == 620)
+        #expect(NotchLayout.contentWidth(for: .onboarding, notchWidth: 190) == 580)
+        #expect(NotchLayout.contentWidth(for: .sleep, notchWidth: 190) == 560)
+    }
+
+    @Test func 広いノッチでは左右の操作領域を確保する() {
+        #expect(NotchLayout.contentWidth(for: .sessions, notchWidth: 500) == 870)
+    }
 }
 
 struct ActivityStoreTests {
@@ -835,6 +847,15 @@ struct HookEventTests {
         #expect(event.kind.resultingState == .thinking)
     }
 
+    @Test func UserPromptSubmitの送信内容をフックから取り出す() {
+        let data = payload([
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "abc-123",
+            "prompt": "この内容をポップアップに表示して",
+        ])
+        #expect(HookEventDecoder.decode(data)?.prompt == "この内容をポップアップに表示して")
+    }
+
     @Test func 完了と失敗を別の状態として扱う() {
         #expect(HookEventKind.stop.resultingState == .completed)
         #expect(HookEventKind.stopFailure.resultingState == .error)
@@ -870,10 +891,8 @@ struct HookEventTests {
 
 struct HookInstallerTests {
 
-    @Test func ブリッジはtmuxも入力送信も起動しない() {
+    @Test func ブリッジはCLI入力やシェル設定を変更しない() {
         let script = HookInstaller.bridgeScript(socketPath: "/tmp/subghost.sock")
-        #expect(!script.contains("tmux"))
-        #expect(!script.contains("send-keys"))
         #expect(!script.contains(".zshrc"))
         #expect(script.contains("curl"))
         #expect(script.contains("${2:-\(HookInstaller.normalTimeoutSeconds)}"))
@@ -1093,38 +1112,92 @@ struct TranscriptReaderTests {
         #expect(TranscriptReader.latestUserText(inJSONLines: text) == "最後")
     }
 
+    @Test func CodexのresponseItemから送信内容と返答を読む() {
+        let text = """
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codexへの依頼"}]}}
+        {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codexからの返答"}]}}
+        """
+        #expect(TranscriptReader.latestUserText(inJSONLines: text) == "Codexへの依頼")
+        #expect(TranscriptReader.latestAssistantText(inJSONLines: text) == ["Codexからの返答"])
+    }
+
+    @Test func CodexのeventMessageも返答として読める() {
+        let text = """
+        {"type":"event_msg","payload":{"type":"agent_message","message":"イベント形式の返答"}}
+        """
+        #expect(TranscriptReader.latestAssistantText(inJSONLines: text) == ["イベント形式の返答"])
+    }
+
+    @Test func ClaudeのTodoWriteからAIタスクを読む() {
+        let text = """
+        {"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"記録形式を確認","activeForm":"記録形式を確認中","status":"completed"},{"content":"表示を実装","activeForm":"表示を実装中","status":"in_progress"}]}}]}}
+        """
+        let tasks = TranscriptReader.latestTaskList(inJSONLines: text)
+        #expect(tasks?.map(\.title) == ["記録形式を確認", "表示を実装"])
+        #expect(tasks?.map(\.status) == [.completed, .inProgress])
+        #expect(tasks?.last?.activeForm == "表示を実装中")
+    }
+
+    @Test func ClaudeのTaskCreateとTaskUpdateを差分として読む() {
+        let text = """
+        {"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskCreate","input":{"taskId":"task-1","subject":"テストを実行","description":"単体テスト","activeForm":"テストを実行中"}}]}}
+        {"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskUpdate","input":{"taskId":"task-1","status":"completed"}}]}}
+        """
+        let tasks = TranscriptReader.latestTaskList(inJSONLines: text)
+        #expect(tasks?.count == 1)
+        #expect(tasks?.first?.title == "テストを実行")
+        #expect(tasks?.first?.status == .completed)
+    }
+
+    @Test func Claudeのタスクファイルから最新状態を読む() {
+        let files = [
+            #"{"id":"1","subject":"取得層を実装","description":"JSONLを読む","activeForm":"取得層を実装中","status":"completed","blockedBy":[],"blocks":[]}"#,
+            #"{"id":"2","subject":"画面へ表示","description":"一覧と通知へ出す","activeForm":"画面へ表示中","status":"in_progress","blockedBy":[],"blocks":[]}"#
+        ]
+        let tasks = TranscriptReader.latestClaudeTaskList(inJSONFiles: files)
+        #expect(tasks?.map(\.id) == ["1", "2"])
+        #expect(tasks?.map(\.title) == ["取得層を実装", "画面へ表示"])
+        #expect(tasks?.map(\.status) == [.completed, .inProgress])
+    }
+
+    @Test func CodexのupdatePlanからAIタスクを読む() {
+        let text = #"""
+        {"type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"plan\":[{\"step\":\"取得層を実装\",\"status\":\"completed\"},{\"step\":\"UIを確認\",\"status\":\"in_progress\"}]}"}}
+        """#
+        let tasks = TranscriptReader.latestTaskList(inJSONLines: text)
+        #expect(tasks?.map(\.title) == ["取得層を実装", "UIを確認"])
+        #expect(tasks?.map(\.status) == [.completed, .inProgress])
+    }
+
+    @Test func CodexのcustomToolCall形式でもupdatePlanを読む() {
+        let text = """
+        {"type":"response_item","payload":{"type":"custom_tool_call","name":"update_plan","input":{"plan":[{"step":"記録を読む","status":"in_progress"}]}}}
+        """
+        let tasks = TranscriptReader.latestTaskList(inJSONLines: text)
+        #expect(tasks?.first?.title == "記録を読む")
+        #expect(tasks?.first?.status == .inProgress)
+    }
+
+    @Test func 空のタスクリストは明示的な空配列として返す() {
+        let text = """
+        {"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[]}}]}}
+        """
+        #expect(TranscriptReader.latestTaskList(inJSONLines: text) == [])
+    }
+
+    @Test func タスク記録が無ければnilを返す() {
+        let text = """
+        {"type":"assistant","message":{"content":[{"type":"text","text":"通常の返答"}]}}
+        """
+        #expect(TranscriptReader.latestTaskList(inJSONLines: text) == nil)
+    }
+
     @Test func 壊れた行を含んでも読める() {
         let text = """
         broken
         {"type":"assistant","message":{"content":[{"type":"text","text":"OK"}]}}
         """
         #expect(TranscriptReader.latestAssistantText(inJSONLines: text) == ["OK"])
-    }
-}
-
-struct ShellIntegrationTests {
-
-    @Test func 目印で囲んだブロックだけを取り除く() {
-        let zshrc = """
-        export PATH=/usr/bin
-        \(ShellIntegration.beginMarker)
-        [ -f "x" ] && . "x"
-        \(ShellIntegration.endMarker)
-        alias ll='ls -la'
-        """
-        let cleaned = ShellIntegration.removeBlock(from: zshrc)
-        #expect(cleaned.contains("export PATH=/usr/bin"))
-        #expect(cleaned.contains("alias ll='ls -la'"))
-        // Subghostのブロックは消える
-        #expect(!cleaned.contains("subghost"))
-        #expect(!cleaned.contains("_subghost"))
-    }
-
-    @Test func 既存の内容を壊さない() {
-        let original = "line1\nline2"
-        let cleaned = ShellIntegration.removeBlock(from: original)
-        #expect(cleaned.contains("line1"))
-        #expect(cleaned.contains("line2"))
     }
 }
 
@@ -1434,7 +1507,7 @@ struct TerminalJumpTests {
     }
 
     @Test func 祖先をたどってターミナルを特定する() {
-        // 742(tmuxクライアント) → 610(シェル) → 501(ターミナル.app)
+        // 742(ラッパープロセス) → 610(シェル) → 501(ターミナル.app)
         let parents: [Int32: Int32] = [742: 610, 610: 501, 501: 1]
         let terminals: [Int32: TerminalApp] = [501: .terminal]
 
@@ -1462,7 +1535,7 @@ struct TerminalJumpTests {
     }
 
     @Test func エディタの内蔵ターミナルもヘルパー経由で特定できる() {
-        // 実測値: 36186(tmux) → 34224(zsh) → 16536(Code Helper) → 16270(VS Code)
+        // 実測値: 36186(ラッパープロセス) → 34224(zsh) → 16536(Code Helper) → 16270(VS Code)
         // 内蔵ターミナルのシェルはヘルパープロセスの子であり、本体は祖先にしか現れない
         let parents: [Int32: Int32] = [36186: 34224, 34224: 16536, 16536: 16270, 16270: 1]
         let terminals: [Int32: TerminalApp] = [16270: .vscode]

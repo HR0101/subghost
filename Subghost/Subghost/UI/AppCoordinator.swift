@@ -72,8 +72,12 @@ final class AppCoordinator {
     // MARK: - 初回起動の案内
 
     @ObservationIgnored private static let hasCompletedOnboardingKey = "hasCompletedOnboarding"
-    @ObservationIgnored private static let migrationVersionKey = "migrationVersion"
-    @ObservationIgnored private static let currentMigrationVersion = 2
+    @ObservationIgnored private static let hookMigrationVersionKey = "hookMigrationVersion"
+    @ObservationIgnored private static let currentHookMigrationVersion = 1
+
+    private static func hookMigrationKey(for target: HookTarget) -> String {
+        "hookMigration.v\(currentHookMigrationVersion).\(target.rawValue)"
+    }
     private(set) var onboardingStep: OnboardingStep = .welcome
     /// フック有効化ボタンを押した結果（成功メッセージ／エラー）。ステップごとに保持する。
     var onboardingHookMessage: [HookTarget: String] = [:]
@@ -103,7 +107,7 @@ final class AppCoordinator {
             UserDefaults.standard.set(false, forKey: Self.hasCompletedOnboardingKey)
             UserDefaults.standard.set(false, forKey: "soundEnabled")
         } else {
-            migrateRemovedFeaturesIfNeeded()
+            migrateHookConfigurationIfNeeded()
         }
         // @Observableのストアドプロパティ初期化子からMainActor分離された設定を読むと、
         // Xcode 16.4ではマクロ展開後のコードがActor分離違反になる。起動時にMainActor上で
@@ -153,33 +157,29 @@ final class AppCoordinator {
         }
     }
 
-    /// 旧版がユーザー環境へ追加した自動tmux起動と旧フックを一度だけ片付ける。
-    private func migrateRemovedFeaturesIfNeeded() {
+    /// 既存のフックを現行の監視専用イベント集合へ更新する。
+    private func migrateHookConfigurationIfNeeded() {
         let defaults = UserDefaults.standard
-        let version = defaults.integer(forKey: Self.migrationVersionKey)
-        guard version < Self.currentMigrationVersion else { return }
-        var succeeded = true
+        let version = defaults.integer(forKey: Self.hookMigrationVersionKey)
+        guard version < Self.currentHookMigrationVersion else { return }
 
-        if version < 1 {
+        var migrationSucceeded = true
+        for target in HookTarget.allCases where HookInstaller.isInstalled(target) {
+            let targetKey = Self.hookMigrationKey(for: target)
+            guard !defaults.bool(forKey: targetKey) else { continue }
+
             do {
-                if ShellIntegration.isInstalled() { try ShellIntegration.uninstall() }
+                try HookInstaller.install(target)
+                defaults.set(true, forKey: targetKey)
             } catch {
-                succeeded = false
-                NSLog("Subghost: 旧tmux自動起動設定を解除できませんでした: \(error.localizedDescription)")
+                migrationSucceeded = false
+                NSLog("Subghost: \(target.displayName)の監視専用フックへ移行できませんでした: \(error.localizedDescription)")
             }
         }
 
-        if version < 2 {
-            do {
-                for target in HookTarget.allCases where HookInstaller.isInstalled(target) {
-                    try HookInstaller.install(target)
-                }
-            } catch {
-                succeeded = false
-                NSLog("Subghost: 監視専用フックへ移行できませんでした: \(error.localizedDescription)")
-            }
+        if migrationSucceeded {
+            defaults.set(Self.currentHookMigrationVersion, forKey: Self.hookMigrationVersionKey)
         }
-        if succeeded { defaults.set(Self.currentMigrationVersion, forKey: Self.migrationVersionKey) }
     }
 
     // MARK: - タスク完了後のスリープ (追補)
@@ -324,7 +324,13 @@ final class AppCoordinator {
         case .becameCompleted(let preview):
             activity.record(kind: .completed, session: session.info, preview: preview)
             SoundAlerts.shared.play(for: .completed, session: session.info)
-            NotificationManager.shared.notify(session: session.info, state: .completed, preview: preview)
+            NotificationManager.shared.notify(
+                session: session.info,
+                state: .completed,
+                preview: preview,
+                prompt: session.lastUserPrompt,
+                tasks: session.taskList
+            )
             // スリープ予約より先に通知・音を出す。寝る前に「何が終わったか」は必ず残す。
             sleepScheduler.noteFinished(SleepSessionSnapshot(info: session.info, state: .completed))
             if AlertGate.allowsAutoExpand(.completed, session: session.info) {
@@ -333,7 +339,13 @@ final class AppCoordinator {
         case .becameError(let preview):
             activity.record(kind: .error, session: session.info, preview: preview)
             SoundAlerts.shared.play(for: .error, session: session.info)
-            NotificationManager.shared.notify(session: session.info, state: .error, preview: preview)
+            NotificationManager.shared.notify(
+                session: session.info,
+                state: .error,
+                preview: preview,
+                prompt: session.lastUserPrompt,
+                tasks: session.taskList
+            )
             sleepScheduler.noteFinished(SleepSessionSnapshot(info: session.info, state: .error))
             if AlertGate.allowsAutoExpand(.error, session: session.info) {
                 showNotification(for: session)
@@ -438,7 +450,7 @@ final class AppCoordinator {
     func jumpToTerminal() {
         let target = notificationSession ?? watcher.activeSession
         if let target {
-            watcher.activeSessionName = target.info.id
+            watcher.chooseActiveSession(target.info.id)
             watcher.acknowledge(target)
         }
         if mode == .notification { collapse() }
