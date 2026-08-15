@@ -72,6 +72,12 @@ struct NotchPreferencesTests {
             defaults: defaults
         ))
     }
+
+    @Test func 展開ポップアップの既定角丸は内側CTAと調和する() {
+        #expect(AppearancePreferences.defaultExpandedCornerRadius == 18)
+        #expect(AppearancePreferences.defaultExpandedCornerRadius > 9)
+        #expect(AppearancePreferences.defaultExpandedCornerRadius < 28)
+    }
 }
 
 struct NotchSurfaceShapeTests {

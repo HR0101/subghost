@@ -59,7 +59,9 @@ nonisolated enum AppearancePreferences {
 
     // MARK: - 角丸
 
-    static let defaultExpandedCornerRadius: Double = 28
+    // 外枠だけがCTAより過度に丸くならないよう、ノッチらしい連続感を残しつつ
+    // 内側カード（8〜10pt）との段差が大きくなりすぎない既定値にする。
+    static let defaultExpandedCornerRadius: Double = 18
     static var expandedCornerRadiusRange: ClosedRange<Double> { 8...44 }
 
     /// 展開したときの下側の角丸。
