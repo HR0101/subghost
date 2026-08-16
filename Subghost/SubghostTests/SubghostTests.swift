@@ -140,6 +140,12 @@ struct PixelGhostAnimationTests {
         #expect(!GhostSprite.shouldAnimate(for: .completed))
         #expect(!GhostSprite.shouldAnimate(for: .error))
     }
+
+    @Test func 完了ゴーストは通常と同じ一ピクセルの目を使う() {
+        let (completed, _) = GhostSprite.frames(for: .completed)
+
+        #expect(completed == GhostSprite.idle)
+    }
 }
 
 struct SessionsListLayoutTests {
