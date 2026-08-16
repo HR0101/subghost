@@ -17,7 +17,6 @@ nonisolated enum NotchPreferences {
     static let notificationDisplayDurationKey = "notificationDisplayDuration"
     static let collapseOnMouseExitKey = "collapseOnMouseExit"
     static let closeOnOutsideClickKey = "closeOnOutsideClick"
-    static let hideUnmonitorableSessionsKey = "hideUnmonitorableSessions"
     static let hideInactiveSessionsKey = "hideInactiveSessions"
     static let inactiveSessionThresholdKey = "inactiveSessionThreshold"
 
@@ -66,11 +65,6 @@ nonisolated enum NotchPreferences {
     }
 
     // MARK: - 一覧に出さないセッション
-
-    /// フックに繋がっておらず、状態を監視できないセッションを一覧から外す。
-    static var hideUnmonitorableSessions: Bool {
-        bool(forKey: hideUnmonitorableSessionsKey, default: true)
-    }
 
     /// 一定時間まったく動きの無いセッションを一覧から外す
     static var hideInactiveSessions: Bool {

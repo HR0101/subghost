@@ -387,13 +387,11 @@ struct AgentDiscoveryTests {
 
     private func 表示判断入力(
         isActiveTarget: Bool = false,
-        isMonitorable: Bool = true,
         activityAt: Date,
         hiddenAtActivity: Date? = nil
     ) -> SessionVisibility.Input {
         SessionVisibility.Input(
             isActiveTarget: isActiveTarget,
-            isMonitorable: isMonitorable,
             activityAt: activityAt,
             hiddenAtActivity: hiddenAtActivity
         )
@@ -402,7 +400,6 @@ struct AgentDiscoveryTests {
     private var 既定ルール: SessionVisibility.Rules {
         SessionVisibility.Rules(
             revealAll: false,
-            hideUnmonitorable: true,
             hideInactive: true,
             inactiveThreshold: 1_800
         )
@@ -415,12 +412,6 @@ struct AgentDiscoveryTests {
         let fresh = 表示判断入力(activityAt: now.addingTimeInterval(-60))
         #expect(!SessionVisibility.isVisible(stale, rules: 既定ルール, at: now))
         #expect(SessionVisibility.isVisible(fresh, rules: 既定ルール, at: now))
-    }
-
-    @Test func 監視できないセッションは一覧から外す() {
-        let now = Date(timeIntervalSince1970: 100_000)
-        let input = 表示判断入力(isMonitorable: false, activityAt: now)
-        #expect(!SessionVisibility.isVisible(input, rules: 既定ルール, at: now))
     }
 
     @Test func 選択中のセッションは必ず表示する() {
@@ -451,7 +442,6 @@ struct AgentDiscoveryTests {
         var rules = 既定ルール
         rules.revealAll = true
         let input = 表示判断入力(
-            isMonitorable: false,
             activityAt: now.addingTimeInterval(-100_000),
             hiddenAtActivity: now
         )
@@ -462,32 +452,17 @@ struct AgentDiscoveryTests {
         let now = Date(timeIntervalSince1970: 100_000)
         var rules = 既定ルール
         rules.hideInactive = false
-        rules.hideUnmonitorable = false
-        let input = 表示判断入力(
-            isMonitorable: false, activityAt: now.addingTimeInterval(-100_000))
+        let input = 表示判断入力(activityAt: now.addingTimeInterval(-100_000))
         #expect(SessionVisibility.isVisible(input, rules: rules, at: now))
     }
 
-    // MARK: - できることの区分
-
-    private func セッション(hookID: String?) -> SessionInfo {
-        var info = SessionInfo(agent: DiscoveredAgent(
-            pid: 1, tty: "/dev/ttys006", profile: .claude))
-        info.hookSessionID = hookID
-        return info
-    }
-
-    @Test func フック接続なら状態を監視できるが送信はできない() {
-        let info = セッション(hookID: "abc")
-        #expect(info.capability == .monitorOnly)
-        #expect(info.isMonitorable)
-    }
+    // MARK: - フックセッション
 
     @Test func 同じTTYでもPIDが違えば別セッションとして識別する() {
-        let first = SessionInfo(agent: DiscoveredAgent(
-            pid: 101, tty: "/dev/ttys006", profile: .claude))
-        let second = SessionInfo(agent: DiscoveredAgent(
-            pid: 202, tty: "/dev/ttys006", profile: .claude))
+        let first = SessionInfo(
+            hookSource: "claude", sessionID: "first", pid: 101, tty: "/dev/ttys006", cwd: nil)
+        let second = SessionInfo(
+            hookSource: "claude", sessionID: "second", pid: 202, tty: "/dev/ttys006", cwd: nil)
         #expect(first.id != second.id)
     }
 
@@ -501,20 +476,12 @@ struct AgentDiscoveryTests {
         )
         #expect(info.id == "codex:hook:session-123")
         #expect(info.shortName == "バックグラウンド")
-        #expect(info.capability == .monitorOnly)
     }
 
-    @Test func フックが無ければ検出のみ() {
-        let info = セッション(hookID: nil)
-        #expect(info.capability == .detectedOnly)
-        #expect(!info.isMonitorable)
-    }
+    @Test func フックセッションは端末と作業ディレクトリを表示に使う() {
+        let outside = SessionInfo(
+            hookSource: "claude", sessionID: "session-123", pid: 2, tty: "/dev/ttys003", cwd: nil)
 
-    @Test func 検出したセッションは端末に直接対応する() {
-        let outside = SessionInfo(agent: DiscoveredAgent(
-            pid: 2, tty: "/dev/ttys003", profile: .claude))
-
-        #expect(!outside.isMonitorable)
         #expect(outside.displayName == "ttys003")
 
         // 作業ディレクトリが分かればフォルダ名を主体にする

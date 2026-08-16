@@ -478,12 +478,6 @@ struct NotchView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: 210, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08)))
-            } else if let session, !session.info.isMonitorable {
-                Text("このセッションはまだ状態を読めません。フック連携を有効にしていれば、CLIが動き出した時点で監視が始まります")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.orange.opacity(0.9))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 8)
             } else if AppearancePreferences.hidePreviewText {
                 Text("会話本文はプライバシー設定で非表示です")
                     .font(.system(size: 12))
@@ -822,7 +816,7 @@ struct NotchView: View {
                     Text("AI CLIを待っています")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(NotchVisualStyle.primaryText)
-                    Text("ターミナルでClaude CodeまたはCodex CLIを起動すると、\nここに作業状態が表示されます。")
+                    Text("フック連携を有効にしてCLIで作業すると、\nここに作業状態が表示されます。")
                         .font(.system(size: 11))
                         .foregroundStyle(NotchVisualStyle.secondaryText)
                         .multilineTextAlignment(.center)
@@ -863,7 +857,7 @@ struct NotchView: View {
                 .padding(.top, 1)
             } else if coordinator.watcher.hiddenSessionCount > 0 {
                 HStack(spacing: 6) {
-                    Text("他に \(coordinator.watcher.hiddenSessionCount) 件（放置・監視不可）")
+                    Text("他に \(coordinator.watcher.hiddenSessionCount) 件（放置中）")
                         .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.5))
                     Button("すべて表示") {
@@ -1525,12 +1519,6 @@ struct SessionRow: View {
                         HStack(spacing: 5) {
                             TagBadge(text: session.info.profile.displayName, tint: agentTint)
                             TagBadge(text: session.state.displayName, tint: stateTint)
-                            if !session.info.isMonitorable {
-                                TagBadge(
-                                    text: session.info.capabilityLabel,
-                                    tint: .orange.opacity(0.35)
-                                )
-                            }
                             if let terminal = session.info.terminalName {
                                 Label(terminal, systemImage: "terminal")
                                     .font(.system(size: 9, weight: .medium))
@@ -1698,9 +1686,6 @@ struct SessionRow: View {
             session.info.displayName,
             session.state.accessibilityDescription,
         ]
-        if !session.info.isMonitorable {
-            parts.append(session.info.capability.summary)
-        }
         if isActive { parts.append("選択中") }
         if isSleepReserved { parts.append("完了後にスリープを予約中") }
         if let prompt = session.lastUserPrompt, !prompt.isEmpty {
@@ -1747,8 +1732,8 @@ struct SessionRow: View {
         if let reply = session.lastReply, !reply.isEmpty {
             return AppearancePreferences.maskedPreview(reply)
         }
-        // 返信がまだ無いときだけ、監視できていれば状態を出す
-        return session.info.isMonitorable ? session.state.displayName : nil
+        // 返信がまだ無いときは、フックから受信した状態を出す
+        return session.state.displayName
     }
 
     private var taskSummary: String? {

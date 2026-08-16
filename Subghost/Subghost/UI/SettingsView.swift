@@ -246,8 +246,6 @@ private struct GeneralSettingsView: View {
     @AppStorage(NotchPreferences.notificationDisplayDurationKey) private var notificationDisplayDuration = 5.0
     @AppStorage(NotchPreferences.collapseOnMouseExitKey) private var collapseOnMouseExit = true
     @AppStorage(NotchPreferences.closeOnOutsideClickKey) private var closeOnOutsideClick = true
-    @AppStorage(NotchPreferences.hideUnmonitorableSessionsKey)
-    private var hideUnmonitorableSessions = true
     @AppStorage(NotchPreferences.hideInactiveSessionsKey) private var hideInactiveSessions = true
     @AppStorage(NotchPreferences.inactiveSessionThresholdKey)
     private var inactiveSessionThreshold = 1_800.0
@@ -312,11 +310,6 @@ private struct GeneralSettingsView: View {
             }
 
             Section("セッション一覧") {
-                Toggle("監視できないセッションを隠す", isOn: $hideUnmonitorableSessions)
-                Text("フックがまだ届いていないセッションです。状態を読むにはフック連携を有効にしてください。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
                 Toggle("しばらく動きの無いセッションを隠す", isOn: $hideInactiveSessions)
                 Stepper(
                     value: $inactiveSessionThreshold,
@@ -1278,7 +1271,7 @@ private struct SetupGuideView: View {
             Text("セットアップ")
                 .font(.headline)
 
-            Text("ターミナルで Claude Code または Codex を起動するとSubghostが自動的に検出します。状態監視には「フック連携」を有効にしてください。")
+            Text("「フック連携」を有効にすると、Claude Code または Codex の作業状態をSubghostへ表示できます。")
                 .font(.callout)
 
             GroupBox {
@@ -1556,16 +1549,16 @@ private struct SetupDiagnosticsView: View {
                 )
             }
 
-            Section("検出中のセッション") {
+            Section("監視中のセッション") {
                 if watcher.sessions.isEmpty {
-                    Text("AI CLIはまだ検出されていません")
+                    Text("フックを受信したAI CLIセッションはまだありません")
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(watcher.sessions) { session in
                         DiagnosticRow(
                             title: "\(session.info.profile.displayName) — \(session.info.displayName)",
                             detail: sessionDetail(session),
-                            health: session.info.isMonitorable ? .ready : .attention
+                            health: .ready
                         )
                     }
                 }
@@ -1600,12 +1593,10 @@ private struct SetupDiagnosticsView: View {
     }
 
     private func sessionDetail(_ session: MonitoredSession) -> String {
-        var parts = [
-            session.info.capabilityLabel,
-            "監視: \(session.info.monitoringSource)",
+        let parts = [
+            "フック監視",
             "TTY: \(session.info.shortName)",
         ]
-        if session.info.isHookConnected { parts.append("Hook接続済み") }
         return parts.joined(separator: " ／ ")
     }
 

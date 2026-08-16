@@ -119,7 +119,7 @@ nonisolated enum HotkeyAction: String, CaseIterable, Identifiable, Sendable {
 
     var detail: String {
         switch self {
-        case .showSessions: return "検出中のAI CLIを一覧で表示します"
+        case .showSessions: return "監視中のAI CLIを一覧で表示します"
         case .showActivity: return "完了したタスクの履歴を開きます"
         case .jumpToTerminal: return "選択中のセッションのタブへ移動します"
         case .toggleMute: return "アラート音を一時的に止めます"

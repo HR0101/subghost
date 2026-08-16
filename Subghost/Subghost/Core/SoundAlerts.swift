@@ -23,7 +23,7 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
     case appLaunched        // Subghost自体の起動
 
     // セッション
-    case sessionStart       // 新しいCLIセッションを検出
+    case sessionStart       // 新しいCLIセッションのフックを受信
     case completed          // AIがターンを完了
     case error              // ツールエラー / APIエラー
 
@@ -74,7 +74,7 @@ nonisolated enum AlertSound: String, CaseIterable, Sendable {
         switch self {
         case .appLaunched:
             // アプリ起動。ふわっと現れる印象の、緩やかな四和音アルペジオ。
-            // sessionStart（CLI検出）より一段長くして、区別しつつ起動完了の満足感を出す。
+            // sessionStart（CLIセッション受信）より一段長くして、区別しつつ起動完了の満足感を出す。
             return [ToneStep(frequency: 392, duration: 0.06),     // G4
                     ToneStep(frequency: 523, duration: 0.06),     // C5
                     ToneStep(frequency: 659, duration: 0.06),     // E5
