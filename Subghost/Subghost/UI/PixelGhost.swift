@@ -75,17 +75,6 @@ nonisolated enum GhostSprite {
         "#.##.#",
     ])
 
-    /// 完了。目を細めた満足げな表情。
-    /// 色（緑）だけに頼らず、形の違いだけでも待機中と区別できるようにする。
-    static let happy = PixelSprite(rows: [
-        ".####.",
-        "######",
-        "oo##oo",
-        "######",
-        "######",
-        "#.##.#",
-    ])
-
     /// エラー。口を開けた表情。
     /// 以前は待機中と同じ絵で色（赤）だけが差分だったため、色覚特性によっては
     /// 区別できなかった。口の有無という形の差を付けている。
@@ -104,7 +93,9 @@ nonisolated enum GhostSprite {
         case .idle:
             return (idle, blink)
         case .completed:
-            return (happy, happy)
+            // 完了は色と弾みで知らせる。目を横につなげた表情は使わず、
+            // 通常と同じ1pxの目を保つ。
+            return (idle, idle)
         case .thinking:
             return (idle, wave)
         case .error:

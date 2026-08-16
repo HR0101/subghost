@@ -442,15 +442,25 @@ final class NotchPanelController {
                           ))
         case .sessions:
             // 一覧は最大高を超えた分だけ内部スクロールする。
-            // 一覧に実際に出す件数で高さを決める（絞り込みで消えた分の余白を作らない）
-            let listHeight = NotchLayout.sessionsListHeight(
-                count: coordinator.watcher.visibleSessions.count
-            )
+            // 初期表示は通常行の高さで確保し、SwiftUI側で実測した高さへ直後に合わせる。
+            // 以前の固定120pt余白は、一覧の下に大きな黒い空白を生んでいた。
+            let visibleSessions = coordinator.watcher.visibleSessions
+            let listHeight = NotchLayout.sessionsListHeight(count: visibleSessions.count)
+            let hasSleepBanner = coordinator.sleepScheduler.countdown != nil
+                || coordinator.sleepScheduler.isReserved
+            let hasHiddenSessionsNotice = coordinator.watcher.revealsHiddenSessions
+                || coordinator.watcher.hiddenSessionCount > 0
+            let auxiliaryHeight: CGFloat = (hasSleepBanner ? 40 : 0)
+                + (hasHiddenSessionsNotice ? 18 : 0)
+            let contentHeight = visibleSessions.isEmpty
+                ? metrics.topInset + 120
+                : metrics.topInset + NotchLayout.sessionsContentPaddingHeight
+                    + listHeight + auxiliaryHeight
             size = NSSize(
                 width: NotchLayout.canvasWidth(
                     for: NotchLayout.contentWidth(for: mode, notchWidth: metrics.notchWidth)
                 ),
-                height: min(metrics.topInset + 120 + listHeight, 520))
+                height: min(contentHeight, 520))
         case .activity:
             let listHeight = min(
                 CGFloat(coordinator.activity.entries.count) * 66,
@@ -559,7 +569,10 @@ enum NotchLayout {
     static let topShoulderWidth: CGFloat = 12 // 画面上端とつなぐ外向きのカーブ
     static let collapseAnimationDuration: TimeInterval = 0.32
     /// セッションが増えてもノッチが画面下まで伸びないよう、一覧部分だけを制限する。
-    static let sessionRowEstimatedHeight: CGFloat = 74
+    /// 本文と返信を持つ通常のセッション行の高さ。実際の高さはSwiftUI側で測り直す。
+    static let sessionRowEstimatedHeight: CGFloat = 84
+    /// メニューバー帯と一覧の間隔・下余白。メニューバー自体の高さはtopInsetに含まれる。
+    static let sessionsContentPaddingHeight: CGFloat = 10
     /// 一覧に一度に見せる件数から高さを決める。これを超えるぶんはスクロールになる。
     static var sessionsListMaxHeight: CGFloat {
         CGFloat(AppearancePreferences.sessionListMaxRows) * sessionRowEstimatedHeight
@@ -567,6 +580,18 @@ enum NotchLayout {
 
     static func sessionsListHeight(count: Int) -> CGFloat {
         min(CGFloat(max(count, 0)) * sessionRowEstimatedHeight, sessionsListMaxHeight)
+    }
+
+    /// 実測できた後は件数見積りではなく実際の行高を優先する。
+    /// ただし設定した最大表示行ぶんの高さを超えた部分はScrollViewへ任せる。
+    static func sessionsListViewportHeight(
+        measuredContentHeight: CGFloat,
+        count: Int
+    ) -> CGFloat {
+        let idealHeight = measuredContentHeight > 0
+            ? measuredContentHeight
+            : sessionsListHeight(count: count)
+        return min(idealHeight, sessionsListMaxHeight)
     }
 
     /// 通知ポップアップの初期高さ。会話カードは本文行だけでなく見出し・余白を

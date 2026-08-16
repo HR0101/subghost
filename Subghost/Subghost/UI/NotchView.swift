@@ -28,6 +28,57 @@ private enum NotchVisualStyle {
     static let selectedBorder = accent.opacity(0.34)
 }
 
+/// CLIが返すMarkdownを、ポップアップ用の読みやすいネイティブ表現へ変換する。
+/// 壊れた途中応答でもカード全体を空にしないよう、部分的に解析できる場合はその結果を使う。
+nonisolated enum MarkdownPreview {
+    static func source(from lines: [String]) -> String {
+        lines.joined(separator: "\n")
+    }
+
+    static func attributedString(_ markdown: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .full,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        return (try? AttributedString(markdown: markdown, options: options))
+            ?? AttributedString(markdown)
+    }
+}
+
+/// 見出し・箇条書き・強調・リンクなどを保持したまま、会話カード内でMarkdownを表示する。
+private struct MarkdownPreviewText: View {
+    let markdown: String
+
+    var body: some View {
+        Text(MarkdownPreview.attributedString(markdown))
+            .font(.system(size: 12))
+            .foregroundStyle(.white.opacity(0.88))
+            .lineSpacing(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
+    }
+}
+
+/// セッション行の実測高。本文やAIタスクの有無で行高が変わるため、件数だけでは
+/// スクロール領域を正しく決められない。
+private struct SessionListContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// セッション一覧全体の実測高。NSPanelを内容ぴったりへ縮めるために使う。
+private struct SessionsContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 /// 物理ノッチと展開パネルを、1本の連続したパスとして描画する。
 struct NotchSurfaceShape: Shape {
     var progress: CGFloat
@@ -143,6 +194,8 @@ struct NotchView: View {
     @State private var transitionID = UUID()
     /// ゴーストへの「覗き込み」合図（コンパクト表示にマウスが乗るたびに+1）
     @State private var ghostPeekTrigger = 0
+    /// ScrollView内の行を実測した高さ。セッションの本文・タスク数が変わるたび更新する。
+    @State private var measuredSessionListHeight: CGFloat = 0
 
     /// 黒い面の濃さ。
     /// コンパクト時は必ず不透明にする（物理ノッチと地続きに見せる必要があるため）。
@@ -190,17 +243,6 @@ struct NotchView: View {
                     )
                 )
                 .opacity(morphProgress)
-            surfaceShape
-                .stroke(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.14), Color.white.opacity(0.025)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 1
-                )
-                .opacity(morphProgress)
-
             content(for: renderedMode)
                 .frame(width: contentWidth(for: renderedMode))
                 // 内容の差し替えで輪郭まで新しいビューにしない。
@@ -218,11 +260,18 @@ struct NotchView: View {
                 }
                 // 実際の内容高をパネルの最終寸法に反映する。
                 .background(
-                    GeometryReader { proxy in
-                        Color.clear
-                            .onChange(of: proxy.size.height, initial: true) { _, height in
-                                coordinator.reportContentHeight(height, for: renderedMode)
+                    Group {
+                        // セッション一覧だけは、内部ScrollViewの実測高を使う。
+                        // 外側で測ると、NSPanelが先に確保した余白まで内容高として
+                        // 返ってしまい、下の黒い余白を縮められない。
+                        if renderedMode != .sessions {
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .onChange(of: proxy.size.height, initial: true) { _, height in
+                                        coordinator.reportContentHeight(height, for: renderedMode)
+                                    }
                             }
+                        }
                     }
                 )
         }
@@ -656,7 +705,7 @@ struct NotchView: View {
                     previewSection(
                         title: "送信内容",
                         systemImage: "arrow.up.right",
-                        lines: [displayedPrompt],
+                        markdown: displayedPrompt,
                         tint: NotchVisualStyle.accent
                     )
                 }
@@ -664,7 +713,7 @@ struct NotchView: View {
                     previewSection(
                         title: "返答",
                         systemImage: "arrow.down.left",
-                        lines: displayedReply,
+                        markdown: MarkdownPreview.source(from: displayedReply),
                         tint: .green
                     )
                 }
@@ -750,7 +799,7 @@ struct NotchView: View {
     private func previewSection(
         title: String,
         systemImage: String,
-        lines: [String],
+        markdown: String,
         tint: Color
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -758,14 +807,7 @@ struct NotchView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(tint.opacity(0.95))
 
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                Text(line)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.88))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
+            MarkdownPreviewText(markdown: markdown)
         }
     }
 
@@ -796,9 +838,20 @@ struct NotchView: View {
                         }
                     }
                     .padding(.trailing, 3)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: SessionListContentHeightKey.self,
+                                value: proxy.size.height
+                            )
+                        }
+                    )
                 }
                 .scrollIndicators(.visible)
-                .frame(height: NotchLayout.sessionsListHeight(count: visible.count))
+                .frame(height: NotchLayout.sessionsListViewportHeight(
+                    measuredContentHeight: measuredSessionListHeight,
+                    count: visible.count
+                ))
             }
 
             if coordinator.watcher.sessions.isEmpty {
@@ -872,6 +925,25 @@ struct NotchView: View {
         }
         .padding(.horizontal, NotchLayout.expandedHorizontalPadding)
         .padding(.bottom, NotchLayout.expandedBottomPadding)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: SessionsContentHeightKey.self,
+                    value: proxy.size.height
+                )
+            }
+        )
+        .onPreferenceChange(SessionListContentHeightKey.self) { height in
+            let measured = ceil(height)
+            guard measured > 0,
+                  abs(measuredSessionListHeight - measured) > 0.5
+            else { return }
+            measuredSessionListHeight = measured
+        }
+        .onPreferenceChange(SessionsContentHeightKey.self) { height in
+            guard height > 0 else { return }
+            coordinator.reportContentHeight(height, for: .sessions)
+        }
     }
 
     /// 物理ノッチの左右にあるメニューバー帯を、情報と操作の置き場として使う。

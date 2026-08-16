@@ -93,6 +93,18 @@ struct NotchPreferencesTests {
     }
 }
 
+struct MarkdownPreviewTests {
+    @Test func Markdownの記法をネイティブ表示用の文字列へ解析する() {
+        let rendered = MarkdownPreview.attributedString("**太字** と `code`")
+
+        #expect(String(rendered.characters) == "太字 と code")
+    }
+
+    @Test func 返信の複数行をMarkdown文書としてつなぐ() {
+        #expect(MarkdownPreview.source(from: ["## 見出し", "", "- 項目"]) == "## 見出し\n\n- 項目")
+    }
+}
+
 struct NotchSurfaceShapeTests {
     private let canvas = CGRect(x: 0, y: 0, width: 800, height: 400)
     private let compactWidth: CGFloat = 278
@@ -140,6 +152,12 @@ struct PixelGhostAnimationTests {
         #expect(!GhostSprite.shouldAnimate(for: .completed))
         #expect(!GhostSprite.shouldAnimate(for: .error))
     }
+
+    @Test func 完了ゴーストは通常と同じ一ピクセルの目を使う() {
+        let (completed, _) = GhostSprite.frames(for: .completed)
+
+        #expect(completed == GhostSprite.idle)
+    }
 }
 
 struct SessionsListLayoutTests {
@@ -153,6 +171,24 @@ struct SessionsListLayoutTests {
 
     @Test func 多数のセッションでも一覧の最大高を超えない() {
         #expect(NotchLayout.sessionsListHeight(count: 100) == NotchLayout.sessionsListMaxHeight)
+    }
+
+    @Test func 実測した行高を優先して一覧の下端を切らない() {
+        #expect(
+            NotchLayout.sessionsListViewportHeight(
+                measuredContentHeight: 246,
+                count: 3
+            ) == 246
+        )
+    }
+
+    @Test func 実測高が大きくても一覧の最大高を超えない() {
+        #expect(
+            NotchLayout.sessionsListViewportHeight(
+                measuredContentHeight: 9_999,
+                count: 3
+            ) == NotchLayout.sessionsListMaxHeight
+        )
     }
 
     @Test func 展開幅は内容に応じた最小限の幅になる() {
