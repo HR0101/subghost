@@ -93,6 +93,18 @@ struct NotchPreferencesTests {
     }
 }
 
+struct MarkdownPreviewTests {
+    @Test func Markdownの記法をネイティブ表示用の文字列へ解析する() {
+        let rendered = MarkdownPreview.attributedString("**太字** と `code`")
+
+        #expect(String(rendered.characters) == "太字 と code")
+    }
+
+    @Test func 返信の複数行をMarkdown文書としてつなぐ() {
+        #expect(MarkdownPreview.source(from: ["## 見出し", "", "- 項目"]) == "## 見出し\n\n- 項目")
+    }
+}
+
 struct NotchSurfaceShapeTests {
     private let canvas = CGRect(x: 0, y: 0, width: 800, height: 400)
     private let compactWidth: CGFloat = 278

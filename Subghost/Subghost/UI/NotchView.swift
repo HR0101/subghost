@@ -28,6 +28,39 @@ private enum NotchVisualStyle {
     static let selectedBorder = accent.opacity(0.34)
 }
 
+/// 会話カード向けの簡易Markdown整形。
+/// `Text(AttributedString)` で太字・インラインコード・箇条書き・見出しなどを
+/// ネイティブ描画し、等幅カードの可読性を上げる。
+nonisolated enum MarkdownPreview {
+    static func source(from lines: [String]) -> String {
+        lines.joined(separator: "\n")
+    }
+
+    static func attributedString(_ markdown: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .full,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        return (try? AttributedString(markdown: markdown, options: options))
+            ?? AttributedString(markdown)
+    }
+}
+
+/// 見出し・箇条書き・強調・リンクなどを保持したまま、会話カード内でMarkdownを表示する。
+private struct MarkdownPreviewText: View {
+    let markdown: String
+
+    var body: some View {
+        Text(MarkdownPreview.attributedString(markdown))
+            .font(.system(size: 12))
+            .foregroundStyle(.white.opacity(0.88))
+            .lineSpacing(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
+    }
+}
+
 /// 物理ノッチと展開パネルを、1本の連続したパスとして描画する。
 struct NotchSurfaceShape: Shape {
     var progress: CGFloat
@@ -656,7 +689,7 @@ struct NotchView: View {
                     previewSection(
                         title: "送信内容",
                         systemImage: "arrow.up.right",
-                        lines: [displayedPrompt],
+                        markdown: displayedPrompt,
                         tint: NotchVisualStyle.accent
                     )
                 }
@@ -664,7 +697,7 @@ struct NotchView: View {
                     previewSection(
                         title: "返答",
                         systemImage: "arrow.down.left",
-                        lines: displayedReply,
+                        markdown: MarkdownPreview.source(from: displayedReply),
                         tint: .green
                     )
                 }
@@ -750,7 +783,7 @@ struct NotchView: View {
     private func previewSection(
         title: String,
         systemImage: String,
-        lines: [String],
+        markdown: String,
         tint: Color
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -758,14 +791,7 @@ struct NotchView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(tint.opacity(0.95))
 
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                Text(line)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.88))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
+            MarkdownPreviewText(markdown: markdown)
         }
     }
 
