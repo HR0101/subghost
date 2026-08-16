@@ -452,11 +452,11 @@ struct NotchView: View {
                    || !session.preview.isEmpty
                    || session.lastReply?.isEmpty == false
                    || !session.taskList.isEmpty {
-                conversationPreview(
-                    prompt: session.lastUserPrompt,
-                    reply: session.preview.isEmpty
-                        ? (session.lastReply.map { [$0] } ?? [])
-                        : session.preview,
+               conversationPreview(
+                   prompt: session.lastUserPrompt,
+                   reply: session.preview.isEmpty
+                       ? (session.lastReply.map { [$0] } ?? [])
+                       : session.preview,
                     tasks: session.taskList
                 )
             } else if let rawPreview = session?.preview, !rawPreview.isEmpty {
@@ -640,7 +640,6 @@ struct NotchView: View {
         let hours = minutes / 60
         return hours < 24 ? "\(hours)h" : "\(hours / 24)d"
     }
-
     /// transcriptを読める環境では、完了通知の中に直近の往復をまとめて出す。
     /// 本文はCLIフックが渡す入力とローカル記録から得る。
     private func conversationPreview(

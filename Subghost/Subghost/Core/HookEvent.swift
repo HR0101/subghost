@@ -134,7 +134,6 @@ nonisolated enum HookEventDecoder {
         }
         return nil
     }
-
     /// イベント名のキーはCLIによって異なるため、候補を順に探す
     static func eventName(in dict: [String: Any]) -> String? {
         let candidateKeys = ["hook_event_name", "hookEventName", "hook_event", "event_name", "event"]

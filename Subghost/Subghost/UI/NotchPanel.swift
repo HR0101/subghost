@@ -604,7 +604,6 @@ enum NotchLayout {
         let minimum: CGFloat = sectionCount > 1 ? 250 : 200
         return min(max(chromeHeight + previewHeight, minimum), 480)
     }
-
     /// 展開内容の幅。NSPanelとSwiftUIで共有し、透明な余白や内容の切れを防ぐ。
     static func contentWidth(for mode: NotchMode, notchWidth: CGFloat) -> CGFloat {
         switch mode {

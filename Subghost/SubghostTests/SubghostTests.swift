@@ -879,7 +879,6 @@ struct HookEventTests {
         #expect(event?.transcriptPath == "/tmp/transcript.jsonl")
         #expect(event?.lastAssistantMessage == "完了しました。返答本文です。")
     }
-
     @Test func 完了と失敗を別の状態として扱う() {
         #expect(HookEventKind.stop.resultingState == .completed)
         #expect(HookEventKind.stopFailure.resultingState == .error)
@@ -1142,7 +1141,6 @@ struct TranscriptReaderTests {
         """
         #expect(TranscriptReader.latestUserText(inJSONLines: text) == "1行目\n2行目")
     }
-
     @Test func CodexのresponseItemから送信内容と返答を読む() {
         let text = """
         {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codexへの依頼"}]}}
