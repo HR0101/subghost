@@ -75,7 +75,6 @@ enum SettingsStore {
         NotchPreferences.notificationDisplayDurationKey,
         NotchPreferences.collapseOnMouseExitKey,
         NotchPreferences.closeOnOutsideClickKey,
-        NotchPreferences.hideUnmonitorableSessionsKey,
         NotchPreferences.hideInactiveSessionsKey,
         NotchPreferences.inactiveSessionThresholdKey,
         SleepPreferences.countdownKey,

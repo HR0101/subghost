@@ -59,6 +59,38 @@ struct NotchPreferencesTests {
         #expect(NotchPreferences.normalizedExpansionAnimationDuration(0.65) == 0.65)
         #expect(NotchPreferences.normalizedExpansionAnimationDuration(3) == 1.20)
     }
+
+    @Test func 会話本文は既定で表示する() {
+        let suiteName = "SubghostTests.Appearance.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(!AppearancePreferences.defaultHidePreviewText)
+        #expect(!NotchPreferences.bool(
+            forKey: AppearancePreferences.hidePreviewTextKey,
+            default: AppearancePreferences.defaultHidePreviewText,
+            defaults: defaults
+        ))
+    }
+
+    @Test func 展開ポップアップの既定角丸は内側CTAと調和する() {
+        #expect(AppearancePreferences.defaultExpandedCornerRadius == 18)
+        #expect(AppearancePreferences.defaultExpandedCornerRadius > 9)
+        #expect(AppearancePreferences.defaultExpandedCornerRadius < 28)
+    }
+
+    @Test func Codex使用量は既定で取得する() {
+        let suiteName = "SubghostTests.Usage.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(UsagePreferences.defaultCodexCollectionEnabled)
+        #expect(NotchPreferences.bool(
+            forKey: UsagePreferences.codexCollectionEnabledKey,
+            default: UsagePreferences.defaultCodexCollectionEnabled,
+            defaults: defaults
+        ))
+    }
 }
 
 struct NotchSurfaceShapeTests {
@@ -124,7 +156,7 @@ struct SessionsListLayoutTests {
     }
 
     @Test func 展開幅は内容に応じた最小限の幅になる() {
-        #expect(NotchLayout.contentWidth(for: .notification, notchWidth: 190) == 500)
+        #expect(NotchLayout.contentWidth(for: .notification, notchWidth: 190) == 660)
         #expect(NotchLayout.contentWidth(for: .sessions, notchWidth: 190) == 620)
         #expect(NotchLayout.contentWidth(for: .activity, notchWidth: 190) == 620)
         #expect(NotchLayout.contentWidth(for: .onboarding, notchWidth: 190) == 580)
@@ -133,6 +165,19 @@ struct SessionsListLayoutTests {
 
     @Test func 広いノッチでは左右の操作領域を確保する() {
         #expect(NotchLayout.contentWidth(for: .sessions, notchWidth: 500) == 870)
+    }
+
+    @Test func 通知では送信内容と返答の両方に必要な高さを確保する() {
+        let oneCard = NotchLayout.notificationHeight(
+            topInset: 30, hasPrompt: true, replyLineCount: 0, taskCount: 0
+        )
+        let twoCards = NotchLayout.notificationHeight(
+            topInset: 30, hasPrompt: true, replyLineCount: 1, taskCount: 0
+        )
+
+        #expect(oneCard == 200)
+        #expect(twoCards >= 250)
+        #expect(twoCards > oneCard)
     }
 }
 
@@ -342,13 +387,11 @@ struct AgentDiscoveryTests {
 
     private func 表示判断入力(
         isActiveTarget: Bool = false,
-        isMonitorable: Bool = true,
         activityAt: Date,
         hiddenAtActivity: Date? = nil
     ) -> SessionVisibility.Input {
         SessionVisibility.Input(
             isActiveTarget: isActiveTarget,
-            isMonitorable: isMonitorable,
             activityAt: activityAt,
             hiddenAtActivity: hiddenAtActivity
         )
@@ -357,7 +400,6 @@ struct AgentDiscoveryTests {
     private var 既定ルール: SessionVisibility.Rules {
         SessionVisibility.Rules(
             revealAll: false,
-            hideUnmonitorable: true,
             hideInactive: true,
             inactiveThreshold: 1_800
         )
@@ -370,12 +412,6 @@ struct AgentDiscoveryTests {
         let fresh = 表示判断入力(activityAt: now.addingTimeInterval(-60))
         #expect(!SessionVisibility.isVisible(stale, rules: 既定ルール, at: now))
         #expect(SessionVisibility.isVisible(fresh, rules: 既定ルール, at: now))
-    }
-
-    @Test func 監視できないセッションは一覧から外す() {
-        let now = Date(timeIntervalSince1970: 100_000)
-        let input = 表示判断入力(isMonitorable: false, activityAt: now)
-        #expect(!SessionVisibility.isVisible(input, rules: 既定ルール, at: now))
     }
 
     @Test func 選択中のセッションは必ず表示する() {
@@ -406,7 +442,6 @@ struct AgentDiscoveryTests {
         var rules = 既定ルール
         rules.revealAll = true
         let input = 表示判断入力(
-            isMonitorable: false,
             activityAt: now.addingTimeInterval(-100_000),
             hiddenAtActivity: now
         )
@@ -417,32 +452,17 @@ struct AgentDiscoveryTests {
         let now = Date(timeIntervalSince1970: 100_000)
         var rules = 既定ルール
         rules.hideInactive = false
-        rules.hideUnmonitorable = false
-        let input = 表示判断入力(
-            isMonitorable: false, activityAt: now.addingTimeInterval(-100_000))
+        let input = 表示判断入力(activityAt: now.addingTimeInterval(-100_000))
         #expect(SessionVisibility.isVisible(input, rules: rules, at: now))
     }
 
-    // MARK: - できることの区分
-
-    private func セッション(hookID: String?) -> SessionInfo {
-        var info = SessionInfo(agent: DiscoveredAgent(
-            pid: 1, tty: "/dev/ttys006", profile: .claude))
-        info.hookSessionID = hookID
-        return info
-    }
-
-    @Test func フック接続なら状態を監視できるが送信はできない() {
-        let info = セッション(hookID: "abc")
-        #expect(info.capability == .monitorOnly)
-        #expect(info.isMonitorable)
-    }
+    // MARK: - フックセッション
 
     @Test func 同じTTYでもPIDが違えば別セッションとして識別する() {
-        let first = SessionInfo(agent: DiscoveredAgent(
-            pid: 101, tty: "/dev/ttys006", profile: .claude))
-        let second = SessionInfo(agent: DiscoveredAgent(
-            pid: 202, tty: "/dev/ttys006", profile: .claude))
+        let first = SessionInfo(
+            hookSource: "claude", sessionID: "first", pid: 101, tty: "/dev/ttys006", cwd: nil)
+        let second = SessionInfo(
+            hookSource: "claude", sessionID: "second", pid: 202, tty: "/dev/ttys006", cwd: nil)
         #expect(first.id != second.id)
     }
 
@@ -456,20 +476,12 @@ struct AgentDiscoveryTests {
         )
         #expect(info.id == "codex:hook:session-123")
         #expect(info.shortName == "バックグラウンド")
-        #expect(info.capability == .monitorOnly)
     }
 
-    @Test func フックが無ければ検出のみ() {
-        let info = セッション(hookID: nil)
-        #expect(info.capability == .detectedOnly)
-        #expect(!info.isMonitorable)
-    }
+    @Test func フックセッションは端末と作業ディレクトリを表示に使う() {
+        let outside = SessionInfo(
+            hookSource: "claude", sessionID: "session-123", pid: 2, tty: "/dev/ttys003", cwd: nil)
 
-    @Test func 検出したセッションは端末に直接対応する() {
-        let outside = SessionInfo(agent: DiscoveredAgent(
-            pid: 2, tty: "/dev/ttys003", profile: .claude))
-
-        #expect(!outside.isMonitorable)
         #expect(outside.displayName == "ttys003")
 
         // 作業ディレクトリが分かればフォルダ名を主体にする
@@ -856,6 +868,17 @@ struct HookEventTests {
         #expect(HookEventDecoder.decode(data)?.prompt == "この内容をポップアップに表示して")
     }
 
+    @Test func Stopのインライン返答をポップアップ用に取り出す() {
+        let data = payload([
+            "hook_event_name": "Stop",
+            "session_id": "abc-123",
+            "transcript_path": "/tmp/transcript.jsonl",
+            "last_assistant_message": "完了しました。返答本文です。",
+        ])
+        let event = HookEventDecoder.decode(data)
+        #expect(event?.transcriptPath == "/tmp/transcript.jsonl")
+        #expect(event?.lastAssistantMessage == "完了しました。返答本文です。")
+    }
     @Test func 完了と失敗を別の状態として扱う() {
         #expect(HookEventKind.stop.resultingState == .completed)
         #expect(HookEventKind.stopFailure.resultingState == .error)
@@ -1112,6 +1135,12 @@ struct TranscriptReaderTests {
         #expect(TranscriptReader.latestUserText(inJSONLines: text) == "最後")
     }
 
+    @Test func ユーザー本文は改行を保ったまま読む() {
+        let text = """
+        {"type":"user","message":{"content":[{"type":"text","text":"1行目\\n2行目"}]}}
+        """
+        #expect(TranscriptReader.latestUserText(inJSONLines: text) == "1行目\n2行目")
+    }
     @Test func CodexのresponseItemから送信内容と返答を読む() {
         let text = """
         {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codexへの依頼"}]}}
@@ -1272,6 +1301,17 @@ struct UsageParserTests {
         let usage = UsageParser.parseCodexRateLimits(inJSONLines: jsonl)
         #expect(usage?.sevenDay?.usedPercent == 6.0)
         #expect(usage?.fiveHour == nil)
+    }
+
+    @Test func CodexのeventMsg形式でもレート制限を取り出す() {
+        // 旧版Codexでは payload.type が token_count ではなく event_msg だが、
+        // rate_limits の構造は同じ。
+        let jsonl = """
+        {"type":"event_msg","payload":{"type":"event_msg","rate_limits":{"primary":{"used_percent":11.0,"window_minutes":300,"resets_at":1785000000},"secondary":{"used_percent":2.0,"window_minutes":10080,"resets_at":1785069709}}}}
+        """
+        let usage = UsageParser.parseCodexRateLimits(inJSONLines: jsonl)
+        #expect(usage?.fiveHour?.usedPercent == 11.0)
+        #expect(usage?.sevenDay?.usedPercent == 2.0)
     }
 
     @Test func Codexのレート制限が無い記録では何も返さない() {

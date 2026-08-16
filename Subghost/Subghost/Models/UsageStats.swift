@@ -23,9 +23,15 @@ nonisolated enum UsagePreferences {
     static let defaultCritical: Double = 90
     static var thresholdRange: ClosedRange<Double> { 50...99 }
 
-    /// Codexのセッション記録を使用量取得のために読むか。状態監視には不要なので既定は無効。
+    /// Codexのセッション記録を使用量取得のために読むか。
+    /// 読み取るのはレート制限イベントだけで、会話本文は保存・表示しない。
+    static let defaultCodexCollectionEnabled = true
+
     static var isCodexCollectionEnabled: Bool {
-        NotchPreferences.bool(forKey: codexCollectionEnabledKey, default: false)
+        NotchPreferences.bool(
+            forKey: codexCollectionEnabledKey,
+            default: defaultCodexCollectionEnabled
+        )
     }
 
     static var warningThreshold: Double {
@@ -151,7 +157,8 @@ extension UsageParser {
     /// Codexのセッション記録(JSONL)から直近のレート制限を取り出す。
     ///
     /// Claude Code とは形式が異なる:
-    ///   - `event_msg` の `token_count` に入っている
+    ///   - `event_msg` の `rate_limits` に入っている（Codexのバージョンにより
+    ///     payload.type は `token_count` または `event_msg`）
     ///   - キーは `used_percent`（Claudeは `used_percentage`）
     ///   - 枠は primary / secondary という名前で、実際の期間は `window_minutes` で判別する
     static func parseCodexRateLimits(inJSONLines text: String, now: Date = Date()) -> UsageStats? {
@@ -161,7 +168,6 @@ extension UsageParser {
             guard let data = line.data(using: .utf8),
                   let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let payload = record["payload"] as? [String: Any],
-                  payload["type"] as? String == "token_count",
                   let limits = payload["rate_limits"] as? [String: Any]
             else { continue }
 

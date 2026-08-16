@@ -59,7 +59,9 @@ nonisolated enum AppearancePreferences {
 
     // MARK: - 角丸
 
-    static let defaultExpandedCornerRadius: Double = 28
+    // 外枠だけがCTAより過度に丸くならないよう、ノッチらしい連続感を残しつつ
+    // 内側カード（8〜10pt）との段差が大きくなりすぎない既定値にする。
+    static let defaultExpandedCornerRadius: Double = 18
     static var expandedCornerRadiusRange: ClosedRange<Double> { 8...44 }
 
     /// 展開したときの下側の角丸。
@@ -77,8 +79,11 @@ nonisolated enum AppearancePreferences {
 
     /// 応答本文のプレビューをノッチと履歴で伏せる。
     /// 画面共有や録画のときに、会話の中身が映り込まないようにするため。
+    /// 通常利用ではノッチの主目的である会話の確認を優先し、既定では表示する。
+    static let defaultHidePreviewText = false
+
     static var hidePreviewText: Bool {
-        NotchPreferences.bool(forKey: hidePreviewTextKey, default: true)
+        NotchPreferences.bool(forKey: hidePreviewTextKey, default: defaultHidePreviewText)
     }
 
     /// 伏せ字にすべきときはプレースホルダを返す

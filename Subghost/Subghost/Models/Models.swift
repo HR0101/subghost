@@ -5,9 +5,9 @@
 //  設計書 8. データモデル
 //
 //  アプリ全体で共有する値型の定義をまとめた場所。
-//  AI状態(AIState)、CLIごとの検出情報(CLIProfile)、
+//  AI状態(AIState)、CLIごとのプロセス照合情報(CLIProfile)、
 //  ユーザー登録の起動名(CustomAlias)、
-//  検出したセッション1件(SessionInfo)。
+//  フック受信セッション1件(SessionInfo)。
 //  いずれも振る舞いを持たない純粋なデータで、I/Oは Core 側が担う。
 //
 
@@ -50,7 +50,7 @@ nonisolated enum AIState: String, Codable, Sendable {
 
 // MARK: - CLIプロファイル (設計書 2.1 / 8.1)
 
-/// AI CLIごとのプロセス検出情報。
+/// AI CLIごとのプロセス照合情報。
 nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
     let id: String              // "claude" | "codex" | "antigravity"
     let displayName: String
@@ -81,8 +81,8 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
     static let builtins: [CLIProfile] = [.claude, .codex, .antigravity]
 
     /// ビルトインのプロファイルに、ユーザー登録のカスタムエイリアス名を合成して返す。
-    /// (実行ファイル名が違うだけで実体は同じCLIを、独自の名前やラッパースクリプトで
-    /// 起動している場合に、そのCLIとして検出できるようにするため)
+    /// 実行ファイル名が異なるラッパースクリプト等でも、フック済みセッションのPIDと
+    /// TTYを照合できるようにする。
     static func withCustomAliases(_ aliases: [CustomAlias]) -> [CLIProfile] {
         var result = builtins
         for alias in aliases {
@@ -102,7 +102,7 @@ nonisolated struct CLIProfile: Codable, Sendable, Identifiable, Hashable {
 // MARK: - カスタムエイリアス (設計書 追補: ユーザー独自のCLI起動名)
 
 /// ユーザーが登録した、既存CLIプロファイルに紐づく追加の実行ファイル名。
-/// 例: 独自のラッパースクリプト「codexA」をCodexとして検出させたい場合。
+/// 例: 独自のラッパースクリプト「codexA」をCodexのセッションとして照合したい場合。
 nonisolated struct CustomAlias: Codable, Sendable, Identifiable, Hashable {
     let id: UUID
     /// psのcommに現れる実行ファイル名（大文字小文字は区別しない）
@@ -124,51 +124,9 @@ nonisolated struct CustomAlias: Codable, Sendable, Identifiable, Hashable {
     }
 }
 
-// MARK: - セッションに対してできること
+// MARK: - セッション情報 (設計書 8.1)
 
-/// Subghostがそのセッションに対して何をできるかの区分。
-///
-/// 監視はフック接続の有無だけで決まる。
-/// 判断はこの型に集約し、UIはこれを見て出し分ける。
-nonisolated enum SessionCapability: Int, Sendable, Comparable, CaseIterable {
-    /// 検出しただけ。状態は読めず、送信もできない。ターミナルのタブへ移動できるのみ。
-    case detectedOnly
-    /// フックで状態と完了通知を受け取れる監視専用セッション。
-    case monitorOnly
-
-    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
-
-    /// 一覧のバッジ用の短い名前
-    var label: String {
-        switch self {
-        case .detectedOnly: return "検出のみ"
-        case .monitorOnly: return "監視中"
-        }
-    }
-
-    /// この段階に到達するために必要な構成（設定画面の一覧に出す）
-    var requirement: String {
-        switch self {
-        case .detectedOnly: return "設定不要"
-        case .monitorOnly: return "フック登録"
-        }
-    }
-
-    /// 何ができるのかを一文で説明する（支援技術の読み上げと補足文に使う）
-    var summary: String {
-        switch self {
-        case .detectedOnly:
-            return "起動は検出できていますが、状態はまだ取得できません。"
-                + "フックを登録すると状態が分かるようになります。"
-        case .monitorOnly:
-            return "AI CLIの作業途中／完了を監視しています。"
-        }
-    }
-}
-
-// MARK: - セッション情報 (設計書 8.1、追補: ゼロコンフィグ検出)
-
-/// 検出したAI CLI 1つ分の識別情報。
+/// フックを受信したAI CLIセッション1つ分の識別情報。
 /// PIDまたはCLI側のhook session_idを同一性の軸にする。
 /// TTYはターミナルへ移動するための属性であり、セッションIDには使わない。
 nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
@@ -180,28 +138,15 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
     var hookSessionID: String?
     /// フック経由で得た作業ディレクトリ名（表示用）
     var projectName: String?
-    /// プロセスの作業ディレクトリ（表示用）。psで見つけたセッションでも解決する。
+    /// プロセスの作業ディレクトリ（表示用）。
     var workingDirectory: String?
-    /// 動作しているターミナルの名前（表示用）。検出時に一度だけ解決する。
+    /// 動作しているターミナルの名前（表示用）。フック受信時に一度だけ解決する。
     var terminalName: String?
 
     var id: String {
         if pid > 0 { return "\(profile.id):pid:\(pid)" }
         return "\(profile.id):hook:\(hookSessionID ?? "unknown")"
     }
-
-    /// フック方式で監視できているか
-    var isHookConnected: Bool { hookSessionID != nil }
-
-    /// このセッションに対してSubghostが何をできるか。
-    /// UIの出し分けは必ずここを見る。
-    var capability: SessionCapability {
-        if isHookConnected { return .monitorOnly }
-        return .detectedOnly
-    }
-
-    /// 状態を読めるか。未接続なら検出とタブ移動のみ。
-    var isMonitorable: Bool { capability >= .monitorOnly }
 
     /// "ttys004" のような短い表示名
     var shortName: String {
@@ -221,15 +166,6 @@ nonisolated struct SessionInfo: Sendable, Identifiable, Hashable {
     var displayName: String {
         folderName ?? shortName
     }
-
-    /// 監視の経路（表示・診断用）
-    var monitoringSource: String {
-        if isHookConnected { return "フック" }
-        return "なし"
-    }
-
-    /// 一覧のバッジに出す、できることの短い説明
-    var capabilityLabel: String { capability.label }
 
     init(agent: DiscoveredAgent) {
         self.tty = agent.tty

@@ -5,8 +5,8 @@
 //  設計書 3.3: SessionWatcher（CLIフックの監視、状態遷移の判定）
 //            SessionManager（監視対象セッションの選択・切替）
 //
-//  監視の中枢。検出したセッションを MonitoredSession として保持し、
-//  一定間隔の pollOnce() でプロセスの生存を確認し、状態はCLIフックで更新する。
+//  監視の中枢。フック受信セッションを MonitoredSession として保持し、
+//  一定間隔の pollOnce() で補助情報を更新し、状態はCLIフックで更新する。
 //
 //  状態監視はCLIフックだけを正とする。端末画面の解析と入力送信は行わない。
 //
@@ -36,8 +36,6 @@ nonisolated enum SessionVisibility {
     struct Input {
         /// 現在ユーザーが選択しているセッションか
         var isActiveTarget: Bool
-        /// フックで監視できるか
-        var isMonitorable: Bool
         /// 最後に動きがあった時刻
         var activityAt: Date
         /// 手動で一覧から外したときの活動時刻。以降に動きがあれば自動で戻す。
@@ -48,7 +46,6 @@ nonisolated enum SessionVisibility {
     struct Rules {
         /// 「すべて表示」中は絞り込みを行わない
         var revealAll: Bool
-        var hideUnmonitorable: Bool
         var hideInactive: Bool
         var inactiveThreshold: TimeInterval
     }
@@ -62,7 +59,6 @@ nonisolated enum SessionVisibility {
         if let hiddenAt = input.hiddenAtActivity, input.activityAt <= hiddenAt {
             return false
         }
-        if rules.hideUnmonitorable, !input.isMonitorable { return false }
         if rules.hideInactive,
            now.timeIntervalSince(input.activityAt) >= rules.inactiveThreshold {
             return false
@@ -128,7 +124,7 @@ final class MonitoredSession: Identifiable {
 
 }
 
-/// ai-* セッションの検出・ポーリング・状態遷移イベントの発火を担う。
+/// フック受信セッションのポーリング・状態遷移イベントの発火を担う。
 @MainActor
 @Observable
 final class SessionWatcher {
@@ -147,11 +143,6 @@ final class SessionWatcher {
     func chooseActiveSession(_ id: String) {
         activeSessionName = id
         isActiveSessionUserChosen = true
-    }
-
-    /// 検出はできたが監視も操作もできないセッションがあるか
-    var hasUnmonitorableSession: Bool {
-        sessions.contains { !$0.info.isMonitorable }
     }
 
     /// CLIごとの使用量。Claudeはstatusline経由、Codexはセッション記録から取得する。
@@ -217,13 +208,11 @@ final class SessionWatcher {
         SessionVisibility.isVisible(
             SessionVisibility.Input(
                 isActiveTarget: session.info.id == activeSessionName,
-                isMonitorable: session.info.isMonitorable,
                 activityAt: session.effectiveActivityAt,
                 hiddenAtActivity: session.hiddenAtActivity
             ),
             rules: SessionVisibility.Rules(
                 revealAll: revealsHiddenSessions,
-                hideUnmonitorable: NotchPreferences.hideUnmonitorableSessions,
                 hideInactive: NotchPreferences.hideInactiveSessions,
                 inactiveThreshold: NotchPreferences.inactiveSessionThreshold
             ),
@@ -269,7 +258,7 @@ final class SessionWatcher {
     var customAliases: [CustomAlias] = []
 
     func pollOnce() async {
-        // 1. 実行中プロセスからAI CLIを検出する（エイリアス・命名規則に依存しない）
+        // フック済みセッションのPID・TTY情報を更新する。ここで新規セッションは作らない。
         let agents = await AgentDiscovery.discover(profiles: CLIProfile.withCustomAliases(customAliases))
         reconcile(agents: agents)
 
@@ -352,7 +341,7 @@ final class SessionWatcher {
     }
 
     /// Codexの使用量をセッション記録から読み出す。
-    /// Codexにはstatuslineの仕組みが無いため、記録の `token_count` イベントを見る。
+    /// Codexにはstatuslineの仕組みが無いため、記録のレート制限イベントを見る。
     @ObservationIgnored private var lastCodexUsageRefreshAt: Date?
 
     private func refreshCodexUsageIfNeeded(at now: Date = Date()) {
@@ -393,8 +382,6 @@ final class SessionWatcher {
                     "pid": Int(session.info.pid),
                     "profile": session.info.profile.id,
                     "state": session.state.rawValue,
-                    "isMonitorable": session.info.isMonitorable,
-                    "monitoringSource": session.info.monitoringSource,
                     "hookSessionID": session.info.hookSessionID ?? "(なし)",
                     "lastActivitySecondsAgo": Date().timeIntervalSince(session.lastActivityAt),
                 ]
@@ -414,12 +401,12 @@ final class SessionWatcher {
     private func reconcile(agents: [DiscoveredAgent]) {
         let incoming = Dictionary(uniqueKeysWithValues: agents.map { (SessionInfo(agent: $0).id, $0) })
 
-        // ps由来で、まだフックと結び付いていない消滅プロセスだけを外す。
-        // フック由来のバックグラウンドセッションはpsに出ないため保持する。
+        // セッションはフック受信時だけに作る。終了フックを受けたものだけ、
+        // 完了表示の猶予を置いて一覧から外す。
         let now = Date()
         sessions.removeAll {
             if let endedAt = $0.hookSessionEndedAt, now.timeIntervalSince(endedAt) >= 60 { return true }
-            return incoming[$0.info.id] == nil && !$0.info.isHookConnected
+            return false
         }
 
         for session in sessions {
@@ -430,14 +417,6 @@ final class SessionWatcher {
             refreshed.workingDirectory = session.info.workingDirectory
             refreshed.terminalName = session.info.terminalName
             session.replaceInfoPreservingState(refreshed)
-        }
-
-        let existing = Set(sessions.map { $0.info.id })
-        for agent in agents where !existing.contains(SessionInfo(agent: agent).id) {
-            var info = SessionInfo(agent: agent)
-            // ターミナルの特定はプロセス走査を伴うため、検出時に一度だけ行う
-            info.terminalName = resolveTerminalName(for: info)
-            sessions.append(MonitoredSession(info: info))
         }
 
         // 表示順を安定させる（CLI種別 → tty）
@@ -456,29 +435,13 @@ final class SessionWatcher {
             activeSessionName = saved.flatMap { savedID in
                 sessions.contains(where: { $0.info.id == savedID }) ? savedID : nil
             }
-                // 監視できるセッションを優先して選ぶ
-                ?? sessions.first { $0.info.isMonitorable }?.info.id
                 ?? sessions.first?.info.id
         }
-        preferMonitorableSession()
     }
 
     /// そのセッションが動いているターミナルの名前を求める
     private func resolveTerminalName(for info: SessionInfo) -> String? {
         TerminalActivator.hostingTerminal(tty: info.tty)?.displayName
-    }
-
-    /// 選択中の対象が監視できないままなら、監視できるものへ移す。
-    ///
-    /// フックは「CLIが動いたとき」にしか発火しないため、放置されたセッションは
-    /// いつまでも監視不可のままになる。そちらが選ばれていると、実際には動作している
-    /// セッションがあるのに「監視できません」と表示され続けてしまう。
-    private func preferMonitorableSession() {
-        // ユーザーが明示的に選んだ対象は勝手に変えない。
-        guard !isActiveSessionUserChosen else { return }
-        guard let active = activeSession, !active.info.isMonitorable else { return }
-        guard let better = sessions.first(where: { $0.info.isMonitorable }) else { return }
-        activeSessionName = better.info.id
     }
 
     // MARK: - 表示対象の切替 (設計書 4.3: 複数セッションの選択)
@@ -519,7 +482,7 @@ final class SessionWatcher {
 
     // MARK: - フック方式
 
-    /// フック受信サーバを起動する。失敗時はプロセス検出だけを続ける。
+    /// フック受信サーバを起動する。
     func startHookServer() {
         guard hookServer == nil else { return }
 
@@ -590,8 +553,6 @@ final class SessionWatcher {
             return
         }
 
-        // このセッションはフックで監視できていると記録する
-        let isFirstHookConnection = session.info.hookSessionID == nil
         var info = session.info
         info.hookSessionID = event.sessionID
         info.projectName = event.projectName
@@ -599,7 +560,6 @@ final class SessionWatcher {
         session.lastActivityAt = Date()
         if event.kind != .sessionEnd { session.hookSessionEndedAt = nil }
 
-        if isFirstHookConnection { session.state = .completed }
         if let path = event.transcriptPath { session.transcriptPath = path }
 
         // 会話本文の表示を明示的に有効にしている場合だけ記録を読む。
@@ -610,7 +570,10 @@ final class SessionWatcher {
                 session.lastReply = nil
                 session.taskList = []
                 if let prompt = event.prompt {
-                    session.lastUserPrompt = TranscriptReader.oneLine(prompt)
+                    // ポップアップでは送信した文章そのものを読めるよう、フックが
+                    // 直接渡した本文は省略せず保持する。コンパクトな一覧側では
+                    // lineLimitで表示量を制限する。
+                    session.lastUserPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
                 } else if let path = session.transcriptPath,
                           let prompt = TranscriptReader.latestUserText(transcriptPath: path) {
                     session.lastUserPrompt = prompt
@@ -619,8 +582,6 @@ final class SessionWatcher {
                 refreshTranscriptContent(for: session)
             }
         }
-        preferMonitorableSession()
-
         applyHook(event: event, to: session)
         writeStateDumpIfEnabled(trigger: "hook:\(event.kind.rawValue)")
     }
@@ -651,16 +612,22 @@ final class SessionWatcher {
         guard !event.sessionID.isEmpty,
               CLIProfile.builtins.contains(where: { $0.id == request.source })
         else { return nil }
-        let info = SessionInfo(
+        var info = SessionInfo(
             hookSource: request.source,
             sessionID: event.sessionID,
             pid: request.pid,
             tty: request.tty,
             cwd: event.cwd
         )
+        info.terminalName = resolveTerminalName(for: info)
         let session = MonitoredSession(info: info)
         sessions.append(session)
         sessions.sort { ($0.info.profile.id, $0.info.id) < ($1.info.profile.id, $1.info.id) }
+        if activeSessionName == nil
+            || !sessions.contains(where: { $0.info.id == activeSessionName }) {
+            isActiveSessionUserChosen = false
+            activeSessionName = session.info.id
+        }
         return session
     }
 
@@ -672,10 +639,20 @@ final class SessionWatcher {
         case .stop:
             // フックは完了を知らせるだけで本文を持たないため、記録から応答を読み出す
             let answer: [String]
-            if !AppearancePreferences.hidePreviewText, let path = event.transcriptPath {
-                answer = session.preview.isEmpty
-                    ? TranscriptReader.latestAssistantText(transcriptPath: path)
-                    : session.preview
+            if !AppearancePreferences.hidePreviewText {
+                let inlineAnswer = event.lastAssistantMessage.map {
+                    TranscriptReader.normalize($0)
+                } ?? []
+                let path = event.transcriptPath ?? session.transcriptPath
+                if !inlineAnswer.isEmpty {
+                    answer = inlineAnswer
+                } else if !session.preview.isEmpty {
+                    answer = session.preview
+                } else if let path {
+                    answer = TranscriptReader.latestAssistantText(transcriptPath: path)
+                } else {
+                    answer = []
+                }
             } else {
                 answer = []
             }
