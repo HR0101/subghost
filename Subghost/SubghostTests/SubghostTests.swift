@@ -173,6 +173,24 @@ struct SessionsListLayoutTests {
         #expect(NotchLayout.sessionsListHeight(count: 100) == NotchLayout.sessionsListMaxHeight)
     }
 
+    @Test func 実測した行高を優先して一覧の下端を切らない() {
+        #expect(
+            NotchLayout.sessionsListViewportHeight(
+                measuredContentHeight: 246,
+                count: 3
+            ) == 246
+        )
+    }
+
+    @Test func 実測高が大きくても一覧の最大高を超えない() {
+        #expect(
+            NotchLayout.sessionsListViewportHeight(
+                measuredContentHeight: 9_999,
+                count: 3
+            ) == NotchLayout.sessionsListMaxHeight
+        )
+    }
+
     @Test func 展開幅は内容に応じた最小限の幅になる() {
         #expect(NotchLayout.contentWidth(for: .notification, notchWidth: 190) == 660)
         #expect(NotchLayout.contentWidth(for: .sessions, notchWidth: 190) == 620)
